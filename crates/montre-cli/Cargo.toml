@@ -1,0 +1,25 @@
+[package]
+name = "montre-cli"
+description = "Command-line interface for Montre corpus query engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "montre"
+path = "src/main.rs"
+
+[dependencies]
+montre-core = { workspace = true }
+montre-index = { workspace = true }
+montre-query = { workspace = true }
+montre-build = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+tempfile = "3.14"

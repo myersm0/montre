@@ -1,0 +1,16 @@
+[package]
+name = "montre-py"
+description = "Python bindings for Montre corpus query engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "montre"
+crate-type = ["cdylib"]
+
+[dependencies]
+montre-core = { workspace = true }
+montre-index = { workspace = true }
+montre-query = { workspace = true }
+pyo3 = { workspace = true }
