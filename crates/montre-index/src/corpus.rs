@@ -6,7 +6,7 @@ use crate::forward::InMemoryForward;
 use crate::inverted::InMemoryInverted;
 use crate::lexicon::InMemoryLexicon;
 use crate::spans::InMemorySpans;
-use crate::{IndexError, Result};
+use crate::{IndexError, Result, SpanIndex};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CorpusMeta {
@@ -15,6 +15,8 @@ pub struct CorpusMeta {
 	pub token_count: u64,
 	pub layers: Vec<String>,
 	pub span_layers: Vec<String>,
+	#[serde(default)]
+	pub document_names: Vec<String>,
 }
 
 pub struct Corpus {
@@ -90,5 +92,19 @@ impl Corpus {
 
 	pub fn span_layers(&self) -> &[String] {
 		&self.meta.span_layers
+	}
+
+	pub fn document_names(&self) -> &[String] {
+		&self.meta.document_names
+	}
+
+	pub fn document_at(&self, position: u64) -> Option<&str> {
+		let doc_spans = self.spans.spans("document")?;
+		for (i, span) in doc_spans.iter().enumerate() {
+			if position >= span.start && position < span.end {
+				return self.meta.document_names.get(i).map(|s| s.as_str());
+			}
+		}
+		None
 	}
 }

@@ -80,6 +80,37 @@ fn main() -> Result<()> {
 	}
 }
 
+fn collect_conllu_files(dir: &PathBuf) -> Result<Vec<PathBuf>> {
+	let mut files = Vec::new();
+	collect_conllu_recursive(dir, &mut files)?;
+	files.sort();
+	Ok(files)
+}
+
+fn collect_conllu_recursive(dir: &PathBuf, files: &mut Vec<PathBuf>) -> Result<()> {
+	if dir.is_file() {
+		if matches!(dir.extension().and_then(|e| e.to_str()), Some("conllu" | "conll")) {
+			files.push(dir.clone());
+		}
+		return Ok(());
+	}
+
+	for entry in std::fs::read_dir(dir)
+		.with_context(|| format!("Failed to read directory: {}", dir.display()))?
+	{
+		let entry = entry?;
+		let path = entry.path();
+
+		if path.is_dir() {
+			collect_conllu_recursive(&path, files)?;
+		} else if matches!(path.extension().and_then(|e| e.to_str()), Some("conllu" | "conll")) {
+			files.push(path);
+		}
+	}
+
+	Ok(())
+}
+
 fn cmd_build(input: PathBuf, output: PathBuf, name: Option<String>, force: bool) -> Result<()> {
 	if output.exists() && !force {
 		anyhow::bail!(
@@ -96,20 +127,50 @@ fn cmd_build(input: PathBuf, output: PathBuf, name: Option<String>, force: bool)
 			.to_string()
 	});
 
-	tracing::info!("Building corpus '{}' from {}", corpus_name, input.display());
+	let files = collect_conllu_files(&input)?;
 
-	let file = File::open(&input)
-		.with_context(|| format!("Failed to open input file: {}", input.display()))?;
+	if files.is_empty() {
+		anyhow::bail!("No .conllu files found in {}", input.display());
+	}
 
-	let mut reader = ConllUReader::new(file);
-	let sentences = reader.read_sentences()
-		.with_context(|| "Failed to parse input file")?;
+	tracing::info!(
+		"Building corpus '{}' from {} files in {}",
+		corpus_name,
+		files.len(),
+		input.display()
+	);
 
-	let token_count: usize = sentences.iter().map(|s| s.tokens.len()).sum();
-	tracing::info!("Parsed {} sentences, {} tokens", sentences.len(), token_count);
+	let mut builder = CorpusBuilder::new(&corpus_name);
+	let mut total_sentences = 0usize;
 
-	let mut builder = CorpusBuilder::new(corpus_name);
-	builder.add_sentences(sentences);
+	for file_path in &files {
+		let doc_name = file_path
+			.file_name()
+			.and_then(|n| n.to_str())
+			.unwrap_or("unknown")
+			.to_string();
+
+		let file = File::open(file_path)
+			.with_context(|| format!("Failed to open: {}", file_path.display()))?;
+
+		let mut reader = ConllUReader::new(file);
+		let sentences = reader.read_sentences()
+			.with_context(|| format!("Failed to parse: {}", file_path.display()))?;
+
+		let sentence_count = sentences.len();
+		builder.add_document(&doc_name, sentences);
+		total_sentences += sentence_count;
+
+		tracing::debug!("  {} sentences from {}", sentence_count, doc_name);
+	}
+
+	tracing::info!(
+		"Parsed {} documents, {} sentences, {} tokens",
+		builder.document_count(),
+		total_sentences,
+		builder.current_position()
+	);
+
 	builder.build(&output)
 		.with_context(|| "Failed to build corpus")?;
 
@@ -153,32 +214,39 @@ fn cmd_query(corpus_path: PathBuf, query: String, limit: usize, count_only: bool
 		let start_ctx = hit.span.start.saturating_sub(context_size);
 		let end_ctx = (hit.span.end + context_size).min(corpus.token_count());
 
-		let mut line = String::new();
+		let doc_name = corpus.document_at(hit.span.start).unwrap_or("?");
 
+		let mut left = String::new();
 		for pos in start_ctx..hit.span.start {
 			if let Some(montre_core::Value::Str(w)) = corpus.forward.get(pos, "word") {
-				line.push_str(w);
-				line.push(' ');
+				left.push_str(w);
+				left.push(' ');
 			}
 		}
 
-		line.push_str(">>> ");
+		let mut match_text = String::new();
 		for pos in hit.span.start..hit.span.end {
 			if let Some(montre_core::Value::Str(w)) = corpus.forward.get(pos, "word") {
-				line.push_str(w);
-				line.push(' ');
+				match_text.push_str(w);
+				match_text.push(' ');
 			}
 		}
-		line.push_str("<<< ");
 
+		let mut right = String::new();
 		for pos in hit.span.end..end_ctx {
 			if let Some(montre_core::Value::Str(w)) = corpus.forward.get(pos, "word") {
-				line.push_str(w);
-				line.push(' ');
+				right.push_str(w);
+				right.push(' ');
 			}
 		}
 
-		println!("{:>8}: {}", hit.span.start, line.trim());
+		println!(
+			"{:<30} {:>20} >>> {} <<< {}",
+			doc_name,
+			left.trim(),
+			match_text.trim(),
+			right.trim()
+		);
 	}
 
 	Ok(())
@@ -191,6 +259,7 @@ fn cmd_info(corpus_path: PathBuf) -> Result<()> {
 	println!("Corpus: {}", corpus.name());
 	println!("Path: {}", corpus.path().display());
 	println!("Tokens: {}", corpus.token_count());
+	println!("Documents: {}", corpus.document_names().len());
 	println!("Layers: {}", corpus.layers().join(", "));
 	println!("Span layers: {}", corpus.span_layers().join(", "));
 
