@@ -470,16 +470,20 @@ Note: Not all constructs will be implemented simultaneously. Early versions prio
 
 ## Benchmarks
 
-Preliminary numbers on Apple M2 Max, 1.2M token corpus (French prose):
+Preliminary numbers on maupassant-en corpus on an Apple M4 Pro (English corpus with 589K tokens, 180 documents):
 
-| Query | Matches | Time |
-|-------|---------|------|
-| `[pos="NOUN"]` | 187,432 | 12ms |
-| `[pos="DET"] [pos="NOUN"]` | 89,201 | 28ms |
-| `[word="maison"]` | 847 | 0.4ms |
-| `[lemma="être"]` | 24,891 | 3ms |
+| Operation | Time |
+|-----------|------|
+| Build (debug) | ~5s |
+| Build (release) | ~2s |
+| Query: rare word (3 hits) | 4-7µs |
+| Query: common word (25K hits) | 66µs |
+| Query: 2-token sequence (250 hits) | 260µs |
+| Query: 3-token sequence (3.8K hits) | 2ms |
 
-Index size: 42MB (tokens: 1.2M, vocabulary: 89K)
+Index size: ~53MB (source CoNLL-U: ~15MB)
+- Inverted index: 7MB
+- Forward index: 46MB
 
 ## Error handling
 
