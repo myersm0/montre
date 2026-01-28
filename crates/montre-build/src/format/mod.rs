@@ -3,6 +3,8 @@ pub mod conllu;
 use crate::Result;
 use montre_core::Span;
 
+pub use conllu::ParseStats;
+
 pub struct ParsedSentence {
 	pub tokens: Vec<ParsedToken>,
 	pub span: Span,

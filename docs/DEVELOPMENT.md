@@ -1,8 +1,8 @@
-# Montre Development Guide
+# Montre development guide
 
-## Design Principles
+## Design principles
 
-### Corpus as Value
+### Corpus as value
 
 A Montre corpus is a self-contained, immutable directory produced by `montre build`. All data required for querying—tokens, annotations, document boundaries, span layers, and alignment relations—lives within this directory.
 
@@ -12,13 +12,13 @@ Montre does not rely on:
 - External configuration files
 - Shared indexes or system-wide state
 
-This matters because many legacy corpus engines (CWB, BlackLab) use service-oriented or registry-based models that complicate embedding, reproducibility, and portability. Montre takes the opposite approach: one path → one corpus → one semantic universe.
+Montre takes the approach: one path → one corpus → one semantic universe.
 
-### Engine First, Presentation Last
+### Engine first, presentation last
 
 The query engine returns structured results (spans, IDs). Display concerns (KWIC formatting, highlighting, pagination) belong in the CLI or UI layer, not the core engine. This keeps the engine language-agnostic and embeddable.
 
-### Parallelism as Internal Relation
+### Parallelism as internal relation
 
 Parallel corpora are not "two corpora joined at query time." They are one corpus with multiple components and named alignment relations between them. This ensures:
 - Stable identity (the corpus is one artifact)
@@ -63,7 +63,7 @@ Components remain independently queryable. You can query `maupassant-fr` as if t
                     └───────────────┘
 ```
 
-### Crate Responsibilities
+### Crate responsibilities
 
 | Crate | Purpose | Depends On |
 |-------|---------|------------|
@@ -74,9 +74,9 @@ Components remain independently queryable. You can query `maupassant-fr` as if t
 | `montre-cli` | Command-line interface | all of the above |
 | `montre-py` | Python bindings (future) | all of the above |
 
-## Data Model
+## Data model
 
-### Core Entities
+### Core entities
 
 **Token**: A position in the corpus with annotations across multiple layers.
 
@@ -113,7 +113,7 @@ struct Alignment {
 type UnitId = (u32, u32);  // (document_index, unit_index_within_doc)
 ```
 
-**Future: Weighted Alignment Edges** (v0.2+)
+**Future: weighted alignment edges** (v0.2+)
 
 Neural aligners (LaBSE, vecalign) and even Church-Gale produce confidence scores. A future edge format will support:
 
@@ -128,7 +128,7 @@ struct AlignmentEdge {
 
 This enables threshold filtering (`--min-confidence 0.7`) and empirical comparison of alignment algorithms.
 
-**Non-Exhaustive Alignments**
+**Non-exhaustive alignments**
 
 Not every unit must participate in an alignment. Missing edges are semantically meaningful, not errors. This is essential for:
 - Truncated translations (Baudelaire omitting Poe passages)
@@ -136,7 +136,7 @@ Not every unit must participate in an alignment. Missing edges are semantically 
 - Translator omissions or additions
 - Reference corpora with no parallel text
 
-### Query Result Model
+### Query result model
 
 Each hit includes structural context for filtering, grouping, and alignment projection:
 
@@ -151,9 +151,9 @@ pub struct Hit {
 
 No strings, no formatting, no KWIC. The engine returns positions and IDs; display is the CLI's job.
 
-## Corpus Directory Layout
+## Corpus directory layout
 
-### Simple Corpus (single-component)
+### Simple corpus (single-component)
 
 ```
 my-corpus/
@@ -164,7 +164,7 @@ my-corpus/
 └── lexicon.bin          # term dictionary
 ```
 
-### Multi-Component Corpus with Alignments
+### Multi-component corpus with alignments
 
 ```
 isosceles/
@@ -189,7 +189,7 @@ isosceles/
         └── ...
 ```
 
-### Alignment Metadata
+### Alignment metadata
 
 ```json
 {
@@ -202,7 +202,7 @@ isosceles/
 }
 ```
 
-## Span Layers
+## Span layers
 
 Span layers are extensible. Beyond the implicit `sentence` (from CoNLL-U blank lines) and `document` (from file boundaries), corpora can define:
 
@@ -227,15 +227,15 @@ scene = "marker:# SCENE"
 
 Alignment can cross layer types (paragraph ↔ stanza) for cases like prose poems translated into verse.
 
-## Build Configuration
+## Build configuration
 
-### Single-File Build
+### Single-file build
 
 ```bash
 montre build -i corpus.conllu -o my-corpus/
 ```
 
-### Multi-Component Build (Manifest)
+### Multi-component build (manifest)
 
 ```toml
 # isosceles.toml
@@ -292,7 +292,7 @@ edges = "alignments/poe_1850_baud.tsv"
 montre build -m isosceles.toml -o isosceles/
 ```
 
-## Query Pipeline
+## Query pipeline
 
 ```
 CQL string
@@ -326,7 +326,7 @@ CQL string
   Results (Vec<Hit>)
 ```
 
-## Query Syntax Reference
+## Query syntax reference
 
 ### Implemented (Phase 0-1)
 
@@ -397,7 +397,7 @@ This is distinct from "show aligned pairs" (a separate display/export operation)
 
 Note: Not all constructs will be implemented simultaneously. Early versions prioritize semantic correctness over syntactic completeness.
 
-## Implementation Status
+## Implementation status
 
 ### Phase 0: Foundation ✓
 
@@ -481,9 +481,9 @@ Preliminary numbers on Apple M2 Max, 1.2M token corpus (French prose):
 
 Index size: 42MB (tokens: 1.2M, vocabulary: 89K)
 
-## Error Handling
+## Error handling
 
-### CoNLL-U Parsing
+### CoNLL-U parsing
 
 Default: warn and continue, skipping malformed sentences.
 
@@ -498,13 +498,13 @@ Strict mode (`--strict`): fail on first error.
 montre build -i data/ -o idx/ --strict
 ```
 
-### Query Errors
+### Query errors
 
 - Parse errors: report position and expected tokens
 - Plan errors: unsupported constructs flagged at planning time
 - Execution errors: layer not found, index corruption
 
-## Adding New Input Formats
+## Adding new input formats
 
 Implement the `CorpusReader` trait:
 

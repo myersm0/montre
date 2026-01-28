@@ -4,10 +4,13 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
+use walkdir::WalkDir;
 
 use montre_build::builder::CorpusBuilder;
 use montre_build::format::conllu::ConllUReader;
-use montre_build::format::CorpusReader;
+use montre_build::format::{CorpusReader, ParseStats};
+use montre_core::Value;
+use montre_index::ForwardIndex;
 
 #[derive(Parser)]
 #[command(name = "montre")]
@@ -34,6 +37,9 @@ enum Commands {
 
 		#[arg(long)]
 		force: bool,
+
+		#[arg(long, help = "Fail on first parse error instead of skipping")]
+		strict: bool,
 	},
 
 	Query {
@@ -53,6 +59,22 @@ enum Commands {
 	},
 }
 
+#[derive(Default)]
+struct AggregateStats {
+	documents: usize,
+	sentences_parsed: usize,
+	sentences_skipped: usize,
+	tokens_parsed: usize,
+}
+
+impl AggregateStats {
+	fn add(&mut self, stats: &ParseStats) {
+		self.sentences_parsed += stats.sentences_parsed;
+		self.sentences_skipped += stats.sentences_skipped;
+		self.tokens_parsed += stats.tokens_parsed;
+	}
+}
+
 fn main() -> Result<()> {
 	let cli = Cli::parse();
 
@@ -68,50 +90,30 @@ fn main() -> Result<()> {
 		.init();
 
 	match cli.command {
-		Commands::Build { input, output, name, force } => {
-			cmd_build(input, output, name, force)
-		}
-		Commands::Query { corpus, query, limit, count_only } => {
-			cmd_query(corpus, query, limit, count_only)
-		}
-		Commands::Info { corpus } => {
-			cmd_info(corpus)
-		}
+		Commands::Build {
+			input,
+			output,
+			name,
+			force,
+			strict,
+		} => cmd_build(input, output, name, force, strict),
+		Commands::Query {
+			corpus,
+			query,
+			limit,
+			count_only,
+		} => cmd_query(corpus, query, limit, count_only),
+		Commands::Info { corpus } => cmd_info(corpus),
 	}
 }
 
-fn collect_conllu_files(dir: &PathBuf) -> Result<Vec<PathBuf>> {
-	let mut files = Vec::new();
-	collect_conllu_recursive(dir, &mut files)?;
-	files.sort();
-	Ok(files)
-}
-
-fn collect_conllu_recursive(dir: &PathBuf, files: &mut Vec<PathBuf>) -> Result<()> {
-	if dir.is_file() {
-		if matches!(dir.extension().and_then(|e| e.to_str()), Some("conllu" | "conll")) {
-			files.push(dir.clone());
-		}
-		return Ok(());
-	}
-
-	for entry in std::fs::read_dir(dir)
-		.with_context(|| format!("Failed to read directory: {}", dir.display()))?
-	{
-		let entry = entry?;
-		let path = entry.path();
-
-		if path.is_dir() {
-			collect_conllu_recursive(&path, files)?;
-		} else if matches!(path.extension().and_then(|e| e.to_str()), Some("conllu" | "conll")) {
-			files.push(path);
-		}
-	}
-
-	Ok(())
-}
-
-fn cmd_build(input: PathBuf, output: PathBuf, name: Option<String>, force: bool) -> Result<()> {
+fn cmd_build(
+	input: PathBuf,
+	output: PathBuf,
+	name: Option<String>,
+	force: bool,
+	strict: bool,
+) -> Result<()> {
 	if output.exists() && !force {
 		anyhow::bail!(
 			"Output directory {} already exists. Use --force to overwrite.",
@@ -127,71 +129,99 @@ fn cmd_build(input: PathBuf, output: PathBuf, name: Option<String>, force: bool)
 			.to_string()
 	});
 
-	let files = collect_conllu_files(&input)?;
+	tracing::info!("Building corpus '{}' from {}", corpus_name, input.display());
 
-	if files.is_empty() {
+	let mut builder = CorpusBuilder::new(&corpus_name);
+	let mut aggregate = AggregateStats::default();
+
+	let entries: Vec<PathBuf> = if input.is_file() {
+		vec![input.clone()]
+	} else {
+		WalkDir::new(&input)
+			.follow_links(true)
+			.into_iter()
+			.filter_map(|e| e.ok())
+			.filter(|e| {
+				e.path()
+					.extension()
+					.map(|ext| ext == "conllu")
+					.unwrap_or(false)
+			})
+			.map(|e| e.path().to_path_buf())
+			.collect()
+	};
+
+	if entries.is_empty() {
 		anyhow::bail!("No .conllu files found in {}", input.display());
 	}
 
-	tracing::info!(
-		"Building corpus '{}' from {} files in {}",
-		corpus_name,
-		files.len(),
-		input.display()
-	);
+	for path in entries {
+		let file =
+			File::open(&path).with_context(|| format!("Failed to open: {}", path.display()))?;
 
-	let mut builder = CorpusBuilder::new(&corpus_name);
-	let mut total_sentences = 0usize;
-
-	for file_path in &files {
-		let doc_name = file_path
+		let filename = path
 			.file_name()
 			.and_then(|n| n.to_str())
-			.unwrap_or("unknown")
-			.to_string();
+			.unwrap_or("unknown");
 
-		let file = File::open(file_path)
-			.with_context(|| format!("Failed to open: {}", file_path.display()))?;
+		let mut reader = ConllUReader::new(file).with_source_name(filename);
 
-		let mut reader = ConllUReader::new(file);
-		let sentences = reader.read_sentences()
-			.with_context(|| format!("Failed to parse: {}", file_path.display()))?;
+		let sentences = if strict {
+			reader.read_sentences_strict()?
+		} else {
+			reader.read_sentences()?
+		};
 
-		let sentence_count = sentences.len();
-		builder.add_document(&doc_name, sentences);
-		total_sentences += sentence_count;
-
-		tracing::debug!("  {} sentences from {}", sentence_count, doc_name);
+		if !sentences.is_empty() {
+			builder.add_document(filename, sentences);
+			aggregate.documents += 1;
+		}
+		aggregate.add(reader.stats());
 	}
 
-	tracing::info!(
-		"Parsed {} documents, {} sentences, {} tokens",
-		builder.document_count(),
-		total_sentences,
-		builder.current_position()
-	);
-
-	builder.build(&output)
+	builder
+		.build(&output)
 		.with_context(|| "Failed to build corpus")?;
+
+	if aggregate.sentences_skipped > 0 {
+		tracing::info!(
+			"Parsed {} documents, {} sentences ({} skipped), {} tokens",
+			aggregate.documents,
+			aggregate.sentences_parsed,
+			aggregate.sentences_skipped,
+			aggregate.tokens_parsed
+		);
+	} else {
+		tracing::info!(
+			"Parsed {} documents, {} sentences, {} tokens",
+			aggregate.documents,
+			aggregate.sentences_parsed,
+			aggregate.tokens_parsed
+		);
+	}
 
 	tracing::info!("Corpus written to {}", output.display());
 	Ok(())
+}
+
+fn value_to_str(v: &Value) -> String {
+	match v {
+		Value::Str(s) => s.to_string(),
+		Value::Int(n) => n.to_string(),
+	}
 }
 
 fn cmd_query(corpus_path: PathBuf, query: String, limit: usize, count_only: bool) -> Result<()> {
 	let corpus = montre_index::open(&corpus_path)
 		.with_context(|| format!("Failed to open corpus: {}", corpus_path.display()))?;
 
-	let parsed = montre_query::parse(&query)
-		.with_context(|| format!("Failed to parse query: {}", query))?;
+	let parsed =
+		montre_query::parse(&query).with_context(|| format!("Failed to parse query: {}", query))?;
 
-	let plan = montre_query::planner::plan(&parsed)
-		.with_context(|| "Failed to plan query")?;
+	let plan = montre_query::planner::plan(&parsed).with_context(|| "Failed to plan query")?;
 
-	let start = std::time::Instant::now();
 	let results = montre_query::executor::execute(&plan, &corpus)
 		.with_context(|| "Failed to execute query")?;
-	let elapsed = start.elapsed();
 
 	let total = results.len();
 
@@ -200,52 +230,42 @@ fn cmd_query(corpus_path: PathBuf, query: String, limit: usize, count_only: bool
 		return Ok(());
 	}
 
-	println!("Found {} matches in {:?}\n", total, elapsed);
+	println!("Found {} matches\n", total);
 
-	use montre_index::ForwardIndex;
-	let context_size = 5u64;
+	let token_count = corpus.token_count();
 
-	for (i, hit) in results.enumerate() {
+	for (i, hit) in results.hits().iter().enumerate() {
 		if i >= limit {
-			println!("\n... and {} more results", total - limit);
+			if total > limit {
+				println!("... ({} more results)", total - limit);
+			}
 			break;
 		}
 
-		let start_ctx = hit.span.start.saturating_sub(context_size);
-		let end_ctx = (hit.span.end + context_size).min(corpus.token_count());
+		let ctx_start = hit.span.start.saturating_sub(5);
+		let ctx_end = (hit.span.end + 5).min(token_count);
+
+		let left: Vec<String> = (ctx_start..hit.span.start)
+			.filter_map(|p| corpus.forward.get(p, "word").map(value_to_str))
+			.collect();
+
+		let matched: Vec<String> = (hit.span.start..hit.span.end)
+			.filter_map(|p| corpus.forward.get(p, "word").map(value_to_str))
+			.collect();
+
+		let right: Vec<String> = (hit.span.end..ctx_end)
+			.filter_map(|p| corpus.forward.get(p, "word").map(value_to_str))
+			.collect();
 
 		let doc_name = corpus.document_at(hit.span.start).unwrap_or("?");
 
-		let mut left = String::new();
-		for pos in start_ctx..hit.span.start {
-			if let Some(montre_core::Value::Str(w)) = corpus.forward.get(pos, "word") {
-				left.push_str(w);
-				left.push(' ');
-			}
-		}
-
-		let mut match_text = String::new();
-		for pos in hit.span.start..hit.span.end {
-			if let Some(montre_core::Value::Str(w)) = corpus.forward.get(pos, "word") {
-				match_text.push_str(w);
-				match_text.push(' ');
-			}
-		}
-
-		let mut right = String::new();
-		for pos in hit.span.end..end_ctx {
-			if let Some(montre_core::Value::Str(w)) = corpus.forward.get(pos, "word") {
-				right.push_str(w);
-				right.push(' ');
-			}
-		}
-
 		println!(
-			"{:<30} {:>20} >>> {} <<< {}",
+			"{:>12} {:>8}: {} >>> {} <<< {}",
 			doc_name,
-			left.trim(),
-			match_text.trim(),
-			right.trim()
+			hit.span.start,
+			left.join(" "),
+			matched.join(" "),
+			right.join(" ")
 		);
 	}
 
