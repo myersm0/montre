@@ -4,14 +4,7 @@ A modern, embeddable query engine for corpus linguistics. Lightweight, easy to i
 > **montre** (French, verb): *to show, to reveal, to make visible*
 > From Latin *monstrare* — to point out, to demonstrate.
 
----
-
-Montre is particularly suitable for:
-
-* aligned literary corpora
-* multi-edition corpora
-
----
+Montre is particularly suited for aligned literary corpora and multi-edition corpora.
 
 ## Status
 **Early development.** Not yet usable for real research work.
@@ -25,14 +18,7 @@ Montre is a **local-first corpus query engine**:
 * No global registry
 * No service dependencies
 
-A Montre corpus is a **portable artifact**: a single directory containing indexed text, annotations, and (optionally) alignments. You can open it from:
-
-* the CLI
-* Python
-* Julia
-* R
-
-as a library, not as a service.
+A Montre corpus is a **portable artifact**: a single directory containing indexed text, annotations, and (optionally) alignments. You can open it from the CLI, Python, Julia, or R -- as a library, not as a service.
 
 ## Goals
 
@@ -82,7 +68,7 @@ Each component is independently queryable, but can participate in structured rel
 
 ### 3. Alignments as data
 
-Parallelism of corpora is flexible, not hard-coded.
+Parallelism of corpora is flexible.
 
 Alignments are:
 
@@ -91,7 +77,7 @@ Alignments are:
 * layered
 * replaceable
 
-You can have several alignments (over sentences, paragraphs, etc) potentiall from different models (e.g. LaBSE, vecalign) and choose which alignment to use at query time.
+You can have several alignments (over sentences, paragraphs, etc) potentially from different models (e.g. LaBSE, vecalign) and choose which alignment(s) to use at query time.
 
 ### 4. Alignment-native querying
 
