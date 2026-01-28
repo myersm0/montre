@@ -1,8 +1,8 @@
 # Montre
 A modern, embeddable query engine for corpus linguistics. Lightweight, easy to install and use, but powerful.
 
-> **montre** (French, verb): *to show, to reveal, to make visible*
-> From Latin *monstrare* — to point out, to demonstrate.
+> **montre** *(/mɔ̃tʁ/):* to show; to reveal; to make visible (French)  
+> *From Latin* **monstrare** “to point out, indicate.”
 
 Montre is particularly suited for aligned literary corpora and multi-edition corpora.
 
