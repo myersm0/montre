@@ -257,7 +257,7 @@ fn execute_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<Vec<Hit>>
 	let first_step = &steps[0];
 	let first_positions = get_matching_positions(&first_step.node, corpus)?;
 
-	if first_positions.is_empty() {
+	if first_positions.is_empty() && first_step.min > 0 {
 		return Ok(Vec::new());
 	}
 
@@ -278,8 +278,19 @@ fn execute_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<Vec<Hit>>
 				result.push((start, end));
 			}
 		}
+
+		if first_step.min == 0 && steps.len() > 1 {
+			let next_positions = get_matching_positions(&steps[1].node, corpus)?;
+			for &p in &next_positions {
+				result.push((p, p));
+			}
+		}
+
 		result
 	};
+
+	active.sort_unstable();
+	active.dedup();
 
 	for step in &steps[1..] {
 		if active.is_empty() {
