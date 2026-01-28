@@ -1,4 +1,4 @@
-use crate::ast::Query;
+use crate::ast::{ConstraintOp, ConstraintValue, Query, TokenPattern};
 use crate::Result;
 
 #[derive(Debug, Clone)]
@@ -11,19 +11,41 @@ pub enum PlanNode {
 		layer: String,
 		pattern: String,
 	},
+	ScanAll,
 	Intersect(Vec<PlanNode>),
 	Union(Vec<PlanNode>),
-	PositionShift {
-		inner: Box<PlanNode>,
-		offset: i64,
+	Difference {
+		base: Box<PlanNode>,
+		subtract: Box<PlanNode>,
 	},
 	FilterBySpan {
 		inner: Box<PlanNode>,
 		span_layer: String,
 	},
 	SequenceScan {
-		steps: Vec<PlanNode>,
+		steps: Vec<SequenceStep>,
 	},
+}
+
+#[derive(Debug, Clone)]
+pub struct SequenceStep {
+	pub node: PlanNode,
+	pub min: u32,
+	pub max: Option<u32>,
+}
+
+impl SequenceStep {
+	pub fn once(node: PlanNode) -> Self {
+		Self {
+			node,
+			min: 1,
+			max: Some(1),
+		}
+	}
+
+	pub fn repeated(node: PlanNode, min: u32, max: Option<u32>) -> Self {
+		Self { node, min, max }
+	}
 }
 
 #[derive(Debug)]
@@ -38,36 +60,29 @@ pub fn plan(query: &Query) -> Result<QueryPlan> {
 
 fn plan_node(query: &Query) -> Result<PlanNode> {
 	match query {
-		Query::Token(pattern) => {
-			if pattern.constraints.is_empty() {
-				todo!("Any token scan")
-			}
-
-			let mut nodes: Vec<PlanNode> = Vec::new();
-			for constraint in &pattern.constraints {
-				let node = match &constraint.value {
-					crate::ast::ConstraintValue::Literal(v) => PlanNode::ScanLiteral {
-						layer: constraint.layer.clone(),
-						value: v.clone(),
-					},
-					crate::ast::ConstraintValue::Regex(r) => PlanNode::ScanRegex {
-						layer: constraint.layer.clone(),
-						pattern: r.clone(),
-					},
-				};
-				nodes.push(node);
-			}
-
-			if nodes.len() == 1 {
-				Ok(nodes.remove(0))
-			} else {
-				Ok(PlanNode::Intersect(nodes))
-			}
-		}
+		Query::Token(pattern) => plan_token(pattern),
 
 		Query::Sequence(parts) => {
-			let steps: Result<Vec<PlanNode>> = parts.iter().map(plan_node).collect();
+			let steps: Result<Vec<SequenceStep>> = parts
+				.iter()
+				.map(|q| {
+					let node = plan_node(q)?;
+					Ok(SequenceStep::once(node))
+				})
+				.collect();
 			Ok(PlanNode::SequenceScan { steps: steps? })
+		}
+
+		Query::Repetition { inner, min, max } => {
+			let inner_plan = plan_node(inner)?;
+			Ok(PlanNode::SequenceScan {
+				steps: vec![SequenceStep::repeated(inner_plan, *min, *max)],
+			})
+		}
+
+		Query::Or(alternatives) => {
+			let nodes: Result<Vec<PlanNode>> = alternatives.iter().map(plan_node).collect();
+			Ok(PlanNode::Union(nodes?))
 		}
 
 		Query::Within { inner, span_layer } => {
@@ -78,7 +93,67 @@ fn plan_node(query: &Query) -> Result<PlanNode> {
 			})
 		}
 
-		_ => todo!("Planner not implemented for this query type"),
+		Query::Containing { inner, span_layer } => {
+			let inner_plan = plan_node(inner)?;
+			Ok(PlanNode::FilterBySpan {
+				inner: Box::new(inner_plan),
+				span_layer: span_layer.clone(),
+			})
+		}
+
+		Query::Capture { inner, .. } => {
+			plan_node(inner)
+		}
+	}
+}
+
+fn plan_token(pattern: &TokenPattern) -> Result<PlanNode> {
+	if pattern.constraints.is_empty() {
+		return Ok(PlanNode::ScanAll);
+	}
+
+	let mut positive_nodes = Vec::new();
+	let mut negative_nodes = Vec::new();
+
+	for constraint in &pattern.constraints {
+		let scan_node = match &constraint.value {
+			ConstraintValue::Literal(v) => PlanNode::ScanLiteral {
+				layer: constraint.layer.clone(),
+				value: v.clone(),
+			},
+			ConstraintValue::Regex(r) => PlanNode::ScanRegex {
+				layer: constraint.layer.clone(),
+				pattern: r.clone(),
+			},
+		};
+
+		match constraint.op {
+			ConstraintOp::Eq => positive_nodes.push(scan_node),
+			ConstraintOp::Ne => negative_nodes.push(scan_node),
+		}
+	}
+
+	let positive = if positive_nodes.is_empty() {
+		PlanNode::ScanAll
+	} else if positive_nodes.len() == 1 {
+		positive_nodes.remove(0)
+	} else {
+		PlanNode::Intersect(positive_nodes)
+	};
+
+	if negative_nodes.is_empty() {
+		Ok(positive)
+	} else {
+		let negative = if negative_nodes.len() == 1 {
+			negative_nodes.remove(0)
+		} else {
+			PlanNode::Union(negative_nodes)
+		};
+
+		Ok(PlanNode::Difference {
+			base: Box::new(positive),
+			subtract: Box::new(negative),
+		})
 	}
 }
 
@@ -102,6 +177,124 @@ mod tests {
 				assert_eq!(value, "test");
 			}
 			_ => panic!("Expected ScanLiteral"),
+		}
+	}
+
+	#[test]
+	fn plan_matchall() {
+		let query = Query::Token(TokenPattern::any());
+		let plan = plan(&query).unwrap();
+		assert!(matches!(plan.root, PlanNode::ScanAll));
+	}
+
+	#[test]
+	fn plan_negation() {
+		let query = Query::Token(TokenPattern::new().with_constraint(Constraint {
+			layer: "pos".into(),
+			op: ConstraintOp::Ne,
+			value: ConstraintValue::Literal("PUNCT".into()),
+		}));
+
+		let plan = plan(&query).unwrap();
+		match plan.root {
+			PlanNode::Difference { base, subtract } => {
+				assert!(matches!(*base, PlanNode::ScanAll));
+				assert!(matches!(*subtract, PlanNode::ScanLiteral { .. }));
+			}
+			_ => panic!("Expected Difference"),
+		}
+	}
+
+	#[test]
+	fn plan_conjunction_with_negation() {
+		let query = Query::Token(
+			TokenPattern::new()
+				.with_constraint(Constraint {
+					layer: "pos".into(),
+					op: ConstraintOp::Eq,
+					value: ConstraintValue::Literal("NOUN".into()),
+				})
+				.with_constraint(Constraint {
+					layer: "word".into(),
+					op: ConstraintOp::Ne,
+					value: ConstraintValue::Literal("house".into()),
+				}),
+		);
+
+		let plan = plan(&query).unwrap();
+		match plan.root {
+			PlanNode::Difference { base, subtract } => {
+				assert!(matches!(*base, PlanNode::ScanLiteral { .. }));
+				assert!(matches!(*subtract, PlanNode::ScanLiteral { .. }));
+			}
+			_ => panic!("Expected Difference"),
+		}
+	}
+
+	#[test]
+	fn plan_alternation() {
+		let query = Query::Or(vec![
+			Query::Token(TokenPattern::new().with_constraint(Constraint {
+				layer: "pos".into(),
+				op: ConstraintOp::Eq,
+				value: ConstraintValue::Literal("NOUN".into()),
+			})),
+			Query::Token(TokenPattern::new().with_constraint(Constraint {
+				layer: "pos".into(),
+				op: ConstraintOp::Eq,
+				value: ConstraintValue::Literal("VERB".into()),
+			})),
+		]);
+
+		let plan = plan(&query).unwrap();
+		match plan.root {
+			PlanNode::Union(nodes) => {
+				assert_eq!(nodes.len(), 2);
+			}
+			_ => panic!("Expected Union"),
+		}
+	}
+
+	#[test]
+	fn plan_repetition() {
+		let query = Query::Repetition {
+			inner: Box::new(Query::Token(TokenPattern::new().with_constraint(Constraint {
+				layer: "pos".into(),
+				op: ConstraintOp::Eq,
+				value: ConstraintValue::Literal("ADJ".into()),
+			}))),
+			min: 1,
+			max: None,
+		};
+
+		let plan = plan(&query).unwrap();
+		match plan.root {
+			PlanNode::SequenceScan { steps } => {
+				assert_eq!(steps.len(), 1);
+				assert_eq!(steps[0].min, 1);
+				assert_eq!(steps[0].max, None);
+			}
+			_ => panic!("Expected SequenceScan"),
+		}
+	}
+
+	#[test]
+	fn plan_within() {
+		let query = Query::Within {
+			inner: Box::new(Query::Token(TokenPattern::new().with_constraint(Constraint {
+				layer: "pos".into(),
+				op: ConstraintOp::Eq,
+				value: ConstraintValue::Literal("NOUN".into()),
+			}))),
+			span_layer: "s".into(),
+		};
+
+		let plan = plan(&query).unwrap();
+		match plan.root {
+			PlanNode::FilterBySpan { span_layer, .. } => {
+				assert_eq!(span_layer, "s");
+			}
+			_ => panic!("Expected FilterBySpan"),
 		}
 	}
 }

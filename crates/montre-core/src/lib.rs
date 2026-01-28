@@ -99,6 +99,48 @@ pub struct Relation {
 	pub score: Option<f32>,
 }
 
+/// A component is a labeled subcorpus within a multi-component corpus.
+/// Each document belongs to exactly one component.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Component {
+	pub id: u32,
+	pub name: CompactString,
+	pub language: CompactString,
+}
+
+/// Unit identifier for alignment: (document_index, unit_index_within_doc)
+/// Stable across rebuilds as long as document order and segmentation are preserved.
+pub type UnitId = (u32, u32);
+
+/// A named relation mapping units in one component/layer to units in another.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Alignment {
+	pub name: CompactString,
+	pub source_component: CompactString,
+	pub target_component: CompactString,
+	pub source_layer: CompactString,
+	pub target_layer: CompactString,
+	pub directed: bool,
+	pub edges: Vec<(UnitId, UnitId)>,
+}
+
+/// Future: weighted alignment edge with confidence scores
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlignmentEdge {
+	pub source: UnitId,
+	pub target: UnitId,
+	pub weight: Option<f32>,
+	pub flags: u8,
+}
+
+/// Alignment edge flags
+pub mod alignment_flags {
+	pub const MANUAL: u8 = 0b0001;
+	pub const AUTO: u8 = 0b0010;
+	pub const REVIEWED: u8 = 0b0100;
+	pub const FILTERED: u8 = 0b1000;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LayerName(pub CompactString);
 
