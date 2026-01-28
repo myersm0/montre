@@ -25,22 +25,6 @@ impl Hit {
 	}
 }
 
-fn find_span_context(position: u64, corpus: &Corpus) -> (u32, u32) {
-	let document_index = if let Some(doc_spans) = corpus.spans.spans("document") {
-		binary_search_span(doc_spans, position).unwrap_or(0) as u32
-	} else {
-		0
-	};
-
-	let sentence_index = if let Some(sent_spans) = corpus.spans.spans("sentence") {
-		binary_search_span(sent_spans, position).unwrap_or(0) as u32
-	} else {
-		0
-	};
-
-	(document_index, sentence_index)
-}
-
 fn binary_search_span(spans: &[Span], position: u64) -> Option<usize> {
 	if spans.is_empty() {
 		return None;
@@ -90,6 +74,23 @@ impl Results {
 	pub fn hits(&self) -> &[Hit] {
 		&self.hits
 	}
+
+	/// Populate document_index and sentence_index for all hits.
+	/// Call this only when you need structural context (e.g., alignment projection).
+	/// Most display operations don't need this.
+	pub fn populate_context(&mut self, corpus: &Corpus) {
+		let doc_spans = corpus.spans.spans("document");
+		let sent_spans = corpus.spans.spans("sentence");
+
+		for hit in &mut self.hits {
+			if let Some(spans) = doc_spans {
+				hit.document_index = binary_search_span(spans, hit.span.start).unwrap_or(0) as u32;
+			}
+			if let Some(spans) = sent_spans {
+				hit.sentence_index = binary_search_span(spans, hit.span.start).unwrap_or(0) as u32;
+			}
+		}
+	}
 }
 
 impl Iterator for Results {
@@ -107,14 +108,7 @@ impl Iterator for Results {
 }
 
 pub fn execute(plan: &QueryPlan, corpus: &Corpus) -> Result<Results> {
-	let mut hits = execute_node(&plan.root, corpus)?;
-
-	for hit in &mut hits {
-		let (doc_idx, sent_idx) = find_span_context(hit.span.start, corpus);
-		hit.document_index = doc_idx;
-		hit.sentence_index = sent_idx;
-	}
-
+	let hits = execute_node(&plan.root, corpus)?;
 	Ok(Results::new(hits))
 }
 
