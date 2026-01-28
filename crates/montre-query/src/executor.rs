@@ -23,64 +23,46 @@ impl Hit {
 			captures: Vec::new(),
 		}
 	}
-
-	fn with_context(span: Span, corpus: &Corpus) -> Self {
-		let (document_index, sentence_index) = find_span_context(span.start, corpus);
-		Self {
-			span,
-			document_index,
-			sentence_index,
-			captures: Vec::new(),
-		}
-	}
 }
 
 fn find_span_context(position: u64, corpus: &Corpus) -> (u32, u32) {
-	let mut document_index = 0u32;
-	let mut sentence_index = 0u32;
+	let document_index = if let Some(doc_spans) = corpus.spans.spans("document") {
+		binary_search_span(doc_spans, position).unwrap_or(0) as u32
+	} else {
+		0
+	};
 
-	if let Some(doc_spans) = corpus.spans.spans("document") {
-		for (i, span) in doc_spans.iter().enumerate() {
-			if position >= span.start && position < span.end {
-				document_index = i as u32;
-				break;
-			}
-		}
-	}
-
-	if let Some(sent_spans) = corpus.spans.spans("sentence") {
-		let mut sent_in_doc = 0u32;
-		let mut current_doc = 0u32;
-
-		if let Some(doc_spans) = corpus.spans.spans("document") {
-			for (i, span) in sent_spans.iter().enumerate() {
-				while current_doc < doc_spans.len() as u32
-					&& span.start >= doc_spans[current_doc as usize].end
-				{
-					current_doc += 1;
-					sent_in_doc = 0;
-				}
-
-				if position >= span.start && position < span.end {
-					sentence_index = sent_in_doc;
-					break;
-				}
-
-				if current_doc == document_index {
-					sent_in_doc += 1;
-				}
-			}
-		} else {
-			for (i, span) in sent_spans.iter().enumerate() {
-				if position >= span.start && position < span.end {
-					sentence_index = i as u32;
-					break;
-				}
-			}
-		}
-	}
+	let sentence_index = if let Some(sent_spans) = corpus.spans.spans("sentence") {
+		binary_search_span(sent_spans, position).unwrap_or(0) as u32
+	} else {
+		0
+	};
 
 	(document_index, sentence_index)
+}
+
+fn binary_search_span(spans: &[Span], position: u64) -> Option<usize> {
+	if spans.is_empty() {
+		return None;
+	}
+
+	let mut lo = 0;
+	let mut hi = spans.len();
+
+	while lo < hi {
+		let mid = lo + (hi - lo) / 2;
+		let span = &spans[mid];
+
+		if position < span.start {
+			hi = mid;
+		} else if position >= span.end {
+			lo = mid + 1;
+		} else {
+			return Some(mid);
+		}
+	}
+
+	None
 }
 
 pub struct Results {
@@ -281,52 +263,76 @@ fn execute_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<Vec<Hit>>
 	let first_step = &steps[0];
 	let first_positions = get_matching_positions(&first_step.node, corpus)?;
 
-	let mut active: Vec<(u64, u64)> = Vec::new();
-
-	for &start in &first_positions {
-		let ends = expand_repetition(start, first_step.min, first_step.max, &first_positions, token_count);
-		for end in ends {
-			active.push((start, end));
-		}
+	if first_positions.is_empty() {
+		return Ok(Vec::new());
 	}
+
+	let mut active: Vec<(u64, u64)> = if first_step.min == 1 && first_step.max == Some(1) {
+		first_positions.iter().map(|&p| (p, p + 1)).collect()
+	} else {
+		let position_set: HashSet<u64> = first_positions.iter().copied().collect();
+		let mut result = Vec::new();
+		for &start in &first_positions {
+			let ends = expand_repetition_with_set(
+				start,
+				first_step.min,
+				first_step.max,
+				&position_set,
+				token_count,
+			);
+			for end in ends {
+				result.push((start, end));
+			}
+		}
+		result
+	};
 
 	for step in &steps[1..] {
 		if active.is_empty() {
 			break;
 		}
 
-		let step_positions: HashSet<u64> = get_matching_positions(&step.node, corpus)?
-			.into_iter()
-			.collect();
+		let step_positions = get_matching_positions(&step.node, corpus)?;
+		let step_set: HashSet<u64> = step_positions.into_iter().collect();
+		let is_scan_all = matches!(step.node, PlanNode::ScanAll);
 
-		let mut next_active = Vec::new();
+		if step.min == 1 && step.max == Some(1) {
+			active = active
+				.into_iter()
+				.filter(|&(_, end)| is_scan_all || step_set.contains(&end))
+				.map(|(start, end)| (start, end + 1))
+				.collect();
+		} else {
+			let mut next_active = Vec::new();
 
-		for (start, current_end) in active {
-			if step.min == 0 {
-				next_active.push((start, current_end));
-			}
+			for (start, current_end) in active {
+				if step.min == 0 {
+					next_active.push((start, current_end));
+				}
 
-			let max_rep = step.max.unwrap_or(100).min(100) as u64;
-			let mut pos = current_end;
-			let mut count = 0u64;
+				let max_rep = step.max.unwrap_or(100).min(100) as u64;
+				let mut pos = current_end;
+				let mut count = 0u64;
 
-			while pos < token_count && count < max_rep {
-				if step_positions.contains(&pos) || (step.node == PlanNode::ScanAll) {
-					count += 1;
-					if count >= step.min as u64 {
-						next_active.push((start, pos + 1));
+				while pos < token_count && count < max_rep {
+					if is_scan_all || step_set.contains(&pos) {
+						count += 1;
+						if count >= step.min as u64 {
+							next_active.push((start, pos + 1));
+						}
+						pos += 1;
+					} else {
+						break;
 					}
-					pos += 1;
-				} else {
-					break;
 				}
 			}
-		}
 
-		active = next_active;
-		active.sort_unstable();
-		active.dedup();
+			active = next_active;
+		}
 	}
+
+	active.sort_unstable();
+	active.dedup();
 
 	let hits: Vec<Hit> = active
 		.into_iter()
@@ -334,6 +340,38 @@ fn execute_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<Vec<Hit>>
 		.collect();
 
 	Ok(hits)
+}
+
+fn expand_repetition_with_set(
+	start: u64,
+	min: u32,
+	max: Option<u32>,
+	position_set: &HashSet<u64>,
+	token_count: u64,
+) -> Vec<u64> {
+	let max_rep = max.unwrap_or(100).min(100) as u64;
+	let mut results = Vec::new();
+
+	if min == 0 {
+		results.push(start);
+	}
+
+	let mut pos = start;
+	let mut count = 0u64;
+
+	while pos < token_count && count < max_rep {
+		if position_set.contains(&pos) {
+			count += 1;
+			if count >= min as u64 {
+				results.push(pos + 1);
+			}
+			pos += 1;
+		} else {
+			break;
+		}
+	}
+
+	results
 }
 
 fn get_matching_positions(node: &PlanNode, corpus: &Corpus) -> Result<Vec<u64>> {
@@ -371,39 +409,6 @@ fn get_matching_positions(node: &PlanNode, corpus: &Corpus) -> Result<Vec<u64>> 
 			Ok(hits.into_iter().map(|h| h.span.start).collect())
 		}
 	}
-}
-
-fn expand_repetition(
-	start: u64,
-	min: u32,
-	max: Option<u32>,
-	valid_positions: &[u64],
-	token_count: u64,
-) -> Vec<u64> {
-	let position_set: HashSet<u64> = valid_positions.iter().copied().collect();
-	let max_rep = max.unwrap_or(100).min(100) as u64;
-	let mut results = Vec::new();
-
-	if min == 0 {
-		results.push(start);
-	}
-
-	let mut pos = start;
-	let mut count = 0u64;
-
-	while pos < token_count && count < max_rep {
-		if position_set.contains(&pos) {
-			count += 1;
-			if count >= min as u64 {
-				results.push(pos + 1);
-			}
-			pos += 1;
-		} else {
-			break;
-		}
-	}
-
-	results
 }
 
 impl PartialEq for PlanNode {

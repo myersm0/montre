@@ -212,25 +212,37 @@ fn value_to_str(v: &Value) -> String {
 }
 
 fn cmd_query(corpus_path: PathBuf, query: String, limit: usize, count_only: bool) -> Result<()> {
+	use std::time::Instant;
+
 	let corpus = montre_index::open(&corpus_path)
 		.with_context(|| format!("Failed to open corpus: {}", corpus_path.display()))?;
 
+	let parse_start = Instant::now();
 	let parsed =
 		montre_query::parse(&query).with_context(|| format!("Failed to parse query: {}", query))?;
+	let parse_time = parse_start.elapsed();
 
+	let plan_start = Instant::now();
 	let plan = montre_query::planner::plan(&parsed).with_context(|| "Failed to plan query")?;
+	let plan_time = plan_start.elapsed();
 
+	let exec_start = Instant::now();
 	let results = montre_query::executor::execute(&plan, &corpus)
 		.with_context(|| "Failed to execute query")?;
+	let exec_time = exec_start.elapsed();
 
 	let total = results.len();
 
 	if count_only {
 		println!("{}", total);
+		eprintln!(
+			"(parse: {:?}, plan: {:?}, exec: {:?})",
+			parse_time, plan_time, exec_time
+		);
 		return Ok(());
 	}
 
-	println!("Found {} matches\n", total);
+	println!("Found {} matches in {:?}\n", total, exec_time);
 
 	let token_count = corpus.token_count();
 
