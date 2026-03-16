@@ -287,18 +287,65 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 				)));
 			};
 
+			let Some(source_comp) = corpus.component(&align_meta.source_component) else {
+				return Err(crate::QueryError::Execution(format!(
+					"Source component not found: {}",
+					align_meta.source_component
+				)));
+			};
+
+			let Some(target_comp) = corpus.component(&align_meta.target_component) else {
+				return Err(crate::QueryError::Execution(format!(
+					"Target component not found: {}",
+					align_meta.target_component
+				)));
+			};
+
+			let Some(doc_spans) = corpus.spans.spans("document") else {
+				return Ok(Vec::new());
+			};
+
 			let Some(sent_spans) = corpus.spans.spans(&align_meta.source_layer) else {
 				return Ok(Vec::new());
 			};
 
-			let Some(target_spans) = corpus.spans.spans(&align_meta.target_layer) else {
+			let Some(target_sent_spans) = corpus.spans.spans(&align_meta.target_layer) else {
 				return Ok(Vec::new());
 			};
 
-			let source_sentence_for_hit = |hit: &Hit| -> Option<u32> {
-				for (idx, span) in sent_spans.iter().enumerate() {
-					if hit.span.start >= span.start && hit.span.end <= span.end {
-						return Some(idx as u32);
+			let find_doc_and_sent_for_hit = |hit: &Hit| -> Option<(u32, u32)> {
+				for doc_idx in source_comp.document_range.0..source_comp.document_range.1 {
+					let doc_span = doc_spans.get(doc_idx)?;
+					if hit.span.start >= doc_span.start && hit.span.end <= doc_span.end {
+						let doc_within_comp = (doc_idx - source_comp.document_range.0) as u32;
+						let mut sent_within_doc = 0u32;
+						for sent_span in sent_spans.iter() {
+							if sent_span.start >= doc_span.start && sent_span.end <= doc_span.end {
+								if hit.span.start >= sent_span.start && hit.span.end <= sent_span.end {
+									return Some((doc_within_comp, sent_within_doc));
+								}
+								sent_within_doc += 1;
+							} else if sent_span.start >= doc_span.end {
+								break;
+							}
+						}
+					}
+				}
+				None
+			};
+
+			let get_target_span = |tgt_doc: u32, tgt_sent: u32| -> Option<Span> {
+				let abs_doc_idx = target_comp.document_range.0 + tgt_doc as usize;
+				let doc_span = doc_spans.get(abs_doc_idx)?;
+				let mut sent_count = 0u32;
+				for sent_span in target_sent_spans.iter() {
+					if sent_span.start >= doc_span.start && sent_span.end <= doc_span.end {
+						if sent_count == tgt_sent {
+							return Some(*sent_span);
+						}
+						sent_count += 1;
+					} else if sent_span.start >= doc_span.end {
+						break;
 					}
 				}
 				None
@@ -308,13 +355,13 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 			let mut seen_targets = HashSet::new();
 
 			for hit in &source_hits {
-				if let Some(source_sent_idx) = source_sentence_for_hit(hit) {
-					for &((_src_doc, src_unit), (_tgt_doc, tgt_unit)) in edges {
-						if src_unit == source_sent_idx {
-							let target_key = (_tgt_doc, tgt_unit);
+				if let Some((src_doc, src_sent)) = find_doc_and_sent_for_hit(hit) {
+					for &((edge_src_doc, edge_src_sent), (tgt_doc, tgt_sent)) in edges {
+						if edge_src_doc == src_doc && edge_src_sent == src_sent {
+							let target_key = (tgt_doc, tgt_sent);
 							if seen_targets.insert(target_key) {
-								if let Some(target_span) = target_spans.get(tgt_unit as usize) {
-									result_hits.push(Hit::new(*target_span));
+								if let Some(target_span) = get_target_span(tgt_doc, tgt_sent) {
+									result_hits.push(Hit::new(target_span));
 								}
 							}
 						}

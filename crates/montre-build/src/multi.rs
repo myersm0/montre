@@ -280,12 +280,15 @@ impl MultiCorpusBuilder {
 	fn parse_alignment_file(
 		&self,
 		path: &Path,
-		_source_comp: &ComponentMeta,
-		_target_comp: &ComponentMeta,
+		source_comp: &ComponentMeta,
+		target_comp: &ComponentMeta,
 	) -> Result<Vec<(UnitId, UnitId)>> {
 		let file = File::open(path).map_err(|e| {
 			BuildError::Alignment(format!("Failed to open alignment file {:?}: {}", path, e))
 		})?;
+
+		let source_doc_map = self.build_doc_name_map(source_comp);
+		let target_doc_map = self.build_doc_name_map(target_comp);
 
 		let reader = BufReader::new(file);
 		let mut edges = Vec::new();
@@ -310,33 +313,49 @@ impl MultiCorpusBuilder {
 				continue;
 			}
 
-			let source_doc: u32 = parts[0].parse().map_err(|_| {
-				BuildError::Alignment(format!(
-					"Invalid source doc index at line {}: {}",
-					line_num + 1,
-					parts[0]
-				))
-			})?;
+			let source_doc_name = parts[0];
+			let source_doc = match source_doc_map.get(source_doc_name) {
+				Some(&idx) => idx,
+				None => {
+					if self.strict {
+						return Err(BuildError::Alignment(format!(
+							"Unknown source document '{}' at line {} (not in component '{}')",
+							source_doc_name,
+							line_num + 1,
+							source_comp.name
+						)));
+					}
+					continue;
+				}
+			};
 
 			let source_unit: u32 = parts[1].parse().map_err(|_| {
 				BuildError::Alignment(format!(
-					"Invalid source unit index at line {}: {}",
+					"Invalid source sentence index at line {}: {}",
 					line_num + 1,
 					parts[1]
 				))
 			})?;
 
-			let target_doc: u32 = parts[2].parse().map_err(|_| {
-				BuildError::Alignment(format!(
-					"Invalid target doc index at line {}: {}",
-					line_num + 1,
-					parts[2]
-				))
-			})?;
+			let target_doc_name = parts[2];
+			let target_doc = match target_doc_map.get(target_doc_name) {
+				Some(&idx) => idx,
+				None => {
+					if self.strict {
+						return Err(BuildError::Alignment(format!(
+							"Unknown target document '{}' at line {} (not in component '{}')",
+							target_doc_name,
+							line_num + 1,
+							target_comp.name
+						)));
+					}
+					continue;
+				}
+			};
 
 			let target_unit: u32 = parts[3].parse().map_err(|_| {
 				BuildError::Alignment(format!(
-					"Invalid target unit index at line {}: {}",
+					"Invalid target sentence index at line {}: {}",
 					line_num + 1,
 					parts[3]
 				))
@@ -346,6 +365,16 @@ impl MultiCorpusBuilder {
 		}
 
 		Ok(edges)
+	}
+
+	fn build_doc_name_map(&self, comp: &ComponentMeta) -> std::collections::HashMap<String, u32> {
+		let mut map = std::collections::HashMap::new();
+		for (i, doc_idx) in (comp.document_range.0..comp.document_range.1).enumerate() {
+			if let Some(name) = self.document_names.get(doc_idx) {
+				map.insert(name.clone(), i as u32);
+			}
+		}
+		map
 	}
 
 	fn write(mut self, output_path: impl AsRef<Path>) -> Result<()> {
