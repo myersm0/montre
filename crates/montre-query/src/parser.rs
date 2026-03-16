@@ -122,16 +122,69 @@ impl<'a> Parser<'a> {
 	}
 
 	fn maybe_wrap_within(&mut self, query: Query) -> Result<Query> {
-		self.skip_whitespace();
-		if self.try_consume_str("within") {
+		let mut result = query;
+
+		loop {
 			self.skip_whitespace();
-			let layer = self.parse_identifier()?;
-			Ok(Query::Within {
-				inner: Box::new(query),
-				span_layer: layer,
+
+			if self.try_consume_str("within") {
+				self.skip_whitespace();
+
+				if self.try_consume_str("component") {
+					self.consume(':')?;
+					self.skip_whitespace();
+					let component = self.parse_component_name()?;
+					result = Query::WithinComponent {
+						inner: Box::new(result),
+						component,
+					};
+				} else {
+					let layer = self.parse_identifier()?;
+					result = Query::Within {
+						inner: Box::new(result),
+						span_layer: layer,
+					};
+				}
+			} else if self.remaining().starts_with('=') && !self.remaining().starts_with("==") {
+				self.pos += 1;
+				let alignment = self.parse_identifier()?;
+				if !self.remaining().starts_with("=>") {
+					return Err(QueryError::Parse {
+						position: self.pos,
+						message: "Expected '=>' after alignment name".into(),
+					});
+				}
+				self.pos += 2;
+				result = Query::Project {
+					inner: Box::new(result),
+					alignment,
+				};
+			} else {
+				break;
+			}
+		}
+
+		Ok(result)
+	}
+
+	fn parse_component_name(&mut self) -> Result<String> {
+		if self.peek_char() == Some('"') {
+			self.pos += 1;
+			let start = self.pos;
+			while let Some(c) = self.peek_char() {
+				if c == '"' {
+					let name = self.input[start..self.pos].to_string();
+					self.pos += 1;
+					return Ok(name);
+				}
+				self.pos += c.len_utf8();
+			}
+			Err(QueryError::Parse {
+				position: start - 1,
+				message: "Unterminated string".into(),
 			})
 		} else {
-			Ok(query)
+			self.parse_identifier()
 		}
 	}
 
@@ -167,6 +220,7 @@ impl<'a> Parser<'a> {
 			None => true,
 			Some('|') | Some(')') => true,
 			Some('w') => self.remaining().starts_with("within"),
+			Some('=') if !self.remaining().starts_with("==") => true,
 			_ => false,
 		}
 	}
@@ -683,5 +737,55 @@ mod tests {
 	#[test]
 	fn parse_unterminated_string_fails() {
 		assert!(parse(r#""house"#).is_err());
+	}
+
+	#[test]
+	fn parse_within_component() {
+		let query = parse(r#"[pos="NOUN"] within component:fr"#).unwrap();
+		match query {
+			Query::WithinComponent { component, .. } => {
+				assert_eq!(component, "fr");
+			}
+			_ => panic!("Expected WithinComponent query"),
+		}
+	}
+
+	#[test]
+	fn parse_within_component_quoted() {
+		let query = parse(r#"[pos="NOUN"] within component:"maupassant-fr""#).unwrap();
+		match query {
+			Query::WithinComponent { component, .. } => {
+				assert_eq!(component, "maupassant-fr");
+			}
+			_ => panic!("Expected WithinComponent query"),
+		}
+	}
+
+	#[test]
+	fn parse_projection() {
+		let query = parse(r#"[lemma="maison"] =labse=>"#).unwrap();
+		match query {
+			Query::Project { alignment, .. } => {
+				assert_eq!(alignment, "labse");
+			}
+			_ => panic!("Expected Project query"),
+		}
+	}
+
+	#[test]
+	fn parse_component_then_projection() {
+		let query = parse(r#"[lemma="maison"] within component:fr =labse=>"#).unwrap();
+		match query {
+			Query::Project { alignment, inner } => {
+				assert_eq!(alignment, "labse");
+				match *inner {
+					Query::WithinComponent { component, .. } => {
+						assert_eq!(component, "fr");
+					}
+					_ => panic!("Expected WithinComponent inside Project"),
+				}
+			}
+			_ => panic!("Expected Project query"),
+		}
 	}
 }

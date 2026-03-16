@@ -9,7 +9,7 @@ pub mod corpus;
 use std::path::Path;
 use thiserror::Error;
 
-pub use corpus::Corpus;
+pub use corpus::{Corpus, CorpusMeta, ComponentMeta, AlignmentMeta, AlignmentIndex};
 pub use inverted::{InvertedIndex, InMemoryInverted};
 pub use forward::{ForwardIndex, InMemoryForward};
 pub use spans::{SpanIndex, InMemorySpans};

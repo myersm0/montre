@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use montre_core::{Span, UnitId};
+use serde::{Deserialize, Serialize};
 
 use crate::forward::InMemoryForward;
 use crate::inverted::InMemoryInverted;
@@ -8,7 +10,26 @@ use crate::lexicon::InMemoryLexicon;
 use crate::spans::InMemorySpans;
 use crate::{IndexError, Result, SpanIndex};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComponentMeta {
+	pub id: u32,
+	pub name: String,
+	pub language: String,
+	pub document_range: (usize, usize),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlignmentMeta {
+	pub name: String,
+	pub source_component: String,
+	pub target_component: String,
+	pub source_layer: String,
+	pub target_layer: String,
+	pub directed: bool,
+	pub edge_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorpusMeta {
 	pub name: String,
 	pub version: u32,
@@ -17,6 +38,35 @@ pub struct CorpusMeta {
 	pub span_layers: Vec<String>,
 	#[serde(default)]
 	pub document_names: Vec<String>,
+	#[serde(default)]
+	pub components: Vec<ComponentMeta>,
+	#[serde(default)]
+	pub alignments: Vec<AlignmentMeta>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AlignmentIndex {
+	pub alignments: HashMap<String, Vec<(UnitId, UnitId)>>,
+}
+
+impl AlignmentIndex {
+	pub fn new() -> Self {
+		Self {
+			alignments: HashMap::new(),
+		}
+	}
+
+	pub fn add(&mut self, name: &str, edges: Vec<(UnitId, UnitId)>) {
+		self.alignments.insert(name.to_string(), edges);
+	}
+
+	pub fn get(&self, name: &str) -> Option<&[(UnitId, UnitId)]> {
+		self.alignments.get(name).map(|v| v.as_slice())
+	}
+
+	pub fn names(&self) -> impl Iterator<Item = &str> {
+		self.alignments.keys().map(|s| s.as_str())
+	}
 }
 
 pub struct Corpus {
@@ -26,6 +76,7 @@ pub struct Corpus {
 	pub forward: InMemoryForward,
 	pub spans: InMemorySpans,
 	pub lexicon: InMemoryLexicon,
+	pub alignments: AlignmentIndex,
 }
 
 impl Corpus {
@@ -64,6 +115,14 @@ impl Corpus {
 		let lexicon: InMemoryLexicon = bincode::deserialize(&lexicon_bytes)
 			.map_err(|e| IndexError::Format(format!("Failed to deserialize lexicon: {}", e)))?;
 
+		let alignments = if path.join("alignments.bin").exists() {
+			let align_bytes = std::fs::read(path.join("alignments.bin"))?;
+			bincode::deserialize(&align_bytes)
+				.map_err(|e| IndexError::Format(format!("Failed to deserialize alignments: {}", e)))?
+		} else {
+			AlignmentIndex::new()
+		};
+
 		Ok(Self {
 			path: path.to_path_buf(),
 			meta,
@@ -71,6 +130,7 @@ impl Corpus {
 			forward,
 			spans,
 			lexicon,
+			alignments,
 		})
 	}
 
@@ -106,5 +166,54 @@ impl Corpus {
 			}
 		}
 		None
+	}
+
+	pub fn components(&self) -> &[ComponentMeta] {
+		&self.meta.components
+	}
+
+	pub fn component(&self, name: &str) -> Option<&ComponentMeta> {
+		self.meta.components.iter().find(|c| c.name == name)
+	}
+
+	pub fn component_for_document(&self, doc_index: usize) -> Option<&ComponentMeta> {
+		self.meta.components.iter().find(|c| {
+			doc_index >= c.document_range.0 && doc_index < c.document_range.1
+		})
+	}
+
+	pub fn is_multi_component(&self) -> bool {
+		self.meta.components.len() > 1
+	}
+
+	pub fn alignment_meta(&self, name: &str) -> Option<&AlignmentMeta> {
+		self.meta.alignments.iter().find(|a| a.name == name)
+	}
+
+	pub fn alignment_edges(&self, name: &str) -> Option<&[(UnitId, UnitId)]> {
+		self.alignments.get(name)
+	}
+
+	pub fn document_span(&self, doc_index: usize) -> Option<Span> {
+		self.spans.spans("document").and_then(|spans| spans.get(doc_index).copied())
+	}
+
+	pub fn sentence_span(&self, sent_index: usize) -> Option<Span> {
+		self.spans.spans("sentence").and_then(|spans| spans.get(sent_index).copied())
+	}
+
+	pub fn sentences_in_document(&self, doc_index: usize) -> Option<Vec<(usize, Span)>> {
+		let doc_span = self.document_span(doc_index)?;
+		let sent_spans = self.spans.spans("sentence")?;
+
+		let mut result = Vec::new();
+		for (i, span) in sent_spans.iter().enumerate() {
+			if span.start >= doc_span.start && span.end <= doc_span.end {
+				result.push((i, *span));
+			} else if span.start >= doc_span.end {
+				break;
+			}
+		}
+		Some(result)
 	}
 }

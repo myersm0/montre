@@ -20,6 +20,14 @@ pub enum Query {
 		name: String,
 		inner: Box<Query>,
 	},
+	WithinComponent {
+		inner: Box<Query>,
+		component: String,
+	},
+	Project {
+		inner: Box<Query>,
+		alignment: String,
+	},
 }
 
 #[derive(Debug, Clone, PartialEq)]

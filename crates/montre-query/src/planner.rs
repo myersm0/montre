@@ -22,6 +22,14 @@ pub enum PlanNode {
 		inner: Box<PlanNode>,
 		span_layer: String,
 	},
+	FilterByComponent {
+		inner: Box<PlanNode>,
+		component: String,
+	},
+	ProjectAlignment {
+		inner: Box<PlanNode>,
+		alignment: String,
+	},
 	SequenceScan {
 		steps: Vec<SequenceStep>,
 	},
@@ -103,6 +111,22 @@ fn plan_node(query: &Query) -> Result<PlanNode> {
 
 		Query::Capture { inner, .. } => {
 			plan_node(inner)
+		}
+
+		Query::WithinComponent { inner, component } => {
+			let inner_plan = plan_node(inner)?;
+			Ok(PlanNode::FilterByComponent {
+				inner: Box::new(inner_plan),
+				component: component.clone(),
+			})
+		}
+
+		Query::Project { inner, alignment } => {
+			let inner_plan = plan_node(inner)?;
+			Ok(PlanNode::ProjectAlignment {
+				inner: Box::new(inner_plan),
+				alignment: alignment.clone(),
+			})
 		}
 	}
 }

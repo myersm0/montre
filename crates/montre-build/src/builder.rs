@@ -126,6 +126,8 @@ impl CorpusBuilder {
 			layers: self.layer_indices.iter().map(|(n, _)| n.clone()).collect(),
 			span_layers: self.spans.layers().into_iter().map(String::from).collect(),
 			document_names: self.document_names,
+			components: Vec::new(),
+			alignments: Vec::new(),
 		};
 
 		let meta_json = serde_json::to_string_pretty(&serde_json::json!({

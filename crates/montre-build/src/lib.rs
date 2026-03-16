@@ -1,8 +1,13 @@
 pub mod format;
 pub mod builder;
+pub mod manifest;
+pub mod multi;
 
 use std::path::Path;
 use thiserror::Error;
+
+pub use manifest::Manifest;
+pub use multi::MultiCorpusBuilder;
 
 #[derive(Error, Debug)]
 pub enum BuildError {
@@ -17,6 +22,15 @@ pub enum BuildError {
 
 	#[error("JSON error: {0}")]
 	Json(#[from] serde_json::Error),
+
+	#[error("Manifest error: {0}")]
+	Manifest(String),
+
+	#[error("Unknown component: {0}")]
+	UnknownComponent(String),
+
+	#[error("Alignment error: {0}")]
+	Alignment(String),
 }
 
 pub type Result<T> = std::result::Result<T, BuildError>;

@@ -9,6 +9,7 @@ use walkdir::WalkDir;
 use montre_build::builder::CorpusBuilder;
 use montre_build::format::conllu::ConllUReader;
 use montre_build::format::{CorpusReader, ParseStats};
+use montre_build::MultiCorpusBuilder;
 use montre_core::Value;
 use montre_index::ForwardIndex;
 
@@ -26,8 +27,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
 	Build {
-		#[arg(short, long)]
-		input: PathBuf,
+		#[arg(short, long, conflicts_with = "manifest")]
+		input: Option<PathBuf>,
+
+		#[arg(short, long, help = "Build from manifest file")]
+		manifest: Option<PathBuf>,
 
 		#[arg(short, long)]
 		output: PathBuf,
@@ -92,11 +96,20 @@ fn main() -> Result<()> {
 	match cli.command {
 		Commands::Build {
 			input,
+			manifest,
 			output,
 			name,
 			force,
 			strict,
-		} => cmd_build(input, output, name, force, strict),
+		} => {
+			if let Some(manifest_path) = manifest {
+				cmd_build_manifest(manifest_path, output, force, strict)
+			} else if let Some(input_path) = input {
+				cmd_build(input_path, output, name, force, strict)
+			} else {
+				anyhow::bail!("Either --input or --manifest must be specified")
+			}
+		}
 		Commands::Query {
 			corpus,
 			query,
@@ -105,6 +118,31 @@ fn main() -> Result<()> {
 		} => cmd_query(corpus, query, limit, count_only),
 		Commands::Info { corpus } => cmd_info(corpus),
 	}
+}
+
+fn cmd_build_manifest(
+	manifest_path: PathBuf,
+	output: PathBuf,
+	force: bool,
+	strict: bool,
+) -> Result<()> {
+	if output.exists() && !force {
+		anyhow::bail!(
+			"Output directory {} already exists. Use --force to overwrite.",
+			output.display()
+		);
+	}
+
+	tracing::info!("Building corpus from manifest: {}", manifest_path.display());
+
+	MultiCorpusBuilder::from_manifest(&manifest_path)
+		.with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?
+		.strict(strict)
+		.build(&output)
+		.with_context(|| "Failed to build corpus")?;
+
+	tracing::info!("Corpus written to {}", output.display());
+	Ok(())
 }
 
 fn cmd_build(
@@ -294,6 +332,31 @@ fn cmd_info(corpus_path: PathBuf) -> Result<()> {
 	println!("Documents: {}", corpus.document_names().len());
 	println!("Layers: {}", corpus.layers().join(", "));
 	println!("Span layers: {}", corpus.span_layers().join(", "));
+
+	if corpus.is_multi_component() {
+		println!("\nComponents:");
+		for comp in corpus.components() {
+			let doc_count = comp.document_range.1 - comp.document_range.0;
+			println!(
+				"  {} ({}) - {} documents",
+				comp.name, comp.language, doc_count
+			);
+		}
+	}
+
+	if !corpus.meta.alignments.is_empty() {
+		println!("\nAlignments:");
+		for align in &corpus.meta.alignments {
+			println!(
+				"  {} ({} -> {}, {} layer, {} edges)",
+				align.name,
+				align.source_component,
+				align.target_component,
+				align.source_layer,
+				align.edge_count
+			);
+		}
+	}
 
 	Ok(())
 }

@@ -243,6 +243,89 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 			Ok(hits)
 		}
 
+		PlanNode::FilterByComponent { inner, component } => {
+			let hits = execute_node(inner, corpus)?;
+
+			let Some(comp_meta) = corpus.component(component) else {
+				return Ok(Vec::new());
+			};
+
+			let doc_spans = corpus.spans.spans("document");
+
+			let hits = hits
+				.into_iter()
+				.filter(|hit| {
+					if let Some(spans) = doc_spans {
+						for (doc_idx, span) in spans.iter().enumerate() {
+							if hit.span.start >= span.start && hit.span.end <= span.end {
+								return doc_idx >= comp_meta.document_range.0
+									&& doc_idx < comp_meta.document_range.1;
+							}
+						}
+					}
+					false
+				})
+				.collect();
+
+			Ok(hits)
+		}
+
+		PlanNode::ProjectAlignment { inner, alignment } => {
+			let source_hits = execute_node(inner, corpus)?;
+
+			let Some(edges) = corpus.alignment_edges(alignment) else {
+				return Err(crate::QueryError::Execution(format!(
+					"Alignment not found: {}",
+					alignment
+				)));
+			};
+
+			let Some(align_meta) = corpus.alignment_meta(alignment) else {
+				return Err(crate::QueryError::Execution(format!(
+					"Alignment metadata not found: {}",
+					alignment
+				)));
+			};
+
+			let Some(sent_spans) = corpus.spans.spans(&align_meta.source_layer) else {
+				return Ok(Vec::new());
+			};
+
+			let Some(target_spans) = corpus.spans.spans(&align_meta.target_layer) else {
+				return Ok(Vec::new());
+			};
+
+			let source_sentence_for_hit = |hit: &Hit| -> Option<u32> {
+				for (idx, span) in sent_spans.iter().enumerate() {
+					if hit.span.start >= span.start && hit.span.end <= span.end {
+						return Some(idx as u32);
+					}
+				}
+				None
+			};
+
+			let mut result_hits = Vec::new();
+			let mut seen_targets = HashSet::new();
+
+			for hit in &source_hits {
+				if let Some(source_sent_idx) = source_sentence_for_hit(hit) {
+					for &((_src_doc, src_unit), (_tgt_doc, tgt_unit)) in edges {
+						if src_unit == source_sent_idx {
+							let target_key = (_tgt_doc, tgt_unit);
+							if seen_targets.insert(target_key) {
+								if let Some(target_span) = target_spans.get(tgt_unit as usize) {
+									result_hits.push(Hit::new(*target_span));
+								}
+							}
+						}
+					}
+				}
+			}
+
+			result_hits.sort_by_key(|h| h.span.start);
+			Ok(result_hits)
+		}
+
 		PlanNode::SequenceScan { steps } => execute_sequence(steps, corpus),
 	}
 }
