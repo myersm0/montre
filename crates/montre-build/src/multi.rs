@@ -251,7 +251,11 @@ impl MultiCorpusBuilder {
 			})?;
 
 		let edges_path = self.manifest_dir.join(&config.edges);
-		let edges = self.parse_alignment_file(&edges_path, source_comp, target_comp)?;
+		let edges = if edges_path.is_dir() {
+			self.parse_alignment_dir(&edges_path, source_comp, target_comp)?
+		} else {
+			self.parse_alignment_file(&edges_path, source_comp, target_comp)?
+		};
 
 		let meta = AlignmentMeta {
 			name: name.to_string(),
@@ -275,6 +279,35 @@ impl MultiCorpusBuilder {
 		self.alignment_meta.push(meta);
 
 		Ok(())
+	}
+
+	fn parse_alignment_dir(
+		&self,
+		dir: &Path,
+		source_comp: &ComponentMeta,
+		target_comp: &ComponentMeta,
+	) -> Result<Vec<(UnitId, UnitId)>> {
+		let mut all_edges = Vec::new();
+
+		let mut files: Vec<_> = std::fs::read_dir(dir)
+			.map_err(|e| BuildError::Alignment(format!("Failed to read directory {:?}: {}", dir, e)))?
+			.filter_map(|e| e.ok())
+			.filter(|e| {
+				e.path()
+					.extension()
+					.map(|ext| ext == "tsv")
+					.unwrap_or(false)
+			})
+			.collect();
+
+		files.sort_by_key(|e| e.path());
+
+		for entry in files {
+			let edges = self.parse_alignment_file(&entry.path(), source_comp, target_comp)?;
+			all_edges.extend(edges);
+		}
+
+		Ok(all_edges)
 	}
 
 	fn parse_alignment_file(
