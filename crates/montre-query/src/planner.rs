@@ -71,14 +71,20 @@ fn plan_node(query: &Query) -> Result<PlanNode> {
 		Query::Token(pattern) => plan_token(pattern),
 
 		Query::Sequence(parts) => {
-			let steps: Result<Vec<SequenceStep>> = parts
-				.iter()
-				.map(|q| {
-					let node = plan_node(q)?;
-					Ok(SequenceStep::once(node))
-				})
-				.collect();
-			Ok(PlanNode::SequenceScan { steps: steps? })
+			let mut steps = Vec::new();
+			for q in parts {
+				match q {
+					Query::Repetition { inner, min, max } => {
+						let inner_plan = plan_node(inner)?;
+						steps.push(SequenceStep::repeated(inner_plan, *min, *max));
+					}
+					_ => {
+						let node = plan_node(q)?;
+						steps.push(SequenceStep::once(node));
+					}
+				}
+			}
+			Ok(PlanNode::SequenceScan { steps })
 		}
 
 		Query::Repetition { inner, min, max } => {
