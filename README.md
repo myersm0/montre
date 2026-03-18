@@ -1,154 +1,145 @@
 # Montre
-A modern, embeddable query engine for corpus linguistics. Lightweight, easy to install and use, but powerful.
 
-> **montre** *(/mɔ̃tʁ/):* to show; to reveal; to make visible (French)  
-> *From Latin* **monstrare** “to point out, indicate.”
+A modern, embeddable query engine for corpus linguistics.
+
+> **montre** *(/mɔ̃tʁ/):* to show; to reveal; to make visible (French)
+> *From Latin* **monstrare** "to point out, indicate."
 
 Montre is particularly suited for aligned literary corpora and multi-edition corpora.
 
-## Status
-**Early development.** Not yet usable for real research work.
-The architecture and data model are stabilizing; APIs, formats, and CLI are still in flux.
+## Install
 
-## What is Montre?
-Montre is a **local-first corpus query engine**:
-
-* No server
-* No daemon
-* No global registry
-* No service dependencies
-
-A Montre corpus is a **portable artifact**: a single directory containing indexed text, annotations, and (optionally) alignments. You can open it from the CLI, Python, Julia, or R -- as a library, not as a service.
-
-## Goals
-
-* **Fast queries** on large annotated corpora (100M+ tokens)
-* **Embeddable**: use as a library, not a server
-* **Native NLP integration**:
-
-  * CoNLL-U
-  * Stanza JSON
-  * UDPipe
-  * spaCy exports
-* **Clean, expressive query language** based on CQL
-* **First-class parallel corpus support**:
-
-  * multiple languages
-  * multiple editions
-  * multiple competing alignments
-  * alignment-aware querying
-
-## Design principles
-
-### 1. Corpus as artifact
-
-A corpus is a **build product**, not a runtime configuration:
-
-* immutable
-* reproducible
-* portable
-* versionable
-
-This enables:
-
-* stable research artifacts
-* reproducible experiments
-* reliable citation
-
-### 2. Components of a corpus
-
-A corpus may contain multiple **components**:
-
-* monolingual subcorpora
-* reference corpora
-* editions
-* translations
-
-Each component is independently queryable, but can participate in structured relations (alignments).
-
-### 3. Alignments as data
-
-Parallelism of corpora is flexible.
-
-Alignments are:
-
-* named
-* typed
-* layered
-* replaceable
-
-You can have several alignments (over sentences, paragraphs, etc) potentially from different models (e.g. LaBSE, vecalign) and choose which alignment(s) to use at query time.
-
-### 4. Alignment-native querying
-
-Queries can project across alignments:
-
-```cql
-<lemma="bibelot"] =labse_sentence=> component:"maupassant-en"
+```bash
+curl -fsSL https://raw.githubusercontent.com/myersm0/montre/main/install.sh | sh
 ```
 
-This is projection, not a join:
-
-* hit sets move between components
-* cardinality may change
-* relations are explicit and named
-
----
-
-## Capabilities (planned)
-
-### Querying
-
-* token queries
-* span queries
-* structural queries
-* metadata filters
-* distributional queries
-* alignment projection
-
-### Parallel corpus support
-
-* sentence-level alignments
-* paragraph-level alignments
-* many-to-many mappings
-* multiple competing alignment models
-* edition-aware alignment
-
-### Interfaces
-
-* CLI
-* embeddable Rust API
-* Python bindings
-* Julia bindings
-* R bindings
-* TUI (ratatui-based, separate repo)
-
----
-
-## Building
+Or build from source:
 
 ```bash
 cargo build --release
 ```
 
----
-
-## Usage (planned)
+## Quick start
 
 ```bash
-# Build a corpus from CoNLL-U
-montre build --input corpus.conllu --output ./my-corpus
+# Build a corpus from CoNLL-U files
+montre build -i data/maupassant/ -o my-corpus/
+
+# Build a multi-component corpus with alignments
+montre build -m corpus.toml -o my-corpus/
 
 # Query
-montre query ./my-corpus '[pos="NOUN"] [pos="NOUN"]'
+montre query my-corpus/ '[pos="ADJ"] [pos="NOUN"]'
 
-# Info
-montre info ./my-corpus
+# Count matches
+montre query my-corpus/ '[pos="ADJ"]+ [pos="NOUN"]' --count-only
+
+# Corpus info
+montre info my-corpus/
 ```
 
----
+## What is Montre?
 
-## Library usage (planned)
+Montre is a **local-first corpus query engine**. No server, no daemon, no service dependencies.
+
+A Montre corpus is a portable artifact: a single directory containing indexed text, annotations, and (optionally) alignments. You can open it from the CLI or from Julia and Python as a library.
+
+## Query language
+
+Montre uses a CQL-based query language:
+
+```cql
+# Token queries
+[pos="NOUN"]
+[lemma="maison"]
+[word="chat" & pos="NOUN"]
+[lemma=/^un.*/]
+[pos!="PUNCT"]
+
+# Sequences
+[pos="DET"] [pos="ADJ"]* [pos="NOUN"]
+
+# Quantifiers
+[pos="ADJ"]+                    # one or more
+[pos="ADJ"]*                    # zero or more
+[pos="ADJ"]?                    # optional
+[pos="ADJ"]{2,4}                # 2 to 4
+
+# Alternation
+([pos="ADJ"] | [pos="ADV"])+ [pos="NOUN"]
+
+# Structural constraints
+[pos="DET"] [pos="NOUN"] within s
+[lemma="chat"] within doc
+
+# Component filtering (multi-component corpora)
+[pos="NOUN"] within component:"maupassant-fr"
+
+# Alignment projection
+[lemma="maison"] within component:fr =labse=>
+```
+
+## Parallel corpus support
+
+Montre has first-class support for multi-component corpora with alignments:
+
+- Multiple components (languages, editions, translations) in one corpus
+- Named alignments at any span level (sentence, paragraph, stanza)
+- Multiple competing alignments from different models (LaBSE, vecalign, manual)
+- Alignment projection: query one language, project hits to another
+
+Define a multi-component corpus with a TOML manifest:
+
+```toml
+[corpus]
+name = "isosceles"
+
+[components.maupassant-fr]
+path = "data/maupassant/fr/conllu/"
+language = "fr"
+
+[components.maupassant-en]
+path = "data/maupassant/en/conllu/"
+language = "en"
+
+[alignments.labse]
+source = "maupassant-fr"
+target = "maupassant-en"
+edges = "alignments/labse/"
+source_layer = "sentence"
+target_layer = "sentence"
+```
+
+## Performance
+
+On a 1.5M token corpus (Maupassant French/English), Apple M-series:
+
+| Query | Matches | Time |
+|---|---|---|
+| `[pos="NOUN"]` | ~180K | ~12ms |
+| `[pos="ADJ"] [pos="NOUN"]` | 30,672 | 13ms |
+| `[pos="ADJ"]? [pos="NOUN"]` | 272,019 | 72ms |
+| `([pos="ADJ"] \| [pos="ADV"])+ [pos="NOUN"]` | 33,444 | 27ms |
+| `([pos="ADJ"] \| [pos="DET"])+ [pos="NOUN"]` | 198,735 | 71ms |
+| Alignment projection | — | ~250µs overhead |
+
+Quantifiers use a run-based execution model that scales with matching tokens, not corpus size.
+
+## Library usage
+
+Montre ships a C FFI (`libmontre_ffi`) for embedding in other languages.
+
+### Julia
+
+```julia
+using Montre
+
+corpus = open_corpus("./my-corpus")
+hits = query(corpus, """[pos="ADJ"] [pos="NOUN"]""")
+for line in concordance(corpus, hits)
+    println(line)
+end
+```
 
 ### Python
 
@@ -160,35 +151,26 @@ for hit in corpus.query('[pos="DET"] [pos="NOUN"]'):
     print(hit.start, hit.end)
 ```
 
-### Julia
-
-```julia
-using Montre
-
-corpus = open_corpus("./my-corpus")
-for hit in query(corpus, "[pos=\"DET\"] [pos=\"NOUN\"]")
-    println(hit)
-end
-```
-
----
-
 ## Architecture
 
 ```
-montre-core     Core data model (Position, Span, Token, Unit, Component)
-montre-index    Index structures (inverted, forward, span indexes)
-montre-query    Query parser, planner, optimizer, executor
-montre-build    Corpus construction (CoNLL-U, JSON, text + metadata)
-montre-align    Alignment ingestion and projection engine
+montre-core     Primitives: Span, Token, Position, Value
+montre-index    Inverted index, forward index, span index, corpus loading
+montre-query    CQL parser, query planner, executor
+montre-build    Corpus construction from CoNLL-U, multi-component builder
 montre-cli      Command-line interface
-montre-py       Python bindings
-montre-jl       Julia bindings
+montre-ffi      C FFI for Julia/Python/R bindings
+montre-py       Python bindings (PyO3, stub)
 ```
 
----
+## Status
+
+**v0.1.0** — core engine is functional and tested.
+
+Working: token queries, sequences, quantifiers, alternation, regex, negation, conjunction, `within` constraints, multi-component corpora, sentence-level alignment, alignment projection, C FFI.
+
+Next: labeled captures and global constraints (Phase 2b), statistics commands, Julia and Python bindings, TUI.
 
 ## License
 
 Apache-2.0
-
