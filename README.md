@@ -1,4 +1,6 @@
 # Montre
+[![CI](https://github.com/myersm0/montre/actions/workflows/ci.yml/badge.svg)](https://github.com/myersm0/montre/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/myersm0/montre)](https://github.com/myersm0/montre/releases/latest)
 
 A modern, embeddable query engine for corpus linguistics.
 
