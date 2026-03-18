@@ -12,7 +12,7 @@ Montre does not rely on:
 - External configuration files
 - Shared indexes or system-wide state
 
-Montre takes the approach: one path → one corpus → one semantic universe.
+This design prioritizes embedding, reproducibility, and portability: one path → one corpus → one semantic universe.
 
 ### Engine first, presentation last
 
@@ -113,7 +113,7 @@ struct Alignment {
 type UnitId = (u32, u32);  // (document_index, unit_index_within_doc)
 ```
 
-**Future: weighted alignment edges** (v0.2+)
+**Future: Weighted Alignment Edges** (v0.2+)
 
 Neural aligners (LaBSE, vecalign) and even Church-Gale produce confidence scores. A future edge format will support:
 
@@ -128,7 +128,7 @@ struct AlignmentEdge {
 
 This enables threshold filtering (`--min-confidence 0.7`) and empirical comparison of alignment algorithms.
 
-**Non-exhaustive alignments**
+**Non-Exhaustive Alignments**
 
 Not every unit must participate in an alignment. Missing edges are semantically meaningful, not errors. This is essential for:
 - Truncated translations (Baudelaire omitting Poe passages)
@@ -340,7 +340,7 @@ CQL string
 [pos="DET"] [pos="NOUN"]    # sequence
 ```
 
-### Phase 2a: Query Language MVP
+### Phase 2a: Query language MVP
 
 ```cql
 [pos!="PUNCT"]              # negation
@@ -354,7 +354,7 @@ CQL string
 [lemma="house"] within doc                          # document constraint
 ```
 
-### Phase 2b: Labels, Global Constraints, Named Query Results
+### Phase 2b: Labels, global constraints, named query results
 
 ```cql
 # Labels mark positions
@@ -374,7 +374,7 @@ C = difference A B;
 expand C to s;
 ```
 
-### Phase 3: Parallel Corpus Queries
+### Phase 3: Parallel corpus queries
 
 ```cql
 # Query with component filter
@@ -408,7 +408,7 @@ Note: Not all constructs will be implemented simultaneously. Early versions prio
 - [x] Lexicon with term IDs
 - [x] Bincode serialization
 
-### Phase 1: Basic Queries ✓
+### Phase 1: Basic queries ✓
 
 - [x] CQL parser (winnow)
 - [x] Literal and regex token patterns
@@ -418,7 +418,7 @@ Note: Not all constructs will be implemented simultaneously. Early versions prio
 - [x] Basic executor
 - [x] KWIC display (CLI)
 
-### Phase 1a: Multi-File Support ✓
+### Phase 1a: Multi-file support ✓
 
 - [x] Directory traversal (`walkdir`)
 - [x] Per-file document boundaries
@@ -426,16 +426,42 @@ Note: Not all constructs will be implemented simultaneously. Early versions prio
 - [x] Lenient CoNLL-U parsing (skip malformed sentences)
 - [x] `--strict` mode for fail-fast
 
-### Phase 2a: Query Language MVP (Current)
+### Phase 2a: Query language MVP ✓
 
-- [ ] Negation (`!=`)
-- [ ] Matchall (`[]`)
-- [ ] Quantifiers (`+`, `*`, `?`, `{n,m}`)
-- [ ] Alternation (`|`)
-- [ ] `within s` / `within doc` constraints
-- [ ] N-token sequences (arbitrary length)
+- [x] Negation (`!=`)
+- [x] Matchall (`[]`)
+- [x] Quantifiers (`+`, `*`, `?`, `{n,m}`)
+- [x] Alternation (`|`)
+- [x] `within s` / `within doc` constraints
+- [x] N-token sequences (arbitrary length)
+- [x] Run-based quantifier execution (see below)
 
-### Phase 2b: Labels & Named Query Results
+**Run-based quantifier model**
+
+Quantifiers are implemented as *run-based span generators*, not per-position expansion:
+
+1. **Run detection**: Convert positions to maximal contiguous runs in O(k) where k = matching tokens
+2. **Span generation**: First step generates spans from runs; subsequent steps probe runs at boundary positions
+3. **Boundary tracking**: Active set stored as `HashMap<end, Vec<start>>` to avoid O(N²) blowup
+4. **Epsilon handling**: `min=0` propagates spans unchanged (no zero-length span materialization)
+
+This model:
+- Scales linearly with matching tokens, not corpus size
+- Handles `[]` (ScanAll) efficiently in non-first positions
+- Makes optional patterns (`?`, `{0,n}`) correct by construction
+- Caps quantifier width at 100 to bound worst-case expansion
+
+Performance on test corpus (Maupassant sub-corpus of stories from Isosceles corpus: 1.6m French tokens, 1m English tokens):
+
+| Query | Matches | Time |
+|-------|---------|------|
+| `[pos="ADJ"] [pos="NOUN"]` | 30,672 | 13ms |
+| `[pos="ADJ"]? [pos="NOUN"]` | 272,019 | 72ms |
+| `[pos="ADJ"]{2,4}` | 1,628 | 0.5ms |
+| `[pos="DET"]{2} [pos="NOUN"]{2}` | 14 | 2.6ms |
+| `[] [lemma="chat"]` | 120 | 132ms |
+
+### Phase 2b: Labels & global constraints
 
 - [ ] Label syntax (`a:[pos="ADJ"]`)
 - [ ] Global constraints (`:: a.lemma = b.lemma`)
@@ -444,22 +470,128 @@ Note: Not all constructs will be implemented simultaneously. Early versions prio
 - [ ] Set operations (subset, difference, intersection)
 - [ ] `expand` to sentence/document
 
-### Phase 2c: Hit Model Enhancement
+**Implementation plan**
 
-- [ ] Add `document_index` to `Hit`
-- [ ] Add `sentence_index` to `Hit`
-- [ ] Compute IDs during execution (not reconstruction)
+Phase 2b introduces *labeled captures* and *global constraints*. This is a significant extension because constraints operate over the full match, not just local token properties.
 
-### Phase 3: Parallel Corpus Support
+**Step 1: Labels in AST and parser**
 
-- [ ] Component model
-- [ ] Build manifest (TOML)
-- [ ] Alignment ingestion
-- [ ] Extensible span layers
-- [ ] `within component:X` filter
-- [ ] Alignment projection (`=name=>`)
-- [ ] Multiple alignments per component pair
+Extend `Query` AST:
+```rust
+Query::Labeled {
+    name: String,
+    inner: Box<Query>,
+}
+```
 
+Parser recognizes `a:[...]` syntax. Labels can appear on any query element, including groups and quantified expressions.
+
+**Step 2: Captures in Hit**
+
+The `Hit` struct already has `captures: Vec<(String, Span)>`. The executor must populate this when labeled nodes match.
+
+**Step 3: Planner changes**
+
+Labels are transparent to the planner — they wrap nodes without changing execution strategy. The planner passes label information through to the executor.
+
+**Step 4: Executor capture tracking**
+
+During sequence execution, track which labeled subexpressions matched at which spans. After a complete match, record `(label_name, span)` pairs in the Hit.
+
+Key complexity: a label inside a quantified expression (e.g., `a:[pos="ADJ"]+`) may capture multiple spans. Decide semantics:
+- Option A: Capture first occurrence only
+- Option B: Capture all occurrences (changes capture type to `Vec<Span>`)
+- Option C: Capture the full quantified span
+
+Recommend Option C for simplicity — the label captures the entire quantified match, not individual repetitions.
+
+**Step 5: Global constraints**
+
+Global constraints appear after `::` and express relationships between labeled positions:
+
+```cql
+a:[pos="NOUN"] []* b:[pos="NOUN"] :: a.lemma = b.lemma
+```
+
+Parser extension:
+```rust
+Query::Constrained {
+    pattern: Box<Query>,
+    constraints: Vec<GlobalConstraint>,
+}
+
+enum GlobalConstraint {
+    Eq { left: LabelAttr, right: LabelAttr },
+    Ne { left: LabelAttr, right: LabelAttr },
+    Distance { left: String, right: String, op: CmpOp, value: u32 },
+}
+
+struct LabelAttr {
+    label: String,
+    attr: String,  // "lemma", "word", "pos", etc.
+}
+```
+
+**Step 6: Constraint evaluation**
+
+After finding candidate matches, filter by global constraints. This requires:
+1. For each candidate hit, look up attribute values at captured positions
+2. Evaluate constraint predicates
+3. Keep only hits where all constraints are satisfied
+
+This is a post-filter operation — execute the pattern first, then filter. For very selective constraints on large result sets, this could be slow. Future optimization: push constraints into execution when possible.
+
+**Step 7: Distance function**
+
+`distance(a, b)` returns token distance between labeled spans:
+```
+distance = b.start - a.end  // gap between spans
+// or: b.start - a.start   // start-to-start distance
+```
+
+Document the chosen semantics clearly.
+
+**Step 8: Named Query Results (deferred)**
+
+This is essentially query variables and set operations:
+```cql
+A = [lemma="maison"];
+B = subset A where match.document_author = "Baudelaire";
+C = difference A B;
+```
+
+This requires:
+- REPL or script mode (not single-query CLI)
+- Result storage
+- Metadata filtering
+
+Recommend deferring this to Phase 2c or later. It's useful but not core to the query language.
+
+**Testing priorities**
+
+1. `a:[pos="ADJ"] [pos="NOUN"]` — basic label, capture in hit
+2. `a:[pos="ADJ"]+ [pos="NOUN"]` — label on quantified expression
+3. `a:[word=".*"] b:[word=".*"] :: a.word = b.word` — simple equality constraint
+4. `a:[pos="NOUN"] []{0,5} b:[pos="NOUN"] :: a.lemma = b.lemma` — same-lemma repetition
+5. `a:[] b:[] :: distance(a,b) >= 3` — distance constraint
+
+### Phase 2c: Hit model enhancement ✓
+
+- [x] Add `document_index` to `Hit`
+- [x] Add `sentence_index` to `Hit`
+- [x] Lazy context population (`Results::populate_context`)
+
+### Phase 3: Parallel corpus support ✓
+
+- [x] TOML build manifest
+- [x] Component model (`ComponentMeta`)
+- [x] Multi-component builder (`MultiCorpusBuilder`)
+- [x] Alignment storage (`AlignmentIndex`)
+- [x] Alignment edge ingestion (TSV format)
+- [x] `within component:X` filter
+- [x] `=alignment=>` projection operator
+- [x] CLI `--manifest` build option
+- [x] `montre info` shows components and alignments
 ### Phase 4: Statistics & Python
 
 - [ ] `count` command
@@ -470,20 +602,18 @@ Note: Not all constructs will be implemented simultaneously. Early versions prio
 
 ## Benchmarks
 
-Preliminary numbers on maupassant-en corpus on an Apple M4 Pro (English corpus with 589K tokens, 180 documents):
+Current numbers on Apple M-series, 1.6 million-token corpus (Maupassant French/English):
 
-| Operation | Time |
-|-----------|------|
-| Build (debug) | ~5s |
-| Build (release) | ~2s |
-| Query: rare word (3 hits) | 4-7µs |
-| Query: common word (25K hits) | 66µs |
-| Query: 2-token sequence (250 hits) | 260µs |
-| Query: 3-token sequence (3.8K hits) | 2ms |
+| Query | Matches | Time |
+|-------|---------|------|
+| `[pos="NOUN"]` | ~180K | ~12ms |
+| `[pos="ADJ"] [pos="NOUN"]` | 30,672 | 13ms |
+| `[pos="ADJ"]? [pos="NOUN"]` | 272,019 | 72ms |
+| `[pos="ADJ"]{2,4}` | 1,628 | 0.5ms |
+| `[lemma="maison"]` | ~800 | <1ms |
+| `[] [lemma="chat"]` | 120 | 132ms |
 
-Index size: ~53MB (source CoNLL-U: ~15MB)
-- Inverted index: 7MB
-- Forward index: 46MB
+Alignment projection adds ~250µs per query.
 
 ## Error handling
 
