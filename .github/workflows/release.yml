@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl,x86_64-unknown-linux-gnu
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build CLI (musl, static)
+        run: cargo build --release --target x86_64-unknown-linux-musl -p montre-cli
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          RUSTFLAGS: "-C target-feature=+crt-static"
+      - name: Build shared library (glibc)
+        run: cargo build --release --target x86_64-unknown-linux-gnu -p montre-ffi
+      - name: Package
+        run: |
+          mkdir montre-linux-x86_64
+          cp target/x86_64-unknown-linux-musl/release/montre montre-linux-x86_64/
+          cp target/x86_64-unknown-linux-gnu/release/libmontre_ffi.so montre-linux-x86_64/
+          tar czf montre-linux-x86_64.tar.gz montre-linux-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: montre-linux-x86_64
+          path: montre-linux-x86_64.tar.gz
+
+  build-macos:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            artifact: montre-macos-x86_64
+          - target: aarch64-apple-darwin
+            artifact: montre-macos-aarch64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - run: |
+          mkdir ${{ matrix.artifact }}
+          cp target/${{ matrix.target }}/release/montre ${{ matrix.artifact }}/
+          cp target/${{ matrix.target }}/release/libmontre_ffi.dylib ${{ matrix.artifact }}/
+          tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
+
+  release:
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: "*.tar.gz"
+          generate_release_notes: true
