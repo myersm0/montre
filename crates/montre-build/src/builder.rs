@@ -11,19 +11,18 @@ use montre_index::{ForwardIndex, SpanIndex};
 use crate::format::ParsedSentence;
 use crate::Result;
 
-pub struct CorpusBuilder {
-	name: String,
-	inverted: InMemoryInverted,
-	forward: InMemoryForward,
-	spans: InMemorySpans,
-	lexicon: InMemoryLexicon,
-	layer_indices: Vec<(String, usize)>,
-	current_position: u64,
-	document_names: Vec<String>,
+pub struct IndexSink {
+	pub(crate) inverted: InMemoryInverted,
+	pub(crate) forward: InMemoryForward,
+	pub(crate) spans: InMemorySpans,
+	pub(crate) lexicon: InMemoryLexicon,
+	pub(crate) layer_indices: Vec<(String, usize)>,
+	pub(crate) current_position: u64,
+	pub(crate) document_names: Vec<String>,
 }
 
-impl CorpusBuilder {
-	pub fn new(name: impl Into<String>) -> Self {
+impl IndexSink {
+	pub fn new() -> Self {
 		let mut forward = InMemoryForward::new();
 		let mut layer_indices = Vec::new();
 
@@ -33,7 +32,6 @@ impl CorpusBuilder {
 		}
 
 		Self {
-			name: name.into(),
 			inverted: InMemoryInverted::new(),
 			forward,
 			spans: InMemorySpans::new(),
@@ -44,13 +42,12 @@ impl CorpusBuilder {
 		}
 	}
 
-	pub fn add_document(&mut self, doc_name: impl Into<String>, sentences: Vec<ParsedSentence>) {
-		let doc_name = doc_name.into();
+	pub fn add_document(&mut self, doc_name: &str, sentences: Vec<ParsedSentence>) {
 		let doc_start = self.current_position;
 
 		for sentence in sentences {
 			let sent_start = self.current_position;
-			
+
 			for token in &sentence.tokens {
 				let position = self.current_position;
 
@@ -84,12 +81,8 @@ impl CorpusBuilder {
 		let doc_end = self.current_position;
 		if doc_end > doc_start {
 			self.spans.add_span("document", Span::new(doc_start, doc_end));
-			self.document_names.push(doc_name);
+			self.document_names.push(doc_name.to_string());
 		}
-	}
-
-	pub fn add_sentences(&mut self, sentences: Vec<ParsedSentence>) {
-		self.add_document("unknown", sentences);
 	}
 
 	fn add_token_annotation(&mut self, position: u64, layer: &str, value: &str) {
@@ -102,42 +95,15 @@ impl CorpusBuilder {
 		self.lexicon.add_term(layer, value);
 	}
 
-	pub fn current_position(&self) -> u64 {
-		self.current_position
-	}
-
-	pub fn document_count(&self) -> usize {
-		self.document_names.len()
-	}
-
-	pub fn build(mut self, output_path: impl AsRef<Path>) -> Result<()> {
+	pub fn write(mut self, path: &Path, meta: CorpusMeta) -> Result<()> {
 		self.spans.finalize();
 
-		let path = output_path.as_ref();
 		if path.exists() {
 			std::fs::remove_dir_all(path)?;
 		}
 		std::fs::create_dir_all(path)?;
 
-		let meta = CorpusMeta {
-			name: self.name,
-			version: montre_index::index_version,
-			token_count: self.forward.token_count(),
-			layers: self.layer_indices.iter().map(|(n, _)| n.clone()).collect(),
-			span_layers: self.spans.layers().into_iter().map(String::from).collect(),
-			document_names: self.document_names,
-			components: Vec::new(),
-			alignments: Vec::new(),
-		};
-
-		let meta_json = serde_json::to_string_pretty(&serde_json::json!({
-			"name": meta.name,
-			"version": meta.version,
-			"token_count": meta.token_count,
-			"layers": meta.layers,
-			"span_layers": meta.span_layers,
-			"document_names": meta.document_names,
-		}))?;
+		let meta_json = serde_json::to_string_pretty(&meta)?;
 		std::fs::write(path.join("corpus.json"), meta_json)?;
 
 		let inverted_bytes = bincode::serialize(&self.inverted)
@@ -168,6 +134,51 @@ impl CorpusBuilder {
 	}
 }
 
+pub struct CorpusBuilder {
+	name: String,
+	pub(crate) sink: IndexSink,
+}
+
+impl CorpusBuilder {
+	pub fn new(name: impl Into<String>) -> Self {
+		Self {
+			name: name.into(),
+			sink: IndexSink::new(),
+		}
+	}
+
+	pub fn add_document(&mut self, doc_name: impl Into<String>, sentences: Vec<ParsedSentence>) {
+		self.sink.add_document(&doc_name.into(), sentences);
+	}
+
+	pub fn add_sentences(&mut self, sentences: Vec<ParsedSentence>) {
+		self.sink.add_document("unknown", sentences);
+	}
+
+	pub fn current_position(&self) -> u64 {
+		self.sink.current_position
+	}
+
+	pub fn document_count(&self) -> usize {
+		self.sink.document_names.len()
+	}
+
+	pub fn build(self, output_path: impl AsRef<Path>) -> Result<()> {
+		let meta = CorpusMeta {
+			name: self.name,
+			version: montre_index::index_version,
+			token_count: self.sink.forward.token_count(),
+			layers: self.sink.layer_indices.iter().map(|(n, _)| n.clone()).collect(),
+			span_layers: self.sink.spans.layers().into_iter().map(String::from).collect(),
+			document_names: self.sink.document_names.clone(),
+			components: Vec::new(),
+			alignments: Vec::new(),
+		};
+
+		self.sink.write(output_path.as_ref(), meta)
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -189,10 +200,10 @@ mod tests {
 		let mut builder = CorpusBuilder::new("test");
 		builder.add_document("test_doc.conllu", sentences);
 
-		let positions = builder.inverted.get("word", "cat").unwrap();
+		let positions = builder.sink.inverted.get("word", "cat").unwrap();
 		assert!(positions.contains(1));
 
-		let positions = builder.inverted.get("pos", "NOUN").unwrap();
+		let positions = builder.sink.inverted.get("pos", "NOUN").unwrap();
 		assert!(positions.contains(1));
 
 		assert_eq!(builder.document_count(), 1);
@@ -216,10 +227,10 @@ mod tests {
 		assert_eq!(builder.current_position(), 2);
 		assert_eq!(builder.document_count(), 2);
 
-		let hello_pos = builder.inverted.get("word", "Hello").unwrap();
+		let hello_pos = builder.sink.inverted.get("word", "Hello").unwrap();
 		assert!(hello_pos.contains(0));
 
-		let world_pos = builder.inverted.get("word", "World").unwrap();
+		let world_pos = builder.sink.inverted.get("word", "World").unwrap();
 		assert!(world_pos.contains(1));
 	}
 }

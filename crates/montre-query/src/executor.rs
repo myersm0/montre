@@ -51,12 +51,11 @@ fn binary_search_span(spans: &[Span], position: u64) -> Option<usize> {
 
 pub struct Results {
 	hits: Vec<Hit>,
-	position: usize,
 }
 
 impl Results {
 	pub fn new(hits: Vec<Hit>) -> Self {
-		Self { hits, position: 0 }
+		Self { hits }
 	}
 
 	pub fn empty() -> Self {
@@ -73,6 +72,10 @@ impl Results {
 
 	pub fn hits(&self) -> &[Hit] {
 		&self.hits
+	}
+
+	pub fn into_hits(self) -> Vec<Hit> {
+		self.hits
 	}
 
 	/// Populate document_index and sentence_index for all hits.
@@ -93,17 +96,21 @@ impl Results {
 	}
 }
 
-impl Iterator for Results {
+impl IntoIterator for Results {
 	type Item = Hit;
+	type IntoIter = std::vec::IntoIter<Hit>;
 
-	fn next(&mut self) -> Option<Self::Item> {
-		if self.position < self.hits.len() {
-			let hit = self.hits[self.position].clone();
-			self.position += 1;
-			Some(hit)
-		} else {
-			None
-		}
+	fn into_iter(self) -> Self::IntoIter {
+		self.hits.into_iter()
+	}
+}
+
+impl<'a> IntoIterator for &'a Results {
+	type Item = &'a Hit;
+	type IntoIter = std::slice::Iter<'a, Hit>;
+
+	fn into_iter(self) -> Self::IntoIter {
+		self.hits.iter()
 	}
 }
 
@@ -234,9 +241,9 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 			let hits = hits
 				.into_iter()
 				.filter(|hit| {
-					spans
-						.iter()
-						.any(|span| span.start <= hit.span.start && hit.span.end <= span.end)
+					binary_search_span(spans, hit.span.start)
+						.map(|idx| hit.span.end <= spans[idx].end)
+						.unwrap_or(false)
 				})
 				.collect();
 
@@ -250,20 +257,20 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 				return Ok(Vec::new());
 			};
 
-			let doc_spans = corpus.spans.spans("document");
+			let Some(doc_spans) = corpus.spans.spans("document") else {
+				return Ok(Vec::new());
+			};
 
 			let hits = hits
 				.into_iter()
 				.filter(|hit| {
-					if let Some(spans) = doc_spans {
-						for (doc_idx, span) in spans.iter().enumerate() {
-							if hit.span.start >= span.start && hit.span.end <= span.end {
-								return doc_idx >= comp_meta.document_range.0
-									&& doc_idx < comp_meta.document_range.1;
-							}
-						}
-					}
-					false
+					binary_search_span(doc_spans, hit.span.start)
+						.map(|doc_idx| {
+							hit.span.end <= doc_spans[doc_idx].end
+								&& doc_idx >= comp_meta.document_range.0
+								&& doc_idx < comp_meta.document_range.1
+						})
+						.unwrap_or(false)
 				})
 				.collect();
 
@@ -389,8 +396,12 @@ fn execute_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<Vec<Hit>>
 	let run_indices: Vec<RunIndex> = steps
 		.iter()
 		.map(|step| {
-			let positions = get_matching_positions(&step.node, corpus).unwrap_or_default();
-			RunIndex::from_positions(&positions)
+			if matches!(step.node, PlanNode::ScanAll) {
+				RunIndex::full(token_count)
+			} else {
+				let positions = get_matching_positions(&step.node, corpus).unwrap_or_default();
+				RunIndex::from_positions(&positions)
+			}
 		})
 		.collect();
 
@@ -534,6 +545,16 @@ impl RunIndex {
 		Self { runs }
 	}
 
+	fn full(token_count: u64) -> Self {
+		if token_count == 0 {
+			Self { runs: Vec::new() }
+		} else {
+			Self {
+				runs: vec![Run { start: 0, end: token_count }],
+			}
+		}
+	}
+
 	fn spans_for_quantifier(&self, min: u32, max: Option<u32>) -> Vec<(u64, u64)> {
 		let max_len = max.unwrap_or(MAX_QUANTIFIER).min(MAX_QUANTIFIER) as u64;
 		let min_len = (min as u64).max(1);
@@ -657,15 +678,11 @@ mod tests {
 			Hit::new(Span::new(5, 6)),
 		];
 
-		let mut results = Results::new(hits);
+		let results = Results::new(hits);
 		assert_eq!(results.len(), 2);
 
-		let first = results.next().unwrap();
-		assert_eq!(first.span.start, 0);
-
-		let second = results.next().unwrap();
-		assert_eq!(second.span.start, 5);
-
-		assert!(results.next().is_none());
+		let collected: Vec<_> = results.into_iter().collect();
+		assert_eq!(collected[0].span.start, 0);
+		assert_eq!(collected[1].span.start, 5);
 	}
 }

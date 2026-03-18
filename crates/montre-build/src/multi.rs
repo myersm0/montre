@@ -1,16 +1,15 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::BufRead;
+use std::io::BufReader;
 use std::path::Path;
 
-use montre_core::{layers, Span, UnitId, Value};
+use montre_core::UnitId;
 use montre_index::corpus::{AlignmentIndex, AlignmentMeta, ComponentMeta, CorpusMeta};
-use montre_index::forward::InMemoryForward;
-use montre_index::inverted::InMemoryInverted;
-use montre_index::lexicon::InMemoryLexicon;
-use montre_index::spans::InMemorySpans;
-use montre_index::{ForwardIndex, SpanIndex};
+use montre_index::ForwardIndex;
+use montre_index::SpanIndex;
 use walkdir::WalkDir;
 
+use crate::builder::IndexSink;
 use crate::format::conllu::ConllUReader;
 use crate::format::CorpusReader;
 use crate::manifest::Manifest;
@@ -19,13 +18,7 @@ use crate::{BuildError, Result};
 pub struct MultiCorpusBuilder {
 	manifest: Manifest,
 	manifest_dir: std::path::PathBuf,
-	inverted: InMemoryInverted,
-	forward: InMemoryForward,
-	spans: InMemorySpans,
-	lexicon: InMemoryLexicon,
-	layer_indices: Vec<(String, usize)>,
-	current_position: u64,
-	document_names: Vec<String>,
+	sink: IndexSink,
 	components: Vec<ComponentMeta>,
 	alignments: AlignmentIndex,
 	alignment_meta: Vec<AlignmentMeta>,
@@ -41,30 +34,10 @@ impl MultiCorpusBuilder {
 			.map(|p| p.to_path_buf())
 			.unwrap_or_default();
 
-		let mut forward = InMemoryForward::new();
-		let mut layer_indices = Vec::new();
-
-		for &layer_name in &[
-			layers::WORD,
-			layers::LEMMA,
-			layers::POS,
-			layers::XPOS,
-			layers::DEPREL,
-		] {
-			let idx = forward.add_layer(layer_name);
-			layer_indices.push((layer_name.to_string(), idx));
-		}
-
 		Ok(Self {
 			manifest,
 			manifest_dir,
-			inverted: InMemoryInverted::new(),
-			forward,
-			spans: InMemorySpans::new(),
-			lexicon: InMemoryLexicon::new(),
-			layer_indices,
-			current_position: 0,
-			document_names: Vec::new(),
+			sink: IndexSink::new(),
 			components: Vec::new(),
 			alignments: AlignmentIndex::new(),
 			alignment_meta: Vec::new(),
@@ -101,7 +74,7 @@ impl MultiCorpusBuilder {
 
 		let component_path = self.manifest_dir.join(&config.path);
 		let language = config.language.clone().unwrap_or_default();
-		let doc_start = self.document_names.len();
+		let doc_start = self.sink.document_names.len();
 
 		let mut files: Vec<_> = WalkDir::new(&component_path)
 			.into_iter()
@@ -135,7 +108,7 @@ impl MultiCorpusBuilder {
 						.map(|s| s.to_string_lossy().to_string())
 						.unwrap_or_else(|| "unknown".to_string());
 
-					self.add_document(&doc_name, sentences);
+					self.sink.add_document(&doc_name, sentences);
 				}
 				Err(e) => {
 					if self.strict {
@@ -147,7 +120,7 @@ impl MultiCorpusBuilder {
 			}
 		}
 
-		let doc_end = self.document_names.len();
+		let doc_end = self.sink.document_names.len();
 
 		let component_meta = ComponentMeta {
 			id: self.components.len() as u32,
@@ -160,70 +133,11 @@ impl MultiCorpusBuilder {
 			"Component '{}': {} documents, {} tokens",
 			name,
 			doc_end - doc_start,
-			self.current_position
+			self.sink.current_position
 		);
 
 		self.components.push(component_meta);
 		Ok(())
-	}
-
-	fn add_document(
-		&mut self,
-		doc_name: &str,
-		sentences: Vec<crate::format::ParsedSentence>,
-	) {
-		let doc_start = self.current_position;
-
-		for sentence in sentences {
-			let sent_start = self.current_position;
-
-			for token in &sentence.tokens {
-				let position = self.current_position;
-
-				self.add_token_annotation(position, layers::WORD, &token.word);
-
-				if let Some(ref lemma) = token.lemma {
-					self.add_token_annotation(position, layers::LEMMA, lemma);
-				}
-
-				if let Some(ref pos) = token.pos {
-					self.add_token_annotation(position, layers::POS, pos);
-				}
-
-				if let Some(ref xpos) = token.xpos {
-					self.add_token_annotation(position, layers::XPOS, xpos);
-				}
-
-				if let Some(ref deprel) = token.deprel {
-					self.add_token_annotation(position, layers::DEPREL, deprel);
-				}
-
-				self.current_position += 1;
-			}
-
-			let sent_end = self.current_position;
-			if sent_end > sent_start {
-				self.spans
-					.add_span("sentence", Span::new(sent_start, sent_end));
-			}
-		}
-
-		let doc_end = self.current_position;
-		if doc_end > doc_start {
-			self.spans
-				.add_span("document", Span::new(doc_start, doc_end));
-			self.document_names.push(doc_name.to_string());
-		}
-	}
-
-	fn add_token_annotation(&mut self, position: u64, layer: &str, value: &str) {
-		self.inverted.insert(layer, value, [position]);
-
-		if let Some((_, layer_idx)) = self.layer_indices.iter().find(|(name, _)| name == layer) {
-			self.forward.set(*layer_idx, position, Value::from(value));
-		}
-
-		self.lexicon.add_term(layer, value);
 	}
 
 	fn ingest_alignment(&mut self, name: &str) -> Result<()> {
@@ -403,62 +317,35 @@ impl MultiCorpusBuilder {
 	fn build_doc_name_map(&self, comp: &ComponentMeta) -> std::collections::HashMap<String, u32> {
 		let mut map = std::collections::HashMap::new();
 		for (i, doc_idx) in (comp.document_range.0..comp.document_range.1).enumerate() {
-			if let Some(name) = self.document_names.get(doc_idx) {
+			if let Some(name) = self.sink.document_names.get(doc_idx) {
 				map.insert(name.clone(), i as u32);
 			}
 		}
 		map
 	}
 
-	fn write(mut self, output_path: impl AsRef<Path>) -> Result<()> {
-		self.spans.finalize();
-
+	fn write(self, output_path: impl AsRef<Path>) -> Result<()> {
 		let path = output_path.as_ref();
-		if path.exists() {
-			std::fs::remove_dir_all(path)?;
-		}
-		std::fs::create_dir_all(path)?;
+
+		let alignment_bytes = if !self.alignments.alignments.is_empty() {
+			Some(
+				bincode::serialize(&self.alignments)
+					.map_err(|e| BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?,
+			)
+		} else {
+			None
+		};
 
 		let meta = CorpusMeta {
 			name: self.manifest.corpus.name.clone(),
 			version: montre_index::index_version,
-			token_count: self.forward.token_count(),
-			layers: self.layer_indices.iter().map(|(n, _)| n.clone()).collect(),
-			span_layers: self
-				.spans
-				.layers()
-				.into_iter()
-				.map(String::from)
-				.collect(),
-			document_names: self.document_names,
+			token_count: self.sink.forward.token_count(),
+			layers: self.sink.layer_indices.iter().map(|(n, _)| n.clone()).collect(),
+			span_layers: self.sink.spans.layers().into_iter().map(String::from).collect(),
+			document_names: self.sink.document_names.clone(),
 			components: self.components,
 			alignments: self.alignment_meta,
 		};
-
-		let meta_json = serde_json::to_string_pretty(&meta)?;
-		std::fs::write(path.join("corpus.json"), meta_json)?;
-
-		let inverted_bytes = bincode::serialize(&self.inverted)
-			.map_err(|e| BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-		std::fs::write(path.join("inverted.bin"), &inverted_bytes)?;
-
-		let forward_bytes = bincode::serialize(&self.forward)
-			.map_err(|e| BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-		std::fs::write(path.join("forward.bin"), &forward_bytes)?;
-
-		let spans_bytes = bincode::serialize(&self.spans)
-			.map_err(|e| BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-		std::fs::write(path.join("spans.bin"), spans_bytes)?;
-
-		let lexicon_bytes = bincode::serialize(&self.lexicon)
-			.map_err(|e| BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-		std::fs::write(path.join("lexicon.bin"), lexicon_bytes)?;
-
-		if !self.alignments.alignments.is_empty() {
-			let align_bytes = bincode::serialize(&self.alignments)
-				.map_err(|e| BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-			std::fs::write(path.join("alignments.bin"), align_bytes)?;
-		}
 
 		tracing::info!(
 			"Wrote corpus '{}': {} tokens, {} documents, {} components, {} alignments",
@@ -468,6 +355,12 @@ impl MultiCorpusBuilder {
 			meta.components.len(),
 			meta.alignments.len()
 		);
+
+		self.sink.write(path, meta)?;
+
+		if let Some(bytes) = alignment_bytes {
+			std::fs::write(path.join("alignments.bin"), bytes)?;
+		}
 
 		Ok(())
 	}

@@ -11,26 +11,25 @@ pub trait InvertedIndex {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InMemoryInverted {
-	data: HashMap<(String, String), RoaringBitmap>,
-	layer_names: Vec<String>,
+	data: HashMap<String, HashMap<String, RoaringBitmap>>,
 }
 
 impl InMemoryInverted {
 	pub fn new() -> Self {
 		Self {
 			data: HashMap::new(),
-			layer_names: Vec::new(),
 		}
 	}
 
 	pub fn insert(&mut self, layer: &str, value: &str, positions: impl IntoIterator<Item = Position>) {
-		let key = (layer.to_string(), value.to_string());
-		let bitmap = self.data.entry(key).or_insert_with(RoaringBitmap::new);
+		let bitmap = self
+			.data
+			.entry(layer.to_string())
+			.or_default()
+			.entry(value.to_string())
+			.or_default();
 		for pos in positions {
 			bitmap.insert(pos as u32);
-		}
-		if !self.layer_names.contains(&layer.to_string()) {
-			self.layer_names.push(layer.to_string());
 		}
 	}
 }
@@ -43,26 +42,17 @@ impl Default for InMemoryInverted {
 
 impl InvertedIndex for InMemoryInverted {
 	fn get(&self, layer: &str, value: &str) -> Option<&RoaringBitmap> {
-		let key = (layer.to_string(), value.to_string());
-		self.data.get(&key)
+		self.data.get(layer)?.get(value)
 	}
 
 	fn layers(&self) -> Vec<&str> {
-		self.layer_names.iter().map(|s| s.as_str()).collect()
+		self.data.keys().map(|s| s.as_str()).collect()
 	}
 
 	fn values(&self, layer: &str) -> Option<Vec<&str>> {
-		let values: Vec<&str> = self
-			.data
-			.keys()
-			.filter(|(l, _)| l == layer)
-			.map(|(_, v)| v.as_str())
-			.collect();
-		if values.is_empty() {
-			None
-		} else {
-			Some(values)
-		}
+		self.data.get(layer).map(|values| {
+			values.keys().map(|s| s.as_str()).collect()
+		})
 	}
 }
 

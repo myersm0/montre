@@ -69,6 +69,26 @@ impl AlignmentIndex {
 	}
 }
 
+fn binary_search_doc(spans: &[Span], position: u64) -> Option<usize> {
+	let mut lo = 0;
+	let mut hi = spans.len();
+
+	while lo < hi {
+		let mid = lo + (hi - lo) / 2;
+		let span = &spans[mid];
+
+		if position < span.start {
+			hi = mid;
+		} else if position >= span.end {
+			lo = mid + 1;
+		} else {
+			return Some(mid);
+		}
+	}
+
+	None
+}
+
 pub struct Corpus {
 	path: PathBuf,
 	pub meta: CorpusMeta,
@@ -160,12 +180,8 @@ impl Corpus {
 
 	pub fn document_at(&self, position: u64) -> Option<&str> {
 		let doc_spans = self.spans.spans("document")?;
-		for (i, span) in doc_spans.iter().enumerate() {
-			if position >= span.start && position < span.end {
-				return self.meta.document_names.get(i).map(|s| s.as_str());
-			}
-		}
-		None
+		let idx = binary_search_doc(doc_spans, position)?;
+		self.meta.document_names.get(idx).map(|s| s.as_str())
 	}
 
 	pub fn components(&self) -> &[ComponentMeta] {
@@ -206,12 +222,16 @@ impl Corpus {
 		let doc_span = self.document_span(doc_index)?;
 		let sent_spans = self.spans.spans("sentence")?;
 
+		let first = sent_spans.partition_point(|s| s.start < doc_span.start);
+
 		let mut result = Vec::new();
-		for (i, span) in sent_spans.iter().enumerate() {
-			if span.start >= doc_span.start && span.end <= doc_span.end {
-				result.push((i, *span));
-			} else if span.start >= doc_span.end {
+		for i in first..sent_spans.len() {
+			let span = sent_spans[i];
+			if span.start >= doc_span.end {
 				break;
+			}
+			if span.end <= doc_span.end {
+				result.push((i, span));
 			}
 		}
 		Some(result)

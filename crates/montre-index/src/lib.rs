@@ -35,7 +35,7 @@ pub enum IndexError {
 
 pub type Result<T> = std::result::Result<T, IndexError>;
 
-pub const index_version: u32 = 1;
+pub const index_version: u32 = 2;
 
 pub fn open(path: impl AsRef<Path>) -> Result<Corpus> {
 	Corpus::open(path)
