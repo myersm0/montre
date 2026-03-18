@@ -28,6 +28,17 @@ pub fn parse(input: &str) -> Result<Query> {
 	Ok(query)
 }
 
+fn expand_span_alias(name: &str) -> String {
+	match name {
+		"s" => "sentence".to_string(),
+		"sent" => "sentence".to_string(),
+		"doc" => "document".to_string(),
+		"p" => "paragraph".to_string(),
+		"para" => "paragraph".to_string(),
+		_ => name.to_string(),
+	}
+}
+
 struct Parser<'a> {
 	input: &'a str,
 	pos: usize,
@@ -140,6 +151,7 @@ impl<'a> Parser<'a> {
 					};
 				} else {
 					let layer = self.parse_identifier()?;
+					let layer = expand_span_alias(&layer);
 					result = Query::Within {
 						inner: Box::new(result),
 						span_layer: layer,
@@ -647,7 +659,7 @@ mod tests {
 		let query = parse(r#"[pos="DET"] [pos="NOUN"] within s"#).unwrap();
 		match query {
 			Query::Within { span_layer, .. } => {
-				assert_eq!(span_layer, "s");
+				assert_eq!(span_layer, "sentence");
 			}
 			_ => panic!("Expected Within query"),
 		}
@@ -658,7 +670,7 @@ mod tests {
 		let query = parse(r#"[lemma="house"] within doc"#).unwrap();
 		match query {
 			Query::Within { span_layer, .. } => {
-				assert_eq!(span_layer, "doc");
+				assert_eq!(span_layer, "document");
 			}
 			_ => panic!("Expected Within query"),
 		}
@@ -669,7 +681,7 @@ mod tests {
 		let query = parse(r#"[pos="DET"] [pos="ADJ"]* [pos="NOUN"]+ within s"#).unwrap();
 		match query {
 			Query::Within { inner, span_layer } => {
-				assert_eq!(span_layer, "s");
+				assert_eq!(span_layer, "sentence");
 				match *inner {
 					Query::Sequence(parts) => {
 						assert_eq!(parts.len(), 3);
