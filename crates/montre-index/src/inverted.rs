@@ -76,4 +76,57 @@ mod tests {
 		assert!(cat_positions.contains(3));
 		assert!(cat_positions.contains(8));
 	}
+
+	#[test]
+	fn get_missing_layer() {
+		let index = InMemoryInverted::new();
+		assert!(index.get("word", "the").is_none());
+	}
+
+	#[test]
+	fn get_missing_value() {
+		let mut index = InMemoryInverted::new();
+		index.insert("word", "the", [0]);
+		assert!(index.get("word", "elephant").is_none());
+	}
+
+	#[test]
+	fn layers_returns_all() {
+		let mut index = InMemoryInverted::new();
+		index.insert("word", "the", [0]);
+		index.insert("pos", "DET", [0]);
+		index.insert("lemma", "the", [0]);
+
+		let mut layers = index.layers();
+		layers.sort();
+		assert_eq!(layers, vec!["lemma", "pos", "word"]);
+	}
+
+	#[test]
+	fn values_for_layer() {
+		let mut index = InMemoryInverted::new();
+		index.insert("pos", "DET", [0, 5]);
+		index.insert("pos", "NOUN", [3, 8]);
+		index.insert("pos", "VERB", [4]);
+
+		let mut values = index.values("pos").unwrap();
+		values.sort();
+		assert_eq!(values, vec!["DET", "NOUN", "VERB"]);
+	}
+
+	#[test]
+	fn values_missing_layer() {
+		let index = InMemoryInverted::new();
+		assert!(index.values("nonexistent").is_none());
+	}
+
+	#[test]
+	fn incremental_insert() {
+		let mut index = InMemoryInverted::new();
+		index.insert("word", "the", [0]);
+		index.insert("word", "the", [5, 10]);
+
+		let positions = index.get("word", "the").unwrap();
+		assert_eq!(positions.len(), 3);
+	}
 }

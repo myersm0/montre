@@ -685,4 +685,128 @@ mod tests {
 		assert_eq!(collected[0].span.start, 0);
 		assert_eq!(collected[1].span.start, 5);
 	}
+
+	#[test]
+	fn run_index_from_positions() {
+		let ri = RunIndex::from_positions(&[0, 1, 2, 5, 6, 10]);
+		assert_eq!(ri.runs.len(), 3);
+		assert_eq!((ri.runs[0].start, ri.runs[0].end), (0, 3));
+		assert_eq!((ri.runs[1].start, ri.runs[1].end), (5, 7));
+		assert_eq!((ri.runs[2].start, ri.runs[2].end), (10, 11));
+	}
+
+	#[test]
+	fn run_index_from_positions_empty() {
+		let ri = RunIndex::from_positions(&[]);
+		assert!(ri.runs.is_empty());
+	}
+
+	#[test]
+	fn run_index_from_positions_unsorted() {
+		let ri = RunIndex::from_positions(&[5, 1, 3, 2, 0, 4]);
+		assert_eq!(ri.runs.len(), 1);
+		assert_eq!((ri.runs[0].start, ri.runs[0].end), (0, 6));
+	}
+
+	#[test]
+	fn run_index_from_positions_deduplicates() {
+		let ri = RunIndex::from_positions(&[1, 1, 2, 2, 3]);
+		assert_eq!(ri.runs.len(), 1);
+		assert_eq!((ri.runs[0].start, ri.runs[0].end), (1, 4));
+	}
+
+	#[test]
+	fn run_index_full() {
+		let ri = RunIndex::full(1000);
+		assert_eq!(ri.runs.len(), 1);
+		assert_eq!((ri.runs[0].start, ri.runs[0].end), (0, 1000));
+	}
+
+	#[test]
+	fn run_index_full_zero() {
+		let ri = RunIndex::full(0);
+		assert!(ri.runs.is_empty());
+	}
+
+	#[test]
+	fn run_containing() {
+		let ri = RunIndex::from_positions(&[0, 1, 2, 5, 6]);
+		assert!(ri.run_containing(0).is_some());
+		assert!(ri.run_containing(2).is_some());
+		assert!(ri.run_containing(3).is_none());
+		assert!(ri.run_containing(5).is_some());
+		assert!(ri.run_containing(7).is_none());
+	}
+
+	#[test]
+	fn continuations_at_basic() {
+		let ri = RunIndex::from_positions(&[0, 1, 2, 3, 4]);
+		// From position 2, min=1, max=Some(2): can continue to 3, 4
+		let c = ri.continuations_at(2, 1, Some(2));
+		assert_eq!(c, vec![3, 4]);
+	}
+
+	#[test]
+	fn continuations_at_gap() {
+		let ri = RunIndex::from_positions(&[0, 1, 5, 6]);
+		// Position 2 is not in any run
+		let c = ri.continuations_at(2, 1, Some(1));
+		assert!(c.is_empty());
+	}
+
+	#[test]
+	fn continuations_at_end_of_run() {
+		let ri = RunIndex::from_positions(&[0, 1, 2]);
+		// From position 3 (one past end): not in run
+		let c = ri.continuations_at(3, 1, Some(1));
+		assert!(c.is_empty());
+	}
+
+	#[test]
+	fn spans_for_quantifier_exact() {
+		let ri = RunIndex::from_positions(&[0, 1, 2]);
+		// min=2, max=2: spans of exactly length 2
+		let spans = ri.spans_for_quantifier(2, Some(2));
+		assert_eq!(spans, vec![(0, 2), (1, 3)]);
+	}
+
+	#[test]
+	fn spans_for_quantifier_range() {
+		let ri = RunIndex::from_positions(&[0, 1, 2]);
+		// min=1, max=3: all possible spans from run [0,3)
+		let spans = ri.spans_for_quantifier(1, Some(3));
+		assert_eq!(
+			spans,
+			vec![(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+		);
+	}
+
+	#[test]
+	fn spans_for_quantifier_run_too_short() {
+		let ri = RunIndex::from_positions(&[5]);
+		// min=2: single-position run can't produce length-2 spans
+		let spans = ri.spans_for_quantifier(2, Some(3));
+		assert!(spans.is_empty());
+	}
+
+	#[test]
+	fn binary_search_span_basic() {
+		let spans = vec![
+			Span::new(0, 10),
+			Span::new(10, 20),
+			Span::new(20, 30),
+		];
+
+		assert_eq!(binary_search_span(&spans, 0), Some(0));
+		assert_eq!(binary_search_span(&spans, 5), Some(0));
+		assert_eq!(binary_search_span(&spans, 9), Some(0));
+		assert_eq!(binary_search_span(&spans, 10), Some(1));
+		assert_eq!(binary_search_span(&spans, 20), Some(2));
+		assert_eq!(binary_search_span(&spans, 30), None);
+	}
+
+	#[test]
+	fn binary_search_span_empty() {
+		assert_eq!(binary_search_span(&[], 0), None);
+	}
 }

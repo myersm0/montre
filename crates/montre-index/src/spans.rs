@@ -95,4 +95,72 @@ mod tests {
 			Some(&Span::new(12, 20))
 		);
 	}
+
+	#[test]
+	fn containing_position_beyond_all_spans() {
+		let mut index = InMemorySpans::new();
+		index.add_span("sentence", Span::new(0, 5));
+		index.finalize();
+		assert_eq!(index.containing("sentence", 100), None);
+	}
+
+	#[test]
+	fn containing_missing_layer() {
+		let index = InMemorySpans::new();
+		assert_eq!(index.containing("nonexistent", 0), None);
+	}
+
+	#[test]
+	fn spans_returns_sorted() {
+		let mut index = InMemorySpans::new();
+		index.add_span("sentence", Span::new(10, 20));
+		index.add_span("sentence", Span::new(0, 10));
+		index.add_span("sentence", Span::new(20, 30));
+		index.finalize();
+
+		let spans = index.spans("sentence").unwrap();
+		assert_eq!(spans[0], Span::new(0, 10));
+		assert_eq!(spans[1], Span::new(10, 20));
+		assert_eq!(spans[2], Span::new(20, 30));
+	}
+
+	#[test]
+	fn multiple_layers() {
+		let mut index = InMemorySpans::new();
+		index.add_span("sentence", Span::new(0, 5));
+		index.add_span("document", Span::new(0, 20));
+		index.finalize();
+
+		assert!(index.spans("sentence").is_some());
+		assert!(index.spans("document").is_some());
+		assert!(index.spans("paragraph").is_none());
+
+		let mut layers = index.layers();
+		layers.sort();
+		assert_eq!(layers, vec!["document", "sentence"]);
+	}
+
+	#[test]
+	fn containing_at_boundary() {
+		let mut index = InMemorySpans::new();
+		index.add_span("s", Span::new(0, 10));
+		index.add_span("s", Span::new(10, 20));
+		index.finalize();
+
+		// Position 9 is in first span, 10 is in second (half-open intervals)
+		assert_eq!(index.containing("s", 9), Some(&Span::new(0, 10)));
+		assert_eq!(index.containing("s", 10), Some(&Span::new(10, 20)));
+	}
+
+	#[test]
+	fn single_span() {
+		let mut index = InMemorySpans::new();
+		index.add_span("document", Span::new(0, 100));
+		index.finalize();
+
+		assert_eq!(index.containing("document", 0), Some(&Span::new(0, 100)));
+		assert_eq!(index.containing("document", 50), Some(&Span::new(0, 100)));
+		assert_eq!(index.containing("document", 99), Some(&Span::new(0, 100)));
+		assert_eq!(index.containing("document", 100), None);
+	}
 }

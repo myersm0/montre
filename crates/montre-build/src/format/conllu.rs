@@ -339,4 +339,80 @@ mod tests {
 		assert_eq!(sentences[1].span.start, 3);
 		assert_eq!(sentences[1].span.end, 7);
 	}
+
+	#[test]
+	fn empty_input() {
+		let cursor = Cursor::new("");
+		let mut reader = ConllUReader::new(cursor);
+		let sentences = reader.read_sentences().unwrap();
+		assert!(sentences.is_empty());
+	}
+
+	#[test]
+	fn comments_only() {
+		let cursor = Cursor::new("# just a comment\n# another comment\n\n");
+		let mut reader = ConllUReader::new(cursor);
+		let sentences = reader.read_sentences().unwrap();
+		assert!(sentences.is_empty());
+	}
+
+	#[test]
+	fn skips_multiword_tokens() {
+		let input = "\
+1\tDon\tdo\tAUX\t_\t_\t0\troot\t_\t_
+2-3\tdon't\t_\t_\t_\t_\t_\t_\t_\t_
+2\tdo\tdo\tAUX\t_\t_\t0\troot\t_\t_
+3\tnot\tnot\tPART\t_\t_\t2\tadvmod\t_\t_
+4\tworry\tworry\tVERB\t_\t_\t2\txcomp\t_\t_
+";
+		let cursor = Cursor::new(input);
+		let mut reader = ConllUReader::new(cursor);
+		let sentences = reader.read_sentences().unwrap();
+
+		assert_eq!(sentences.len(), 1);
+		// Multi-word token line (2-3) should be skipped; tokens 1,2,3,4 should be kept
+		assert_eq!(sentences[0].tokens.len(), 4);
+		assert_eq!(sentences[0].tokens[0].word, "Don");
+		assert_eq!(sentences[0].tokens[1].word, "do");
+		assert_eq!(sentences[0].tokens[2].word, "not");
+		assert_eq!(sentences[0].tokens[3].word, "worry");
+	}
+
+	#[test]
+	fn skips_empty_node_tokens() {
+		let input = "\
+1\tThey\tthey\tPRON\t_\t_\t2\tnsubj\t_\t_
+2\tran\trun\tVERB\t_\t_\t0\troot\t_\t_
+2.1\tand\tand\tCCONJ\t_\t_\t_\t_\t_\t_
+3\tjumped\tjump\tVERB\t_\t_\t2\tconj\t_\t_
+";
+		let cursor = Cursor::new(input);
+		let mut reader = ConllUReader::new(cursor);
+		let sentences = reader.read_sentences().unwrap();
+
+		assert_eq!(sentences[0].tokens.len(), 3);
+		assert_eq!(sentences[0].tokens[2].word, "jumped");
+	}
+
+	#[test]
+	fn strict_mode_rejects_malformed() {
+		let cursor = Cursor::new(MALFORMED_CONLLU);
+		let mut reader = ConllUReader::new(cursor).with_source_name("test.conllu");
+		let result = reader.read_sentences_strict();
+		assert!(result.is_err());
+	}
+
+	#[test]
+	fn underscore_fields_become_none() {
+		let input = "1\tHello\t_\t_\t_\t_\t0\troot\t_\t_\n";
+		let cursor = Cursor::new(input);
+		let mut reader = ConllUReader::new(cursor);
+		let sentences = reader.read_sentences().unwrap();
+
+		let token = &sentences[0].tokens[0];
+		assert_eq!(token.word, "Hello");
+		assert!(token.lemma.is_none());
+		assert!(token.pos.is_none());
+		assert!(token.xpos.is_none());
+	}
 }
