@@ -6,6 +6,7 @@ members = [
 	"crates/montre-query",
 	"crates/montre-build",
 	"crates/montre-cli",
+	"crates/montre-ffi",
 ]
 exclude = ["crates/montre-py",]
 
@@ -69,4 +70,3 @@ codegen-units = 1
 
 [profile.bench]
 debug = true
-
