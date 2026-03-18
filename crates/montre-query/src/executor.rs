@@ -378,135 +378,218 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 }
 
 fn execute_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<Vec<Hit>> {
+	use std::collections::HashMap;
+
 	if steps.is_empty() {
 		return Ok(Vec::new());
 	}
 
 	let token_count = corpus.token_count();
 
-	let first_step = &steps[0];
-	let first_positions = get_matching_positions(&first_step.node, corpus)?;
+	let run_indices: Vec<RunIndex> = steps
+		.iter()
+		.map(|step| {
+			let positions = get_matching_positions(&step.node, corpus).unwrap_or_default();
+			RunIndex::from_positions(&positions)
+		})
+		.collect();
 
-	if first_positions.is_empty() && first_step.min > 0 {
+	let first_step = &steps[0];
+	let first_runs = &run_indices[0];
+
+	let mut active: HashMap<u64, Vec<u64>> = HashMap::new();
+
+	for (start, end) in first_runs.spans_for_quantifier(first_step.min, first_step.max) {
+		active.entry(end).or_default().push(start);
+	}
+
+	if first_step.min == 0 && steps.len() > 1 {
+		for run in &run_indices[1].runs {
+			active.entry(run.start).or_default().push(run.start);
+		}
+	}
+
+	if active.is_empty() {
 		return Ok(Vec::new());
 	}
 
-	let mut active: Vec<(u64, u64)> = if first_step.min == 1 && first_step.max == Some(1) {
-		first_positions.iter().map(|&p| (p, p + 1)).collect()
-	} else {
-		let position_set: HashSet<u64> = first_positions.iter().copied().collect();
-		let mut result = Vec::new();
-		for &start in &first_positions {
-			let ends = expand_repetition_with_set(
-				start,
-				first_step.min,
-				first_step.max,
-				&position_set,
-				token_count,
-			);
-			for end in ends {
-				result.push((start, end));
-			}
-		}
-
-		if first_step.min == 0 && steps.len() > 1 {
-			let next_positions = get_matching_positions(&steps[1].node, corpus)?;
-			for &p in &next_positions {
-				result.push((p, p));
-			}
-		}
-
-		result
-	};
-
-	active.sort_unstable();
-	active.dedup();
-
-	for step in &steps[1..] {
+	for (step_idx, step) in steps[1..].iter().enumerate() {
 		if active.is_empty() {
 			break;
 		}
 
-		let step_positions = get_matching_positions(&step.node, corpus)?;
-		let step_set: HashSet<u64> = step_positions.into_iter().collect();
+		let runs = &run_indices[step_idx + 1];
 		let is_scan_all = matches!(step.node, PlanNode::ScanAll);
 
-		if step.min == 1 && step.max == Some(1) {
-			active = active
-				.into_iter()
-				.filter(|&(_, end)| is_scan_all || step_set.contains(&end))
-				.map(|(start, end)| (start, end + 1))
-				.collect();
-		} else {
-			let mut next_active = Vec::new();
+		let mut next_active: HashMap<u64, Vec<u64>> = HashMap::new();
 
-			for (start, current_end) in active {
-				if step.min == 0 {
-					next_active.push((start, current_end));
-				}
-
-				let max_rep = step.max.unwrap_or(100).min(100) as u64;
-				let mut pos = current_end;
-				let mut count = 0u64;
-
-				while pos < token_count && count < max_rep {
-					if is_scan_all || step_set.contains(&pos) {
-						count += 1;
-						if count >= step.min as u64 {
-							next_active.push((start, pos + 1));
-						}
-						pos += 1;
-					} else {
-						break;
-					}
+		for (end_pos, starts) in &active {
+			if step.min == 0 {
+				for &s in starts {
+					next_active.entry(*end_pos).or_default().push(s);
 				}
 			}
 
-			active = next_active;
+			let continuations = if is_scan_all {
+				spans_for_scan_all(*end_pos, step.min, step.max, token_count)
+			} else {
+				runs.continuations_at(*end_pos, step.min, step.max)
+			};
+
+			for new_end in continuations {
+				for &s in starts {
+					next_active.entry(new_end).or_default().push(s);
+				}
+			}
 		}
+
+		for starts in next_active.values_mut() {
+			starts.sort_unstable();
+			starts.dedup();
+		}
+
+		active = next_active;
 	}
 
-	active.sort_unstable();
-	active.dedup();
-
-	let hits: Vec<Hit> = active
+	let mut hits: Vec<Hit> = active
 		.into_iter()
-		.map(|(start, end)| Hit::new(Span::new(start, end)))
+		.flat_map(|(end, starts)| {
+			starts
+				.into_iter()
+				.filter(move |&start| end > start)
+				.map(move |start| Hit::new(Span::new(start, end)))
+		})
 		.collect();
 
+	hits.sort_by_key(|h| (h.span.start, h.span.end));
 	Ok(hits)
 }
 
-fn expand_repetition_with_set(
-	start: u64,
-	min: u32,
-	max: Option<u32>,
-	position_set: &HashSet<u64>,
-	token_count: u64,
-) -> Vec<u64> {
-	let max_rep = max.unwrap_or(100).min(100) as u64;
+fn spans_for_scan_all(start: u64, min: u32, max: Option<u32>, token_count: u64) -> Vec<u64> {
+	let max_len = max.unwrap_or(MAX_QUANTIFIER).min(MAX_QUANTIFIER) as u64;
 	let mut results = Vec::new();
 
-	if min == 0 {
-		results.push(start);
-	}
-
-	let mut pos = start;
-	let mut count = 0u64;
-
-	while pos < token_count && count < max_rep {
-		if position_set.contains(&pos) {
-			count += 1;
-			if count >= min as u64 {
-				results.push(pos + 1);
-			}
-			pos += 1;
+	for len in (min as u64)..=max_len {
+		let end = start + len;
+		if end <= token_count {
+			results.push(end);
 		} else {
 			break;
 		}
 	}
 
 	results
+}
+
+const MAX_QUANTIFIER: u32 = 100;
+
+#[derive(Debug, Clone, Copy)]
+struct Run {
+	start: u64,
+	end: u64,
+}
+
+impl Run {
+	fn len(&self) -> u64 {
+		self.end - self.start
+	}
+}
+
+struct RunIndex {
+	runs: Vec<Run>,
+}
+
+impl RunIndex {
+	fn from_positions(positions: &[u64]) -> Self {
+		if positions.is_empty() {
+			return Self { runs: Vec::new() };
+		}
+
+		let mut sorted = positions.to_vec();
+		sorted.sort_unstable();
+		sorted.dedup();
+
+		let mut runs = Vec::new();
+		let mut run_start = sorted[0];
+		let mut prev = sorted[0];
+
+		for &pos in &sorted[1..] {
+			if pos == prev + 1 {
+				prev = pos;
+			} else {
+				runs.push(Run {
+					start: run_start,
+					end: prev + 1,
+				});
+				run_start = pos;
+				prev = pos;
+			}
+		}
+
+		runs.push(Run {
+			start: run_start,
+			end: prev + 1,
+		});
+
+		Self { runs }
+	}
+
+	fn spans_for_quantifier(&self, min: u32, max: Option<u32>) -> Vec<(u64, u64)> {
+		let max_len = max.unwrap_or(MAX_QUANTIFIER).min(MAX_QUANTIFIER) as u64;
+		let min_len = (min as u64).max(1);
+		let mut spans = Vec::new();
+
+		for run in &self.runs {
+			if run.len() < min_len {
+				continue;
+			}
+
+			let max_start = run.end - min_len;
+
+			for span_start in run.start..=max_start {
+				let available = run.end - span_start;
+				let span_max = available.min(max_len);
+
+				for span_len in min_len..=span_max {
+					spans.push((span_start, span_start + span_len));
+				}
+			}
+		}
+
+		spans
+	}
+
+	fn continuations_at(&self, pos: u64, min: u32, max: Option<u32>) -> Vec<u64> {
+		let max_len = max.unwrap_or(MAX_QUANTIFIER).min(MAX_QUANTIFIER) as u64;
+		let min_len = min as u64;
+
+		let Some(run) = self.run_containing(pos) else {
+			return Vec::new();
+		};
+
+		let available = run.end - pos;
+		if available < min_len {
+			return Vec::new();
+		}
+
+		let mut results = Vec::new();
+		let usable = available.min(max_len);
+
+		for len in min_len..=usable {
+			results.push(pos + len);
+		}
+
+		results
+	}
+
+	fn run_containing(&self, pos: u64) -> Option<&Run> {
+		let idx = self.runs.partition_point(|r| r.end <= pos);
+		if idx < self.runs.len() && self.runs[idx].start <= pos {
+			Some(&self.runs[idx])
+		} else {
+			None
+		}
+	}
 }
 
 fn get_matching_positions(node: &PlanNode, corpus: &Corpus) -> Result<Vec<u64>> {
