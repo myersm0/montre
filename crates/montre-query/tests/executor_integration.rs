@@ -333,14 +333,12 @@ fn within_sentence() {
 #[test]
 fn within_sentence_blocks_cross_boundary() {
 	let corpus = build_corpus(SAMPLE);
-	// Sentence 1 ends at position 10, sentence 2 starts at 10.
-	// A span crossing the boundary should be filtered.
-	// PUNCT followed by NOUN: (9,11) crosses s1→s2, (15,17) crosses s2→s3
-	// Without within: both match
-	// With within s: neither should match (they cross sentence boundaries)
+	// PUNCT at 9, next is 10=NOUN(Dogs) → (9,11) crosses s1→s2
+	// PUNCT at 15, next is 16=DET(The) → not NOUN, no match
+	// PUNCT at 22 → end of corpus, no match
 	let without = query_count(&corpus, r#"[pos="PUNCT"] [pos="NOUN"]"#);
 	let within = query_count(&corpus, r#"[pos="PUNCT"] [pos="NOUN"] within s"#);
-	assert_eq!(without, 2);
+	assert_eq!(without, 1);
 	assert_eq!(within, 0);
 }
 
