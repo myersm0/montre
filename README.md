@@ -136,7 +136,7 @@ Montre ships a C FFI (`libmontre_ffi`) for embedding in other languages.
 ```julia
 using Montre
 
-corpus = open_corpus("./my-corpus")
+corpus = Montre.open("./my-corpus")
 hits = query(corpus, """[pos="ADJ"] [pos="NOUN"]""")
 for line in concordance(corpus, hits)
     println(line)
