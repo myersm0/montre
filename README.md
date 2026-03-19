@@ -114,11 +114,11 @@ target_layer = "sentence"
 
 ## Performance
 
-On a 1.5M token corpus (Maupassant French/English), Apple M-series:
+On a 1.5M token corpus (Maupassant French/English), Apple M4 Max:
 
 | Query | Matches | Time |
 |---|---|---|
-| `[pos="NOUN"]` | ~180K | ~12ms |
+| `[pos="NOUN"]` | 244k | 0.6ms |
 | `[pos="ADJ"] [pos="NOUN"]` | 30,672 | 13ms |
 | `[pos="ADJ"]? [pos="NOUN"]` | 272,019 | 72ms |
 | `([pos="ADJ"] \| [pos="ADV"])+ [pos="NOUN"]` | 33,444 | 27ms |
