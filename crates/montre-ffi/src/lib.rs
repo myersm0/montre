@@ -4,7 +4,7 @@ use std::os::raw::c_char;
 use std::ptr;
 
 use montre_core::Value;
-use montre_index::{ComponentMeta, Corpus, ForwardIndex, SpanIndex};
+use montre_index::{Corpus, ForwardIndex, SpanIndex};
 use montre_query::executor::{self, Hit};
 
 // ---------------------------------------------------------------------------
@@ -293,6 +293,110 @@ pub unsafe extern "C" fn montre_string_array_free(array: *mut *mut c_char, len: 
 	std::alloc::dealloc(array as *mut u8, layout);
 }
 
+/// Bulk context-token extraction for collocational analysis.
+/// For each hit, extracts tokens in a ±window around the match.
+/// Returns parallel arrays: relative positions (i32) and token strings.
+/// Entries for different hits are concatenated; use out_offsets to find boundaries.
+/// out_offsets[i] is the start index into the flat arrays for hit i.
+/// out_offsets has length hitlist_len + 1 (last entry = total length).
+/// Free strings with montre_string_array_free, free positions and offsets with montre_i32_array_free / montre_u64_array_free.
+#[no_mangle]
+pub unsafe extern "C" fn montre_context_tokens(
+	hits: *const HitList,
+	corpus: *const Corpus,
+	window: u32,
+	layer: *const c_char,
+	out_positions: *mut *mut i32,
+	out_tokens: *mut *mut *mut c_char,
+	out_offsets: *mut *mut u64,
+	out_len: *mut u64,
+) {
+	if hits.is_null() || corpus.is_null() || out_positions.is_null()
+		|| out_tokens.is_null() || out_offsets.is_null() || out_len.is_null()
+	{
+		if !out_len.is_null() {
+			*out_len = 0;
+		}
+		return;
+	}
+
+	let hitlist = &*hits;
+	let c = &*corpus;
+	let Some(layer_str) = borrow_cstr(layer) else {
+		*out_len = 0;
+		return;
+	};
+
+	let window = window as u64;
+	let token_total = c.token_count();
+	let hit_count = hitlist.hits.len();
+
+	let mut all_positions: Vec<i32> = Vec::new();
+	let mut all_tokens: Vec<String> = Vec::new();
+	let mut offsets: Vec<u64> = Vec::with_capacity(hit_count + 1);
+
+	for hit in &hitlist.hits {
+		offsets.push(all_positions.len() as u64);
+
+		let ctx_start = hit.span.start.saturating_sub(window);
+		let ctx_end = (hit.span.end + window).min(token_total);
+
+		for pos in ctx_start..ctx_end {
+			let relative = pos as i64 - hit.span.start as i64;
+			all_positions.push(relative as i32);
+
+			let token_str = c.forward.get(pos, layer_str)
+				.map(value_to_string)
+				.unwrap_or_default();
+			all_tokens.push(token_str);
+		}
+	}
+
+	offsets.push(all_positions.len() as u64);
+	let total = all_positions.len();
+
+	let pos_layout = std::alloc::Layout::array::<i32>(total).unwrap();
+	let pos_array = std::alloc::alloc(pos_layout) as *mut i32;
+	for (i, &p) in all_positions.iter().enumerate() {
+		*pos_array.add(i) = p;
+	}
+
+	let tok_layout = std::alloc::Layout::array::<*mut c_char>(total).unwrap();
+	let tok_array = std::alloc::alloc(tok_layout) as *mut *mut c_char;
+	for (i, s) in all_tokens.iter().enumerate() {
+		*tok_array.add(i) = to_cstring(s);
+	}
+
+	let off_layout = std::alloc::Layout::array::<u64>(offsets.len()).unwrap();
+	let off_array = std::alloc::alloc(off_layout) as *mut u64;
+	for (i, &o) in offsets.iter().enumerate() {
+		*off_array.add(i) = o;
+	}
+
+	*out_positions = pos_array;
+	*out_tokens = tok_array;
+	*out_offsets = off_array;
+	*out_len = total as u64;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn montre_i32_array_free(array: *mut i32, len: u64) {
+	if array.is_null() || len == 0 {
+		return;
+	}
+	let layout = std::alloc::Layout::array::<i32>(len as usize).unwrap();
+	std::alloc::dealloc(array as *mut u8, layout);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn montre_u64_array_free(array: *mut u64, len: u64) {
+	if array.is_null() || len == 0 {
+		return;
+	}
+	let layout = std::alloc::Layout::array::<u64>(len as usize).unwrap();
+	std::alloc::dealloc(array as *mut u8, layout);
+}
+
 // ---------------------------------------------------------------------------
 // Query
 // ---------------------------------------------------------------------------
@@ -384,6 +488,58 @@ pub unsafe extern "C" fn montre_query_count(
 			-1
 		}
 	}
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn montre_query_in_component(
+	corpus: *const Corpus,
+	cql: *const c_char,
+	component: *const c_char,
+) -> *mut HitList {
+	clear_error();
+	if corpus.is_null() {
+		set_error("null corpus".into());
+		return ptr::null_mut();
+	}
+	let Some(cql_str) = borrow_cstr(cql) else {
+		set_error("null query string".into());
+		return ptr::null_mut();
+	};
+	let Some(comp_str) = borrow_cstr(component) else {
+		set_error("null component name".into());
+		return ptr::null_mut();
+	};
+
+	let full_query = format!("{} within component:\"{}\"", cql_str, comp_str);
+
+	let parsed = match montre_query::parse(&full_query) {
+		Ok(q) => q,
+		Err(e) => {
+			set_error(e.to_string());
+			return ptr::null_mut();
+		}
+	};
+
+	let plan = match montre_query::planner::plan(&parsed) {
+		Ok(p) => p,
+		Err(e) => {
+			set_error(e.to_string());
+			return ptr::null_mut();
+		}
+	};
+
+	let c = &*corpus;
+	let results = match executor::execute(&plan, c) {
+		Ok(r) => r,
+		Err(e) => {
+			set_error(e.to_string());
+			return ptr::null_mut();
+		}
+	};
+
+	Box::into_raw(Box::new(HitList {
+		hits: results.into_hits(),
+	}))
 }
 
 #[no_mangle]
@@ -622,21 +778,22 @@ pub unsafe extern "C" fn montre_project(
 		return ptr::null_mut();
 	};
 
+	let edge_map = executor::build_edge_map(edges);
+
 	let mut result_hits = Vec::new();
 	let mut seen_targets = std::collections::HashSet::new();
 
 	for hit in &source.hits {
-		let Some((src_doc, src_sent)) = find_doc_and_sent(
+		let Some((src_doc, src_sent)) = executor::find_doc_and_sent(
 			hit, doc_spans, source_sent_spans, source_comp,
 		) else {
 			continue;
 		};
 
-		for &((edge_src_doc, edge_src_sent), (tgt_doc, tgt_sent)) in edges {
-			if edge_src_doc == src_doc && edge_src_sent == src_sent {
-				let target_key = (tgt_doc, tgt_sent);
-				if seen_targets.insert(target_key) {
-					if let Some(span) = resolve_target_span(
+		if let Some(targets) = edge_map.get(&(src_doc, src_sent)) {
+			for &(tgt_doc, tgt_sent) in targets {
+				if seen_targets.insert((tgt_doc, tgt_sent)) {
+					if let Some(span) = executor::resolve_target_span(
 						tgt_doc, tgt_sent, doc_spans, target_sent_spans, target_comp,
 					) {
 						result_hits.push(Hit {
@@ -653,53 +810,4 @@ pub unsafe extern "C" fn montre_project(
 
 	result_hits.sort_by_key(|h| h.span.start);
 	Box::into_raw(Box::new(HitList { hits: result_hits }))
-}
-
-fn find_doc_and_sent(
-	hit: &Hit,
-	doc_spans: &[montre_core::Span],
-	sent_spans: &[montre_core::Span],
-	comp: &ComponentMeta,
-) -> Option<(u32, u32)> {
-	for doc_idx in comp.document_range.0..comp.document_range.1 {
-		let doc_span = doc_spans.get(doc_idx)?;
-		if hit.span.start >= doc_span.start && hit.span.end <= doc_span.end {
-			let doc_within_comp = (doc_idx - comp.document_range.0) as u32;
-			let mut sent_within_doc = 0u32;
-			for sent_span in sent_spans.iter() {
-				if sent_span.start >= doc_span.start && sent_span.end <= doc_span.end {
-					if hit.span.start >= sent_span.start && hit.span.end <= sent_span.end {
-						return Some((doc_within_comp, sent_within_doc));
-					}
-					sent_within_doc += 1;
-				} else if sent_span.start >= doc_span.end {
-					break;
-				}
-			}
-		}
-	}
-	None
-}
-
-fn resolve_target_span(
-	tgt_doc: u32,
-	tgt_sent: u32,
-	doc_spans: &[montre_core::Span],
-	target_sent_spans: &[montre_core::Span],
-	target_comp: &ComponentMeta,
-) -> Option<montre_core::Span> {
-	let abs_doc_idx = target_comp.document_range.0 + tgt_doc as usize;
-	let doc_span = doc_spans.get(abs_doc_idx)?;
-	let mut sent_count = 0u32;
-	for sent_span in target_sent_spans.iter() {
-		if sent_span.start >= doc_span.start && sent_span.end <= doc_span.end {
-			if sent_count == tgt_sent {
-				return Some(*sent_span);
-			}
-			sent_count += 1;
-		} else if sent_span.start >= doc_span.end {
-			break;
-		}
-	}
-	None
 }
