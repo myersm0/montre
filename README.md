@@ -114,36 +114,41 @@ target_layer = "sentence"
 
 ## Performance
 
-On a 1.5M token corpus (Maupassant French/English), Apple M4 Max:
+On a 1.5M token corpus (Maupassant French/English), Apple M-series:
 
 | Query | Matches | Time |
 |---|---|---|
-| `[pos="NOUN"]` | 244k | 0.6ms |
-| `[pos="ADJ"] [pos="NOUN"]` | 30,672 | 13ms |
-| `[pos="ADJ"]? [pos="NOUN"]` | 272,019 | 72ms |
+| `[pos="NOUN"]` | 244,184 | 0.6ms |
+| `[pos="ADJ"] [pos="NOUN"]` | 30,672 | 12ms |
+| `[pos="ADJ"]? [pos="NOUN"]` | 272,019 | 71ms |
 | `([pos="ADJ"] \| [pos="ADV"])+ [pos="NOUN"]` | 33,444 | 27ms |
 | `([pos="ADJ"] \| [pos="DET"])+ [pos="NOUN"]` | 198,735 | 71ms |
-| Alignment projection | — | ~250µs overhead |
 
 Quantifiers use a run-based execution model that scales with matching tokens, not corpus size.
 
-## Library usage
+## Bindings
 
 Montre ships a C FFI (`libmontre_ffi`) for embedding in other languages.
 
 ### Julia
 
+**[Montre.jl](https://github.com/myersm0/Montre.jl)** provides a native Julia interface:
+
 ```julia
 using Montre
 
-corpus = Montre.open("./my-corpus")
-hits = query(corpus, """[pos="ADJ"] [pos="NOUN"]""")
+corpus = open_corpus("./my-corpus")
+hits = query(corpus, "[pos=\"ADJ\"] [pos=\"NOUN\"]")
 for line in concordance(corpus, hits)
     println(line)
 end
 ```
 
+Features include concordancing, alignment projection, component-scoped queries, bulk token extraction, and a Tables.jl interface for interoperability with DataFrames and other tabular data packages.
+
 ### Python
+
+Python bindings via PyO3 are stubbed but not yet feature-complete.
 
 ```python
 import montre
@@ -161,17 +166,19 @@ montre-index    Inverted index, forward index, span index, corpus loading
 montre-query    CQL parser, query planner, executor
 montre-build    Corpus construction from CoNLL-U, multi-component builder
 montre-cli      Command-line interface
-montre-ffi      C FFI for Julia/Python/R bindings
+montre-ffi      C FFI for language bindings (35 exported functions)
 montre-py       Python bindings (PyO3, stub)
 ```
 
 ## Status
 
-**v0.1.0** — core engine is functional and tested.
+**v0.2.0**
 
-Working: token queries, sequences, quantifiers, alternation, regex, negation, conjunction, `within` constraints, multi-component corpora, sentence-level alignment, alignment projection, C FFI.
+Working: token queries, sequences, quantifiers, alternation, regex, negation, conjunction, `within` constraints, multi-component corpora, sentence-level alignment, alignment projection, C FFI, Julia bindings.
 
-Next: labeled captures and global constraints (Phase 2b), statistics commands, Julia and Python bindings, TUI.
+New in v0.2: indexed alignment projection (HashMap edge lookup, binary search for document/sentence resolution), component-scoped query function, bulk text and context-token extraction in the FFI.
+
+Next: labeled captures and global constraints (Phase 2b), statistics commands (`count`, `group`, collocation), additional input formats, Python bindings, TUI.
 
 ## License
 
