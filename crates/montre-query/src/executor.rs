@@ -1,7 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use montre_core::Span;
-use montre_index::{Corpus, InvertedIndex, SpanIndex};
+use montre_core::{Span, UnitId};
+use montre_index::{ComponentMeta, Corpus, InvertedIndex, SpanIndex};
 
 use crate::planner::{PlanNode, QueryPlan, SequenceStep};
 use crate::Result;
@@ -320,56 +320,25 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 				return Ok(Vec::new());
 			};
 
-			let find_doc_and_sent_for_hit = |hit: &Hit| -> Option<(u32, u32)> {
-				for doc_idx in source_comp.document_range.0..source_comp.document_range.1 {
-					let doc_span = doc_spans.get(doc_idx)?;
-					if hit.span.start >= doc_span.start && hit.span.end <= doc_span.end {
-						let doc_within_comp = (doc_idx - source_comp.document_range.0) as u32;
-						let mut sent_within_doc = 0u32;
-						for sent_span in sent_spans.iter() {
-							if sent_span.start >= doc_span.start && sent_span.end <= doc_span.end {
-								if hit.span.start >= sent_span.start && hit.span.end <= sent_span.end {
-									return Some((doc_within_comp, sent_within_doc));
-								}
-								sent_within_doc += 1;
-							} else if sent_span.start >= doc_span.end {
-								break;
-							}
-						}
-					}
-				}
-				None
-			};
-
-			let get_target_span = |tgt_doc: u32, tgt_sent: u32| -> Option<Span> {
-				let abs_doc_idx = target_comp.document_range.0 + tgt_doc as usize;
-				let doc_span = doc_spans.get(abs_doc_idx)?;
-				let mut sent_count = 0u32;
-				for sent_span in target_sent_spans.iter() {
-					if sent_span.start >= doc_span.start && sent_span.end <= doc_span.end {
-						if sent_count == tgt_sent {
-							return Some(*sent_span);
-						}
-						sent_count += 1;
-					} else if sent_span.start >= doc_span.end {
-						break;
-					}
-				}
-				None
-			};
+			let edge_map = build_edge_map(edges);
 
 			let mut result_hits = Vec::new();
 			let mut seen_targets = HashSet::new();
 
 			for hit in &source_hits {
-				if let Some((src_doc, src_sent)) = find_doc_and_sent_for_hit(hit) {
-					for &((edge_src_doc, edge_src_sent), (tgt_doc, tgt_sent)) in edges {
-						if edge_src_doc == src_doc && edge_src_sent == src_sent {
-							let target_key = (tgt_doc, tgt_sent);
-							if seen_targets.insert(target_key) {
-								if let Some(target_span) = get_target_span(tgt_doc, tgt_sent) {
-									result_hits.push(Hit::new(target_span));
-								}
+				let Some((src_doc, src_sent)) = find_doc_and_sent(
+					hit, doc_spans, sent_spans, source_comp,
+				) else {
+					continue;
+				};
+
+				if let Some(targets) = edge_map.get(&(src_doc, src_sent)) {
+					for &(tgt_doc, tgt_sent) in targets {
+						if seen_targets.insert((tgt_doc, tgt_sent)) {
+							if let Some(target_span) = resolve_target_span(
+								tgt_doc, tgt_sent, doc_spans, target_sent_spans, target_comp,
+							) {
+								result_hits.push(Hit::new(target_span));
 							}
 						}
 					}
@@ -385,8 +354,6 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 }
 
 fn execute_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<Vec<Hit>> {
-	use std::collections::HashMap;
-
 	if steps.is_empty() {
 		return Ok(Vec::new());
 	}
@@ -648,6 +615,76 @@ fn get_matching_positions(node: &PlanNode, corpus: &Corpus) -> Result<Vec<u64>> 
 			Ok(hits.into_iter().map(|h| h.span.start).collect())
 		}
 	}
+}
+
+pub fn build_edge_map(edges: &[(UnitId, UnitId)]) -> HashMap<(u32, u32), Vec<(u32, u32)>> {
+	let mut map: HashMap<(u32, u32), Vec<(u32, u32)>> = HashMap::new();
+	for &((src_doc, src_sent), (tgt_doc, tgt_sent)) in edges {
+		map.entry((src_doc, src_sent))
+			.or_default()
+			.push((tgt_doc, tgt_sent));
+	}
+	map
+}
+
+pub fn find_doc_and_sent(
+	hit: &Hit,
+	doc_spans: &[Span],
+	sent_spans: &[Span],
+	comp: &ComponentMeta,
+) -> Option<(u32, u32)> {
+	let doc_idx = binary_search_span(doc_spans, hit.span.start)?;
+	if doc_idx < comp.document_range.0 || doc_idx >= comp.document_range.1 {
+		return None;
+	}
+	let doc_span = &doc_spans[doc_idx];
+	if hit.span.end > doc_span.end {
+		return None;
+	}
+	let doc_within_comp = (doc_idx - comp.document_range.0) as u32;
+
+	let first_sent = sent_spans.partition_point(|s| s.start < doc_span.start);
+	let mut sent_within_doc = 0u32;
+	for i in first_sent..sent_spans.len() {
+		let sent_span = &sent_spans[i];
+		if sent_span.start >= doc_span.end {
+			break;
+		}
+		if hit.span.start >= sent_span.start && hit.span.end <= sent_span.end {
+			return Some((doc_within_comp, sent_within_doc));
+		}
+		if sent_span.end <= doc_span.end {
+			sent_within_doc += 1;
+		}
+	}
+	None
+}
+
+pub fn resolve_target_span(
+	tgt_doc: u32,
+	tgt_sent: u32,
+	doc_spans: &[Span],
+	target_sent_spans: &[Span],
+	target_comp: &ComponentMeta,
+) -> Option<Span> {
+	let abs_doc_idx = target_comp.document_range.0 + tgt_doc as usize;
+	let doc_span = doc_spans.get(abs_doc_idx)?;
+
+	let first_sent = target_sent_spans.partition_point(|s| s.start < doc_span.start);
+	let mut sent_count = 0u32;
+	for i in first_sent..target_sent_spans.len() {
+		let sent_span = &target_sent_spans[i];
+		if sent_span.start >= doc_span.end {
+			break;
+		}
+		if sent_span.end <= doc_span.end {
+			if sent_count == tgt_sent {
+				return Some(*sent_span);
+			}
+			sent_count += 1;
+		}
+	}
+	None
 }
 
 impl PartialEq for PlanNode {
