@@ -1,0 +1,19 @@
+# sent_id = 1
+# text = The old black cat sleeps quietly .
+1	The	the	DET	_	Definite=Def|PronType=Art	4	det	_	_
+2	old	old	ADJ	_	Degree=Pos	4	amod	_	_
+3	black	black	ADJ	_	Degree=Pos	4	amod	_	_
+4	cat	cat	NOUN	_	Number=Sing	5	nsubj	_	_
+5	sleeps	sleep	VERB	_	Mood=Ind|Number=Sing|Person=3|Tense=Pres|VerbForm=Fin	0	root	_	_
+6	quietly	quietly	ADV	_	_	5	advmod	_	_
+7	.	.	PUNCT	_	_	5	punct	_	SpaceAfter=No
+
+# sent_id = 2
+# text = He dreams of grey mice .
+1	He	he	PRON	_	Case=Nom|Gender=Masc|Number=Sing|Person=3|PronType=Prs	2	nsubj	_	_
+2	dreams	dream	VERB	_	Mood=Ind|Number=Sing|Person=3|Tense=Pres|VerbForm=Fin	0	root	_	_
+3	of	of	ADP	_	_	5	case	_	_
+4	grey	grey	ADJ	_	Degree=Pos	5	amod	_	_
+5	mice	mouse	NOUN	_	Number=Plur	2	obl	_	_
+6	.	.	PUNCT	_	_	2	punct	_	SpaceAfter=No
+

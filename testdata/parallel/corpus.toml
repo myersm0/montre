@@ -1,0 +1,17 @@
+[corpus]
+name = "test-parallel"
+
+[components.fr]
+path = "fr/"
+language = "fr"
+
+[components.en]
+path = "en/"
+language = "en"
+
+[alignments.sentence]
+source = "fr"
+target = "en"
+edges = "alignments/sentence.tsv"
+source_layer = "sentence"
+target_layer = "sentence"
