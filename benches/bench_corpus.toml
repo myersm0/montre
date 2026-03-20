@@ -1,0 +1,17 @@
+[corpus]
+name = "bench-maupassant"
+
+[components.maupassant-fr]
+path = "data/isosceles/data/maupassant/fr/conllu/"
+language = "fr"
+
+[components.maupassant-en]
+path = "data/isosceles/data/maupassant/en/conllu/"
+language = "en"
+
+[alignments.labse]
+source = "maupassant-fr"
+target = "maupassant-en"
+edges = "data/isosceles/data/maupassant/alignments/"
+source_layer = "sentence"
+target_layer = "sentence"

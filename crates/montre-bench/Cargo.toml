@@ -1,0 +1,21 @@
+[package]
+name = "montre-bench"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bench]]
+name = "query"
+harness = false
+
+[[bench]]
+name = "build"
+harness = false
+
+[dev-dependencies]
+criterion = { workspace = true }
+montre-index = { workspace = true }
+montre-query = { workspace = true }
+montre-build = { workspace = true }
+walkdir = { workspace = true }
+tempfile = "3"

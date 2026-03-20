@@ -6,3 +6,5 @@ Cargo.lock
 *~
 .DS_Store
 *.idx
+benches/data
+.meta
