@@ -23,6 +23,9 @@ pub struct Manifest {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CorpusConfig {
 	pub name: String,
+
+	#[serde(default)]
+	pub decompose_feats: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

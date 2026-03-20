@@ -19,6 +19,7 @@ pub struct IndexSink {
 	pub(crate) layer_indices: Vec<(String, usize)>,
 	pub(crate) current_position: u64,
 	pub(crate) document_names: Vec<String>,
+	pub(crate) decompose_feats: bool,
 }
 
 impl IndexSink {
@@ -39,7 +40,13 @@ impl IndexSink {
 			layer_indices,
 			current_position: 0,
 			document_names: Vec::new(),
+			decompose_feats: false,
 		}
+	}
+
+	pub fn with_decompose_feats(mut self, enabled: bool) -> Self {
+		self.decompose_feats = enabled;
+		self
 	}
 
 	pub fn add_document(&mut self, doc_name: &str, sentences: Vec<ParsedSentence>) {
@@ -67,6 +74,9 @@ impl IndexSink {
 
 				if let Some(ref feats) = token.feats {
 					self.add_token_annotation(position, layers::FEATS, feats);
+					if self.decompose_feats {
+						self.decompose_feats_annotation(position, feats);
+					}
 				}
 
 				if let Some(ref deprel) = token.deprel {
@@ -87,6 +97,24 @@ impl IndexSink {
 			self.spans.add_span("document", Span::new(doc_start, doc_end));
 			self.document_names.push(doc_name.to_string());
 		}
+	}
+
+	fn decompose_feats_annotation(&mut self, position: u64, feats: &str) {
+		for pair in feats.split('|') {
+			if let Some((key, value)) = pair.split_once('=') {
+				let layer_name = format!("feats.{}", key);
+				self.ensure_layer(&layer_name);
+				self.add_token_annotation(position, &layer_name, value);
+			}
+		}
+	}
+
+	fn ensure_layer(&mut self, name: &str) {
+		if self.layer_indices.iter().any(|(n, _)| n == name) {
+			return;
+		}
+		let idx = self.forward.add_layer(name);
+		self.layer_indices.push((name.to_string(), idx));
 	}
 
 	fn add_token_annotation(&mut self, position: u64, layer: &str, value: &str) {
@@ -149,6 +177,11 @@ impl CorpusBuilder {
 			name: name.into(),
 			sink: IndexSink::new(),
 		}
+	}
+
+	pub fn decompose_feats(mut self, enabled: bool) -> Self {
+		self.sink.decompose_feats = enabled;
+		self
 	}
 
 	pub fn add_document(&mut self, doc_name: impl Into<String>, sentences: Vec<ParsedSentence>) {

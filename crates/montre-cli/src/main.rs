@@ -44,6 +44,9 @@ enum Commands {
 
 		#[arg(long, help = "Fail on first parse error instead of skipping")]
 		strict: bool,
+
+		#[arg(long, help = "Index individual morphological features as separate layers")]
+		decompose_feats: bool,
 	},
 
 	Query {
@@ -101,11 +104,12 @@ fn main() -> Result<()> {
 			name,
 			force,
 			strict,
+			decompose_feats,
 		} => {
 			if let Some(manifest_path) = manifest {
-				cmd_build_manifest(manifest_path, output, force, strict)
+				cmd_build_manifest(manifest_path, output, force, strict, decompose_feats)
 			} else if let Some(input_path) = input {
-				cmd_build(input_path, output, name, force, strict)
+				cmd_build(input_path, output, name, force, strict, decompose_feats)
 			} else {
 				anyhow::bail!("Either --input or --manifest must be specified")
 			}
@@ -125,6 +129,7 @@ fn cmd_build_manifest(
 	output: PathBuf,
 	force: bool,
 	strict: bool,
+	decompose_feats: bool,
 ) -> Result<()> {
 	if output.exists() && !force {
 		anyhow::bail!(
@@ -135,9 +140,15 @@ fn cmd_build_manifest(
 
 	tracing::info!("Building corpus from manifest: {}", manifest_path.display());
 
-	MultiCorpusBuilder::from_manifest(&manifest_path)
+	let mut builder = MultiCorpusBuilder::from_manifest(&manifest_path)
 		.with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?
-		.strict(strict)
+		.strict(strict);
+
+	if decompose_feats {
+		builder = builder.decompose_feats(true);
+	}
+
+	builder
 		.build(&output)
 		.with_context(|| "Failed to build corpus")?;
 
@@ -151,6 +162,7 @@ fn cmd_build(
 	name: Option<String>,
 	force: bool,
 	strict: bool,
+	decompose_feats: bool,
 ) -> Result<()> {
 	if output.exists() && !force {
 		anyhow::bail!(
@@ -170,6 +182,9 @@ fn cmd_build(
 	tracing::info!("Building corpus '{}' from {}", corpus_name, input.display());
 
 	let mut builder = CorpusBuilder::new(&corpus_name);
+	if decompose_feats {
+		builder = builder.decompose_feats(true);
+	}
 	let mut aggregate = AggregateStats::default();
 
 	let entries: Vec<PathBuf> = if input.is_file() {

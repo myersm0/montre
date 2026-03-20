@@ -355,7 +355,7 @@ impl<'a> Parser<'a> {
 	fn parse_identifier(&mut self) -> Result<String> {
 		let start = self.pos;
 		while let Some(c) = self.peek_char() {
-			if c.is_alphanumeric() || c == '_' {
+			if c.is_alphanumeric() || c == '_' || c == '.' {
 				self.pos += c.len_utf8();
 			} else {
 				break;

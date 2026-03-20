@@ -751,3 +751,67 @@ fn feats_query_verb() {
 	let count = query_count(&corpus, r#"[feats=/.*Tense=Past.*/]"#);
 	assert_eq!(count, 1);
 }
+
+// ===========================================================================
+// Feats decomposition
+// ===========================================================================
+
+fn build_corpus_with_feats(conllu: &str) -> Corpus {
+	let path = test_corpus_path();
+	let mut reader = ConllUReader::new(Cursor::new(conllu));
+	let sentences = reader.read_sentences().unwrap();
+	let mut builder = CorpusBuilder::new("test").decompose_feats(true);
+	builder.add_document("test.conllu", sentences);
+	builder.build(&path).unwrap();
+	montre_index::open(&path).unwrap()
+}
+
+#[test]
+fn decomposed_feats_layers_present() {
+	let corpus = build_corpus_with_feats(FEATS_CORPUS);
+	let layers = corpus.layers();
+	assert!(layers.contains(&"feats".to_string()));
+	assert!(layers.contains(&"feats.Gender".to_string()));
+	assert!(layers.contains(&"feats.Number".to_string()));
+	assert!(layers.contains(&"feats.Tense".to_string()));
+	assert!(layers.contains(&"feats.Mood".to_string()));
+	assert!(layers.contains(&"feats.VerbForm".to_string()));
+	assert!(layers.contains(&"feats.Definite".to_string()));
+	assert!(layers.contains(&"feats.PronType".to_string()));
+}
+
+#[test]
+fn decomposed_feats_query_single() {
+	let corpus = build_corpus_with_feats(FEATS_CORPUS);
+	let count = query_count(&corpus, r#"[feats.Number="Sing"]"#);
+	assert_eq!(count, 1); // only cat
+}
+
+#[test]
+fn decomposed_feats_query_conjunction() {
+	let corpus = build_corpus_with_feats(FEATS_CORPUS);
+	let count = query_count(&corpus, r#"[feats.Gender="Masc" & feats.Number="Sing"]"#);
+	assert_eq!(count, 1); // only cat
+}
+
+#[test]
+fn decomposed_feats_query_with_pos() {
+	let corpus = build_corpus_with_feats(FEATS_CORPUS);
+	let count = query_count(&corpus, r#"[pos="VERB" & feats.Tense="Past"]"#);
+	assert_eq!(count, 1); // sat
+}
+
+#[test]
+fn decomposed_feats_raw_still_works() {
+	let corpus = build_corpus_with_feats(FEATS_CORPUS);
+	let count = query_count(&corpus, r#"[feats="Gender=Masc|Number=Sing"]"#);
+	assert_eq!(count, 1);
+}
+
+#[test]
+fn decomposed_feats_not_present_without_flag() {
+	let corpus = build_corpus(FEATS_CORPUS);
+	let layers = corpus.layers();
+	assert!(layers.contains(&"feats".to_string()));
+	assert!(!layers.contains(&"feats.Gender".to_string()));
+}

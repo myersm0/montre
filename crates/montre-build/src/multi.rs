@@ -34,10 +34,12 @@ impl MultiCorpusBuilder {
 			.map(|p| p.to_path_buf())
 			.unwrap_or_default();
 
+		let decompose_feats = manifest.corpus.decompose_feats;
+
 		Ok(Self {
 			manifest,
 			manifest_dir,
-			sink: IndexSink::new(),
+			sink: IndexSink::new().with_decompose_feats(decompose_feats),
 			components: Vec::new(),
 			alignments: AlignmentIndex::new(),
 			alignment_meta: Vec::new(),
@@ -47,6 +49,11 @@ impl MultiCorpusBuilder {
 
 	pub fn strict(mut self, strict: bool) -> Self {
 		self.strict = strict;
+		self
+	}
+
+	pub fn decompose_feats(mut self, enabled: bool) -> Self {
+		self.sink.decompose_feats = enabled;
 		self
 	}
 
