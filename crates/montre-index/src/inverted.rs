@@ -34,6 +34,22 @@ impl InMemoryInverted {
 	}
 }
 
+impl InMemoryInverted {
+	pub fn merge_from(&mut self, other: Self, position_offset: u32) {
+		for (layer, values) in other.data {
+			let target_layer = self.data.entry(layer).or_default();
+			for (value, bitmap) in values {
+				let shifted: RoaringBitmap =
+					bitmap.iter().map(|p| p + position_offset).collect();
+				target_layer
+					.entry(value)
+					.and_modify(|existing| *existing |= &shifted)
+					.or_insert(shifted);
+			}
+		}
+	}
+}
+
 impl Default for InMemoryInverted {
 	fn default() -> Self {
 		Self::new()

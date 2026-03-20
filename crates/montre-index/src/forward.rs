@@ -39,6 +39,25 @@ impl InMemoryForward {
 		self.token_count = self.token_count.max(position + 1);
 	}
 
+	pub fn merge_from(&mut self, other: Self, position_offset: u64) {
+		for (layer_name, source_data) in other.layers.into_iter().zip(other.data.into_iter()) {
+			let target_idx = match self.layer_index(&layer_name) {
+				Some(idx) => idx,
+				None => self.add_layer(&layer_name),
+			};
+			let target_data = &mut self.data[target_idx];
+			let start = position_offset as usize;
+			let needed = start + source_data.len();
+			if needed > target_data.len() {
+				target_data.resize(needed, Value::Str(Default::default()));
+			}
+			for (j, val) in source_data.into_iter().enumerate() {
+				target_data[start + j] = val;
+			}
+		}
+		self.token_count = self.token_count.max(position_offset + other.token_count);
+	}
+
 	fn layer_index(&self, name: &str) -> Option<usize> {
 		self.layers.iter().position(|l| l == name)
 	}

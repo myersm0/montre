@@ -88,25 +88,14 @@ fn bench_conllu_parse_only(c: &mut Criterion) {
 
 fn bench_build_single_component(c: &mut Criterion) {
 	let Some(dir) = conllu_path() else { return };
-	let files = conllu_files(&dir);
-	if files.is_empty() {
-		eprintln!("no .conllu files in {}; skipping", dir.display());
-		return;
-	}
 
 	c.bench_function("build_single_component", |b| {
 		b.iter(|| {
 			let output = tempfile::tempdir().unwrap();
-			let mut builder = CorpusBuilder::new("bench-single");
-			for path in &files {
-				let file = File::open(path).unwrap();
-				let reader = BufReader::new(file);
-				let mut conllu = ConllUReader::new(reader);
-				let sentences = conllu.read_sentences().unwrap();
-				let filename = path.file_name().unwrap().to_str().unwrap();
-				builder.add_document(filename, sentences);
-			}
-			builder.build(output.path()).unwrap();
+			CorpusBuilder::from_directory("bench-single", &dir, false, false)
+				.unwrap()
+				.build(output.path())
+				.unwrap();
 		})
 	});
 }
