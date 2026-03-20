@@ -264,14 +264,11 @@ fn cmd_query(corpus_path: PathBuf, query: String, limit: usize, count_only: bool
 	let plan = montre_query::planner::plan(&parsed).with_context(|| "Failed to plan query")?;
 	let plan_time = plan_start.elapsed();
 
-	let exec_start = Instant::now();
-	let results = montre_query::executor::execute(&plan, &corpus)
-		.with_context(|| "Failed to execute query")?;
-	let exec_time = exec_start.elapsed();
-
-	let total = results.len();
-
 	if count_only {
+		let exec_start = Instant::now();
+		let total = montre_query::executor::execute_count(&plan, &corpus)
+			.with_context(|| "Failed to execute query")?;
+		let exec_time = exec_start.elapsed();
 		println!("{}", total);
 		eprintln!(
 			"(parse: {:?}, plan: {:?}, exec: {:?})",
@@ -279,6 +276,13 @@ fn cmd_query(corpus_path: PathBuf, query: String, limit: usize, count_only: bool
 		);
 		return Ok(());
 	}
+
+	let exec_start = Instant::now();
+	let results = montre_query::executor::execute(&plan, &corpus)
+		.with_context(|| "Failed to execute query")?;
+	let exec_time = exec_start.elapsed();
+
+	let total = results.len();
 
 	println!("Found {} matches in {:?}\n", total, exec_time);
 

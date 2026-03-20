@@ -481,8 +481,8 @@ pub unsafe extern "C" fn montre_query_count(
 	};
 
 	let c = &*corpus;
-	match executor::execute(&plan, c) {
-		Ok(r) => r.len() as i64,
+	match executor::execute_count(&plan, c) {
+		Ok(n) => n as i64,
 		Err(e) => {
 			set_error(e.to_string());
 			-1
@@ -724,13 +724,24 @@ pub unsafe extern "C" fn montre_corpus_alignment_edge_count(
 
 /// Project a HitList through a named alignment, returning a new HitList
 /// of target-side sentence spans.
+/// out_unmapped: number of source hits not locatable in the source component (nullable).
+/// out_no_alignment: number of source hits with no alignment edge (nullable).
+/// out_projected: number of unique target sentences produced (nullable).
 #[no_mangle]
 pub unsafe extern "C" fn montre_project(
 	corpus: *const Corpus,
 	source_hits: *const HitList,
 	alignment_name: *const c_char,
+	out_unmapped: *mut u64,
+	out_no_alignment: *mut u64,
+	out_projected: *mut u64,
 ) -> *mut HitList {
 	clear_error();
+
+	if !out_unmapped.is_null() { *out_unmapped = 0; }
+	if !out_no_alignment.is_null() { *out_no_alignment = 0; }
+	if !out_projected.is_null() { *out_projected = 0; }
+
 	if corpus.is_null() || source_hits.is_null() {
 		set_error("null corpus or hits".into());
 		return ptr::null_mut();
@@ -782,11 +793,14 @@ pub unsafe extern "C" fn montre_project(
 
 	let mut result_hits = Vec::new();
 	let mut seen_targets = std::collections::HashSet::new();
+	let mut unmapped = 0u64;
+	let mut no_alignment = 0u64;
 
 	for hit in &source.hits {
 		let Some((src_doc, src_sent)) = executor::find_doc_and_sent(
 			hit, doc_spans, source_sent_spans, source_comp,
 		) else {
+			unmapped += 1;
 			continue;
 		};
 
@@ -805,9 +819,16 @@ pub unsafe extern "C" fn montre_project(
 					}
 				}
 			}
+		} else {
+			no_alignment += 1;
 		}
 	}
 
 	result_hits.sort_by_key(|h| h.span.start);
+
+	if !out_unmapped.is_null() { *out_unmapped = unmapped; }
+	if !out_no_alignment.is_null() { *out_no_alignment = no_alignment; }
+	if !out_projected.is_null() { *out_projected = result_hits.len() as u64; }
+
 	Box::into_raw(Box::new(HitList { hits: result_hits }))
 }

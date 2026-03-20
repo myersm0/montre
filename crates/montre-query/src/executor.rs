@@ -119,6 +119,44 @@ pub fn execute(plan: &QueryPlan, corpus: &Corpus) -> Result<Results> {
 	Ok(Results::new(hits))
 }
 
+pub fn execute_count(plan: &QueryPlan, corpus: &Corpus) -> Result<usize> {
+	count_node(&plan.root, corpus)
+}
+
+fn count_node(node: &PlanNode, corpus: &Corpus) -> Result<usize> {
+	match node {
+		PlanNode::ScanLiteral { layer, value } => {
+			Ok(corpus.inverted.get(layer, value).map(|b| b.len() as usize).unwrap_or(0))
+		}
+
+		PlanNode::ScanAll => {
+			Ok(corpus.token_count() as usize)
+		}
+
+		PlanNode::ScanRegex { layer, pattern } => {
+			let re = regex::Regex::new(pattern)?;
+			let mut seen = HashSet::new();
+			if let Some(values) = corpus.inverted.values(layer) {
+				for value in values {
+					if re.is_match(value) {
+						if let Some(bitmap) = corpus.inverted.get(layer, value) {
+							seen.extend(bitmap.iter());
+						}
+					}
+				}
+			}
+			Ok(seen.len())
+		}
+
+		PlanNode::SequenceScan { steps } => count_sequence(steps, corpus),
+
+		_ => {
+			let hits = execute_node(node, corpus)?;
+			Ok(hits.len())
+		}
+	}
+}
+
 fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 	match node {
 		PlanNode::ScanLiteral { layer, value } => {
@@ -354,8 +392,39 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 }
 
 fn execute_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<Vec<Hit>> {
+	let active = run_sequence_steps(steps, corpus)?;
+
+	let mut hits: Vec<Hit> = active
+		.into_iter()
+		.flat_map(|(end, starts)| {
+			starts
+				.into_iter()
+				.filter(move |&start| end > start)
+				.map(move |start| Hit::new(Span::new(start, end)))
+		})
+		.collect();
+
+	hits.sort_by_key(|h| (h.span.start, h.span.end));
+	Ok(hits)
+}
+
+fn count_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<usize> {
+	let active = run_sequence_steps(steps, corpus)?;
+
+	let count = active
+		.into_iter()
+		.map(|(end, starts)| starts.into_iter().filter(|&start| end > start).count())
+		.sum();
+
+	Ok(count)
+}
+
+fn run_sequence_steps(
+	steps: &[SequenceStep],
+	corpus: &Corpus,
+) -> Result<HashMap<u64, Vec<u64>>> {
 	if steps.is_empty() {
-		return Ok(Vec::new());
+		return Ok(HashMap::new());
 	}
 
 	let token_count = corpus.token_count();
@@ -388,7 +457,7 @@ fn execute_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<Vec<Hit>>
 	}
 
 	if active.is_empty() {
-		return Ok(Vec::new());
+		return Ok(HashMap::new());
 	}
 
 	for (step_idx, step) in steps[1..].iter().enumerate() {
@@ -429,18 +498,7 @@ fn execute_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<Vec<Hit>>
 		active = next_active;
 	}
 
-	let mut hits: Vec<Hit> = active
-		.into_iter()
-		.flat_map(|(end, starts)| {
-			starts
-				.into_iter()
-				.filter(move |&start| end > start)
-				.map(move |start| Hit::new(Span::new(start, end)))
-		})
-		.collect();
-
-	hits.sort_by_key(|h| (h.span.start, h.span.end));
-	Ok(hits)
+	Ok(active)
 }
 
 fn spans_for_scan_all(start: u64, min: u32, max: Option<u32>, token_count: u64) -> Vec<u64> {
