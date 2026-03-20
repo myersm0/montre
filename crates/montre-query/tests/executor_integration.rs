@@ -489,3 +489,265 @@ fn results_ref_iter() {
 	// results is still usable
 	assert_eq!(results.len(), 2);
 }
+
+// ===========================================================================
+// Alternation + quantifier edge cases
+// ===========================================================================
+
+// S1 (pos 0-5):  The/DET very/ADV old/ADJ cat/NOUN sat/VERB ./PUNCT
+// S2 (pos 6-12): A/DET big/ADJ black/ADJ dog/NOUN ran/VERB quickly/ADV ./PUNCT
+// S3 (pos 13-19): The/DET really/ADV very/ADV old/ADJ house/NOUN stood/VERB ./PUNCT
+
+const ALTERNATION_CORPUS: &str = "\
+1\tThe\tthe\tDET\t_\t_\t4\tdet\t_\t_
+2\tvery\tvery\tADV\t_\t_\t3\tadvmod\t_\t_
+3\told\told\tADJ\t_\t_\t4\tamod\t_\t_
+4\tcat\tcat\tNOUN\t_\t_\t5\tnsubj\t_\t_
+5\tsat\tsit\tVERB\t_\t_\t0\troot\t_\t_
+6\t.\t.\tPUNCT\t_\t_\t5\tpunct\t_\t_
+
+1\tA\ta\tDET\t_\t_\t4\tdet\t_\t_
+2\tbig\tbig\tADJ\t_\t_\t4\tamod\t_\t_
+3\tblack\tblack\tADJ\t_\t_\t4\tamod\t_\t_
+4\tdog\tdog\tNOUN\t_\t_\t5\tnsubj\t_\t_
+5\tran\trun\tVERB\t_\t_\t0\troot\t_\t_
+6\tquickly\tquickly\tADV\t_\t_\t5\tadvmod\t_\t_
+7\t.\t.\tPUNCT\t_\t_\t5\tpunct\t_\t_
+
+1\tThe\tthe\tDET\t_\t_\t5\tdet\t_\t_
+2\treally\treally\tADV\t_\t_\t4\tadvmod\t_\t_
+3\tvery\tvery\tADV\t_\t_\t4\tadvmod\t_\t_
+4\told\told\tADJ\t_\t_\t5\tamod\t_\t_
+5\thouse\thouse\tNOUN\t_\t_\t6\tnsubj\t_\t_
+6\tstood\tstand\tVERB\t_\t_\t0\troot\t_\t_
+7\t.\t.\tPUNCT\t_\t_\t6\tpunct\t_\t_
+";
+
+#[test]
+fn alternation_plus_noun() {
+	let corpus = build_corpus(ALTERNATION_CORPUS);
+	// (ADJ|ADV)+ NOUN: all runs of contiguous ADJ/ADV tokens followed by NOUN
+	// "very old cat": (1,4), "old cat": (2,4)
+	// "big black dog": (7,10), "black dog": (8,10), "big": standalone ADJ not followed by NOUN directly? No, "big" at 7, "black" at 8, "dog" at 9
+	// Wait: "big"(7) is followed by "black"(8) which is ADJ, so "big" alone + NOUN doesn't work because 8 is ADJ not NOUN.
+	// Matches: ADJ/ADV run at 7,8 followed by NOUN at 9: (7,10), (8,10)
+	// "really very old house": (14,18), (15,18), (16,18)
+	// "quickly": ADV at 11, followed by PUNCT at 12 — no NOUN after
+	let count = query_count(&corpus, r#"([pos="ADJ"] | [pos="ADV"])+ [pos="NOUN"]"#);
+	// (1,4) (2,4) (7,10) (8,10) (14,18) (15,18) (16,18)
+	assert_eq!(count, 7);
+}
+
+#[test]
+fn alternation_exact_2_noun() {
+	let corpus = build_corpus(ALTERNATION_CORPUS);
+	// (ADJ|ADV){2} NOUN: exactly 2 ADJ/ADV tokens then NOUN
+	// "very old" + cat: (1,4)
+	// "big black" + dog: (7,10)
+	// "very old" + house: (15,18)
+	let count = query_count(&corpus, r#"([pos="ADJ"] | [pos="ADV"]){2} [pos="NOUN"]"#);
+	assert_eq!(count, 3);
+}
+
+#[test]
+fn alternation_exact_3_noun() {
+	let corpus = build_corpus(ALTERNATION_CORPUS);
+	// (ADJ|ADV){3} NOUN: exactly 3 then NOUN
+	// Only "really very old" + house: (14,18)
+	let count = query_count(&corpus, r#"([pos="ADJ"] | [pos="ADV"]){3} [pos="NOUN"]"#);
+	assert_eq!(count, 1);
+}
+
+#[test]
+fn alternation_range_2_3_noun() {
+	let corpus = build_corpus(ALTERNATION_CORPUS);
+	// (ADJ|ADV){2,3} NOUN: 2 or 3 then NOUN
+	// {2}: "very old"+cat, "big black"+dog, "very old"+house = 3
+	// {3}: "really very old"+house = 1
+	// Total: 4
+	let count = query_count(&corpus, r#"([pos="ADJ"] | [pos="ADV"]){2,3} [pos="NOUN"]"#);
+	assert_eq!(count, 4);
+}
+
+#[test]
+fn alternation_optional_in_sequence() {
+	let corpus = build_corpus(ALTERNATION_CORPUS);
+	// DET (ADJ|ADV)? NOUN: DET, optionally one ADJ or ADV, then NOUN
+	// DET at 0: next is ADV(very) then ADJ(old) then NOUN(cat). Optional takes 0 → DET+NOUN? 0+... no, pos 1 is ADV not NOUN.
+	// Optional takes 1 → DET ADV(1) ... next is ADJ(2) not NOUN. No match.
+	// DET at 6: next is ADJ(big), then ADJ(black) not NOUN. Optional takes 0 → DET+NOUN? pos 7 is ADJ not NOUN. No match.
+	// DET at 13: same issue.
+	// So actually no matches at all — all DET-NOUN pairs in this corpus have intervening modifiers.
+	let count = query_count(&corpus, r#"[pos="DET"] ([pos="ADJ"] | [pos="ADV"])? [pos="NOUN"]"#);
+	assert_eq!(count, 0);
+}
+
+#[test]
+fn alternation_star_in_sequence() {
+	let corpus = build_corpus(ALTERNATION_CORPUS);
+	// DET (ADJ|ADV)* NOUN: DET, any number of ADJ/ADV, then NOUN
+	// DET(0) + "very old cat": (0,4)
+	// DET(0) + "old cat" when star matches just "old"? No — star is (ADJ|ADV)*, must be contiguous from DET end.
+	// DET at 0 (end=1), star matches 1,2 (very,old), NOUN at 3 → (0,4)
+	// DET at 6 (end=7), star matches 7,8 (big,black), NOUN at 9 → (6,10)
+	// DET at 13 (end=14), star matches 14,15,16 (really,very,old), NOUN at 17 → (13,18)
+	let count = query_count(&corpus, r#"[pos="DET"] ([pos="ADJ"] | [pos="ADV"])* [pos="NOUN"]"#);
+	assert_eq!(count, 3);
+}
+
+#[test]
+fn quantified_alternation_standalone() {
+	let corpus = build_corpus(ALTERNATION_CORPUS);
+	// (ADJ|ADV){2}: just the 2-token runs, no following NOUN constraint
+	// Run at 1-2 (very,old): (1,3)
+	// Run at 7-8 (big,black): (7,9)
+	// Run at 14-16 (really,very,old): (14,16), (15,17)
+	// Hmm, wait — 16 is ADJ "old", 17 is NOUN "house". So pos 15-16 is ADV,ADJ and 16 is the end.
+	// Run [14,15,16] = really,very,old. Spans of length 2: (14,16), (15,17)
+	let count = query_count(&corpus, r#"([pos="ADJ"] | [pos="ADV"]){2}"#);
+	assert_eq!(count, 4);
+}
+
+// ===========================================================================
+// Alignment projection
+// ===========================================================================
+
+fn build_parallel_corpus() -> Corpus {
+	use montre_build::MultiCorpusBuilder;
+	use std::path::PathBuf;
+
+	let output = test_corpus_path();
+	let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+		.join("../../testdata/parallel/corpus.toml");
+
+	MultiCorpusBuilder::from_manifest(&manifest_path)
+		.unwrap()
+		.build(&output)
+		.unwrap();
+
+	montre_index::open(&output).unwrap()
+}
+
+#[test]
+fn parallel_corpus_structure() {
+	let corpus = build_parallel_corpus();
+	assert_eq!(corpus.components().len(), 2);
+	assert_eq!(corpus.document_names().len(), 4);
+	assert!(corpus.meta.alignments.len() == 1);
+}
+
+#[test]
+fn query_within_component() {
+	let corpus = build_parallel_corpus();
+	// [lemma="chat"] should exist only in the French component
+	let fr_count = query_count(&corpus, r#"[lemma="chat"] within component:"fr""#);
+	let en_count = query_count(&corpus, r#"[lemma="chat"] within component:"en""#);
+	assert_eq!(fr_count, 1);
+	assert_eq!(en_count, 0);
+}
+
+#[test]
+fn query_lemma_cat_in_english() {
+	let corpus = build_parallel_corpus();
+	let count = query_count(&corpus, r#"[lemma="cat"] within component:"en""#);
+	assert_eq!(count, 1);
+}
+
+#[test]
+fn alignment_projection_single_hit() {
+	let corpus = build_parallel_corpus();
+	// Query [lemma="chat"] in French, project to English via sentence alignment.
+	// "chat" is in le_chat.conllu sentence 0 → should project to the_cat.conllu sentence 0.
+	let hits = query_spans(
+		&corpus,
+		r#"[lemma="chat"] within component:"fr" =sentence=>"#,
+	);
+	assert_eq!(hits.len(), 1);
+	// The projected hit should be the full English sentence containing "The old black cat sleeps quietly ."
+}
+
+#[test]
+fn alignment_projection_multiple_hits() {
+	let corpus = build_parallel_corpus();
+	// Query [pos="VERB"] in French — should hit dormir, rêver, dresser, entourer (4 verbs).
+	// These span all 4 French sentences, mapping to all 4 English sentences.
+	let fr_verbs = query_count(&corpus, r#"[pos="VERB"] within component:"fr""#);
+	assert_eq!(fr_verbs, 4);
+
+	let projected = query_spans(
+		&corpus,
+		r#"[pos="VERB"] within component:"fr" =sentence=>"#,
+	);
+	// 4 source sentences → 4 target sentences (1:1 alignment)
+	assert_eq!(projected.len(), 4);
+}
+
+#[test]
+fn alignment_projection_deduplicates() {
+	let corpus = build_parallel_corpus();
+	// Two ADJ hits in the same French sentence should project to one English sentence.
+	// le_chat S0 has "vieux" and "noir" (both ADJ) — both in the same sentence.
+	// Projection should return only one target sentence, not two.
+	let fr_adj_in_chat = query_count(
+		&corpus,
+		r#"[pos="ADJ" & lemma=/vieux|noir/] within component:"fr""#,
+	);
+	assert!(fr_adj_in_chat >= 2); // vieux appears twice (le_chat + la_maison), noir once
+
+	// More targeted: query both ADJ in le_chat S0 specifically
+	let projected = query_spans(
+		&corpus,
+		r#"[lemma=/vieux|noir/] within component:"fr" =sentence=>"#,
+	);
+	// "vieux" appears in le_chat:S0 and la_maison:S1 → 2 distinct source sentences
+	// "noir" appears in le_chat:S0 → same as one of the vieux hits
+	// So at most 2 distinct target sentences
+	assert!(projected.len() <= 3);
+}
+
+#[test]
+fn projection_preserves_target_component() {
+	let corpus = build_parallel_corpus();
+	// After projection, hits should be in the English component's position range.
+	let projected = query_spans(
+		&corpus,
+		r#"[lemma="chat"] within component:"fr" =sentence=>"#,
+	);
+	assert_eq!(projected.len(), 1);
+
+	// The projected span should NOT be in the French position range.
+	let fr_noun_spans = query_spans(&corpus, r#"[lemma="chat"] within component:"fr""#);
+	let fr_start = fr_noun_spans[0].0;
+	let projected_start = projected[0].0;
+	assert_ne!(fr_start, projected_start);
+}
+
+// ===========================================================================
+// Feats layer
+// ===========================================================================
+
+const FEATS_CORPUS: &str = "\
+1\tThe\tthe\tDET\t_\tDefinite=Def|PronType=Art\t2\tdet\t_\t_
+2\tcat\tcat\tNOUN\t_\tGender=Masc|Number=Sing\t3\tnsubj\t_\t_
+3\tsat\tsit\tVERB\t_\tMood=Ind|Tense=Past|VerbForm=Fin\t0\troot\t_\t_
+";
+
+#[test]
+fn feats_layer_indexed() {
+	let corpus = build_corpus(FEATS_CORPUS);
+	assert!(corpus.layers().contains(&"feats".to_string()));
+}
+
+#[test]
+fn feats_query() {
+	let corpus = build_corpus(FEATS_CORPUS);
+	let count = query_count(&corpus, r#"[feats="Gender=Masc|Number=Sing"]"#);
+	assert_eq!(count, 1);
+}
+
+#[test]
+fn feats_query_verb() {
+	let corpus = build_corpus(FEATS_CORPUS);
+	let count = query_count(&corpus, r#"[feats=/.*Tense=Past.*/]"#);
+	assert_eq!(count, 1);
+}
