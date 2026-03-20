@@ -72,6 +72,7 @@ Components remain independently queryable. You can query `maupassant-fr` as if t
 | `montre-build` | Corpus construction from source formats | `montre-core`, `montre-index` |
 | `montre-query` | Query parsing, planning, execution | `montre-core`, `montre-index` |
 | `montre-cli` | Command-line interface | all of the above |
+| `montre-ffi` | C FFI for Julia/Python/R bindings | `montre-core`, `montre-index`, `montre-query` |
 | `montre-py` | Python bindings (future) | all of the above |
 
 ## Data model
@@ -80,7 +81,7 @@ Components remain independently queryable. You can query `maupassant-fr` as if t
 
 **Token**: A position in the corpus with annotations across multiple layers.
 
-**Layer**: A named annotation dimension (word, lemma, pos, xpos, feats, deprel, head).
+**Layer**: A named annotation dimension (word, lemma, pos, xpos, feats, deprel, head). With `decompose_feats` enabled, morphological features are additionally indexed as `feats.Number`, `feats.Gender`, etc.
 
 **Span**: A contiguous range of token positions `[start, end)`.
 
@@ -226,6 +227,24 @@ scene = "marker:# SCENE"
 ```
 
 Alignment can cross layer types (paragraph ↔ stanza) for cases like prose poems translated into verse.
+
+## Morphological feature decomposition
+
+CoNLL-U stores morphological features as packed key-value strings: `Gender=Masc|Number=Sing|Person=3`. Querying individual features requires regex (`[feats=/.*Number=Plur.*/]`), which is slow and error-prone.
+
+With `decompose_feats = true` in the build manifest (or `--decompose-feats` on the CLI), the builder splits feats at `|` and `=`, creating separate layers: `feats.Gender` → `Masc`, `feats.Number` → `Sing`. These are indexed in both the inverted and forward indexes, enabling clean queries:
+
+```cql
+[pos="NOUN" & feats.Number="Plur"]
+[feats.Gender="Masc" & feats.Tense="Past"]
+```
+
+Design decisions:
+
+- **Dotted names** (`feats.Number`, not bare `Number`): avoids namespace collision with core layers, enables introspection (`corpus.layers().filter(|l| l.starts_with("feats."))`) without new API.
+- **Layers created lazily**: the set of feature keys is discovered during the build pass. Not all tokens have all features.
+- **Raw feats always indexed**: the concatenated string stays available for exact-match and regex queries regardless of the decomposition flag.
+- **Off by default**: no surprise index bloat. Opt in via manifest or CLI.
 
 ## Build configuration
 
@@ -592,28 +611,56 @@ Recommend deferring this to Phase 2c or later. It's useful but not core to the q
 - [x] `=alignment=>` projection operator
 - [x] CLI `--manifest` build option
 - [x] `montre info` shows components and alignments
-### Phase 4: Statistics & Python
 
-- [ ] `count` command
+### Phase 3a: FFI, performance, code quality ✓
+
+- [x] C FFI crate (`montre-ffi`, 35 exported functions)
+- [x] Inverted index: two-level HashMap (zero-alloc lookups)
+- [x] Binary search in FilterBySpan and FilterByComponent
+- [x] ScanAll: `RunIndex::full` avoids materializing all positions
+- [x] Builder deduplication: shared `IndexSink`
+- [x] `within s`/`within doc` alias expansion (was silently a no-op)
+- [x] Indexed alignment projection (HashMap edge lookup + binary search)
+- [x] `execute_count` fast path (bitmap `.len()` for ScanLiteral: 22ns)
+- [x] Feats layer indexed
+- [x] Feats decomposition (`feats.Number`, `feats.Gender`, etc.) with build-time toggle
+- [x] Dot-notation in parser for decomposed layer names
+- [x] Component-scoped FFI query (`montre_query_in_component`)
+- [x] Bulk text extraction (`montre_hitlist_texts`)
+- [x] Bulk context-token extraction (`montre_context_tokens`)
+- [x] Projection diagnostics (unmapped/no-alignment counters)
+- [x] Shared projection helpers (`build_edge_map`, `find_doc_and_sent`, `resolve_target_span`)
+- [x] Julia bindings ([Montre.jl](https://github.com/myersm0/Montre.jl))
+- [x] 140+ tests (was ~50), including executor integration, alignment projection, alternation edge cases
+- [x] CI and release workflows
+- [x] Shared test corpus (`testdata/parallel/`)
+
+### Phase 4: Statistics & bindings
+
+- [ ] `count` command (CLI)
 - [ ] `group` command (frequency by attribute)
 - [ ] Collocation extraction
 - [ ] Python bindings (PyO3)
-- [ ] Julia bindings (jlrs)
+- [ ] TUI
 
 ## Benchmarks
 
-Current numbers on Apple M-series, 1.6 million-token corpus (Maupassant French/English):
+Current numbers on Apple M-series, 1.5M token corpus (Maupassant French/English):
 
 | Query | Matches | Time |
 |-------|---------|------|
-| `[pos="NOUN"]` | ~180K | ~12ms |
-| `[pos="ADJ"] [pos="NOUN"]` | 30,672 | 13ms |
-| `[pos="ADJ"]? [pos="NOUN"]` | 272,019 | 72ms |
+| `[pos="NOUN"]` | 244,184 | 0.6ms |
+| `[pos="ADJ"] [pos="NOUN"]` | 30,672 | 12ms |
+| `[pos="ADJ"]? [pos="NOUN"]` | 272,019 | 71ms |
+| `([pos="ADJ"] \| [pos="ADV"])+ [pos="NOUN"]` | 33,444 | 27ms |
+| `([pos="ADJ"] \| [pos="DET"])+ [pos="NOUN"]` | 198,735 | 71ms |
 | `[pos="ADJ"]{2,4}` | 1,628 | 0.5ms |
 | `[lemma="maison"]` | ~800 | <1ms |
 | `[] [lemma="chat"]` | 120 | 132ms |
 
-Alignment projection adds ~250µs per query.
+`execute_count` fast path: `[pos="NOUN"]` count in 22ns (bitmap `.len()`).
+
+Alignment projection adds negligible overhead with indexed edge lookup.
 
 ## Error handling
 
@@ -658,12 +705,14 @@ JSON and XML are source formats only. Montre's internal representation remains t
 ## Testing
 
 ```bash
-cargo test                    # unit tests
 cargo test --workspace        # all crates
 cargo test -p montre-query    # single crate
+cargo test -p montre-query --test executor_integration   # integration tests
 ```
 
-Integration tests use `assert_cmd` for CLI testing.
+The test suite has 140+ tests across all crates. The integration test suite (`crates/montre-query/tests/executor_integration.rs`) covers end-to-end query execution including sequences, quantifiers, alternation edge cases, within constraints, multi-document queries, alignment projection, feats decomposition, and the Results API.
+
+A shared test corpus at `testdata/parallel/` provides a small multi-component French/English corpus with sentence alignments, suitable for reuse in Julia and Python binding test suites. See `testdata/parallel/POSITIONS.md` for the position reference.
 
 ## License
 

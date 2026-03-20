@@ -30,6 +30,9 @@ montre build -i data/maupassant/ -o my-corpus/
 # Build a multi-component corpus with alignments
 montre build -m corpus.toml -o my-corpus/
 
+# Build with morphological feature decomposition
+montre build -i data/ -o my-corpus/ --decompose-feats
+
 # Query
 montre query my-corpus/ '[pos="ADJ"] [pos="NOUN"]'
 
@@ -74,6 +77,10 @@ Montre uses a CQL-based query language:
 [pos="DET"] [pos="NOUN"] within s
 [lemma="chat"] within doc
 
+# Morphological features (requires --decompose-feats at build time)
+[pos="NOUN" & feats.Number="Plur"]
+[feats.Gender="Masc" & feats.Tense="Past"]
+
 # Component filtering (multi-component corpora)
 [pos="NOUN"] within component:"maupassant-fr"
 
@@ -95,6 +102,7 @@ Define a multi-component corpus with a TOML manifest:
 ```toml
 [corpus]
 name = "isosceles"
+decompose_feats = true
 
 [components.maupassant-fr]
 path = "data/maupassant/fr/conllu/"
@@ -124,7 +132,7 @@ On a 1.5M token corpus (Maupassant French/English), Apple M-series:
 | `([pos="ADJ"] \| [pos="ADV"])+ [pos="NOUN"]` | 33,444 | 27ms |
 | `([pos="ADJ"] \| [pos="DET"])+ [pos="NOUN"]` | 198,735 | 71ms |
 
-Quantifiers use a run-based execution model that scales with matching tokens, not corpus size.
+Quantifiers use a run-based execution model that scales with matching tokens, not corpus size. The `--count-only` fast path avoids Hit allocation entirely for simple queries (22ns for `[pos="NOUN"]`).
 
 ## Bindings
 
@@ -170,13 +178,15 @@ montre-ffi      C FFI for language bindings (35 exported functions)
 montre-py       Python bindings (PyO3, stub)
 ```
 
+See [API.md](API.md) for the full Rust and C FFI reference.
+
 ## Status
 
 **v0.2.0**
 
-Working: token queries, sequences, quantifiers, alternation, regex, negation, conjunction, `within` constraints, multi-component corpora, sentence-level alignment, alignment projection, C FFI, Julia bindings.
+Working: token queries, sequences, quantifiers, alternation, regex, negation, conjunction, `within` constraints, multi-component corpora, sentence-level alignment, alignment projection, morphological feature decomposition, C FFI, Julia bindings.
 
-New in v0.2: indexed alignment projection (HashMap edge lookup, binary search for document/sentence resolution), component-scoped query function, bulk text and context-token extraction in the FFI.
+New in v0.2: indexed alignment projection (HashMap edge lookup, binary search for document/sentence resolution), component-scoped query function, bulk text and context-token extraction in the FFI, `execute_count` fast path, feats decomposition (`feats.Number`, `feats.Gender`, etc.).
 
 Next: labeled captures and global constraints (Phase 2b), statistics commands (`count`, `group`, collocation), additional input formats, Python bindings, TUI.
 
