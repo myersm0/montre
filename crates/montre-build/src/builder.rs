@@ -26,7 +26,7 @@ impl IndexSink {
 		let mut forward = InMemoryForward::new();
 		let mut layer_indices = Vec::new();
 
-		for &layer_name in &[layers::WORD, layers::LEMMA, layers::POS, layers::XPOS, layers::DEPREL] {
+		for &layer_name in &[layers::WORD, layers::LEMMA, layers::POS, layers::XPOS, layers::FEATS, layers::DEPREL] {
 			let idx = forward.add_layer(layer_name);
 			layer_indices.push((layer_name.to_string(), idx));
 		}
@@ -63,6 +63,10 @@ impl IndexSink {
 
 				if let Some(ref xpos) = token.xpos {
 					self.add_token_annotation(position, layers::XPOS, xpos);
+				}
+
+				if let Some(ref feats) = token.feats {
+					self.add_token_annotation(position, layers::FEATS, feats);
 				}
 
 				if let Some(ref deprel) = token.deprel {
