@@ -16,7 +16,7 @@ pub use inverted::{InvertedIndex, InMemoryInverted};
 pub use forward::{ForwardIndex, InMemoryForward};
 pub use spans::{SpanIndex, InMemorySpans};
 pub use spans_flat::{MappedSpans, SpanStore, write_flat_spans};
-pub use forward_flat::write_flat_forward;
+pub use forward_flat::{MappedForward, ForwardStore, write_flat_forward};
 pub use lexicon::{Lexicon, InMemoryLexicon};
 
 #[derive(Error, Debug)]
