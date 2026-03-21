@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use montre_core::{Span, UnitId};
 use montre_index::{ComponentMeta, Corpus, InvertedIndex, SpanIndex};
+use rayon::prelude::*;
 
 use crate::planner::{PlanNode, QueryPlan, SequenceStep};
 use crate::Result;
@@ -392,7 +393,28 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 }
 
 fn execute_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<Vec<Hit>> {
-	let active = run_sequence_steps(steps, corpus)?;
+	let doc_spans = corpus.spans.spans("document");
+
+	match doc_spans {
+		Some(spans) if spans.len() > 1 => {
+			let chunk_results: Vec<Vec<Hit>> = spans
+				.par_iter()
+				.map(|span| execute_sequence_in_range(steps, corpus, span.start, span.end))
+				.collect::<Result<_>>()?;
+
+			Ok(chunk_results.into_iter().flatten().collect())
+		}
+		_ => execute_sequence_in_range(steps, corpus, 0, corpus.token_count()),
+	}
+}
+
+fn execute_sequence_in_range(
+	steps: &[SequenceStep],
+	corpus: &Corpus,
+	range_start: u64,
+	range_end: u64,
+) -> Result<Vec<Hit>> {
+	let active = run_sequence_steps_in_range(steps, corpus, range_start, range_end)?;
 
 	let mut hits: Vec<Hit> = active
 		.into_iter()
@@ -409,33 +431,61 @@ fn execute_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<Vec<Hit>>
 }
 
 fn count_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<usize> {
-	let active = run_sequence_steps(steps, corpus)?;
+	let doc_spans = corpus.spans.spans("document");
 
-	let count = active
-		.into_iter()
-		.map(|(end, starts)| starts.into_iter().filter(|&start| end > start).count())
-		.sum();
+	match doc_spans {
+		Some(spans) if spans.len() > 1 => {
+			let counts: Vec<usize> = spans
+				.par_iter()
+				.map(|span| {
+					let active = run_sequence_steps_in_range(
+						steps, corpus, span.start, span.end,
+					)?;
+					Ok(active
+						.into_iter()
+						.map(|(end, starts)| {
+							starts.into_iter().filter(|&start| end > start).count()
+						})
+						.sum())
+				})
+				.collect::<Result<_>>()?;
 
-	Ok(count)
+			Ok(counts.into_iter().sum())
+		}
+		_ => {
+			let active = run_sequence_steps_in_range(
+				steps, corpus, 0, corpus.token_count(),
+			)?;
+			Ok(active
+				.into_iter()
+				.map(|(end, starts)| {
+					starts.into_iter().filter(|&start| end > start).count()
+				})
+				.sum())
+		}
+	}
 }
 
-fn run_sequence_steps(
+fn run_sequence_steps_in_range(
 	steps: &[SequenceStep],
 	corpus: &Corpus,
+	range_start: u64,
+	range_end: u64,
 ) -> Result<HashMap<u64, Vec<u64>>> {
-	if steps.is_empty() {
+	if steps.is_empty() || range_start >= range_end {
 		return Ok(HashMap::new());
 	}
-
-	let token_count = corpus.token_count();
 
 	let run_indices: Vec<RunIndex> = steps
 		.iter()
 		.map(|step| {
 			if matches!(step.node, PlanNode::ScanAll) {
-				RunIndex::full(token_count)
+				RunIndex::range(range_start, range_end)
 			} else {
-				let positions = get_matching_positions(&step.node, corpus).unwrap_or_default();
+				let positions = get_matching_positions_in_range(
+					&step.node, corpus, range_start, range_end,
+				)
+				.unwrap_or_default();
 				RunIndex::from_positions(&positions)
 			}
 		})
@@ -478,7 +528,7 @@ fn run_sequence_steps(
 			}
 
 			let continuations = if is_scan_all {
-				spans_for_scan_all(*end_pos, step.min, step.max, token_count)
+				spans_for_scan_all(*end_pos, step.min, step.max, range_end)
 			} else {
 				runs.continuations_at(*end_pos, step.min, step.max)
 			};
@@ -571,11 +621,15 @@ impl RunIndex {
 	}
 
 	fn full(token_count: u64) -> Self {
-		if token_count == 0 {
+		Self::range(0, token_count)
+	}
+
+	fn range(start: u64, end: u64) -> Self {
+		if start >= end {
 			Self { runs: Vec::new() }
 		} else {
 			Self {
-				runs: vec![Run { start: 0, end: token_count }],
+				runs: vec![Run { start, end }],
 			}
 		}
 	}
@@ -638,15 +692,25 @@ impl RunIndex {
 	}
 }
 
-fn get_matching_positions(node: &PlanNode, corpus: &Corpus) -> Result<Vec<u64>> {
+fn get_matching_positions_in_range(
+	node: &PlanNode,
+	corpus: &Corpus,
+	range_start: u64,
+	range_end: u64,
+) -> Result<Vec<u64>> {
 	match node {
-		PlanNode::ScanAll => Ok((0..corpus.token_count()).collect()),
+		PlanNode::ScanAll => Ok((range_start..range_end).collect()),
 
 		PlanNode::ScanLiteral { layer, value } => {
 			let Some(bitmap) = corpus.inverted.get(layer, value) else {
 				return Ok(Vec::new());
 			};
-			Ok(bitmap.iter().map(|p| p as u64).collect())
+			Ok(bitmap
+				.iter()
+				.skip_while(|&p| (p as u64) < range_start)
+				.take_while(|&p| (p as u64) < range_end)
+				.map(|p| p as u64)
+				.collect())
 		}
 
 		PlanNode::ScanRegex { layer, pattern } => {
@@ -657,7 +721,13 @@ fn get_matching_positions(node: &PlanNode, corpus: &Corpus) -> Result<Vec<u64>> 
 				for value in values {
 					if re.is_match(value) {
 						if let Some(bitmap) = corpus.inverted.get(layer, value) {
-							positions.extend(bitmap.iter().map(|p| p as u64));
+							positions.extend(
+								bitmap
+									.iter()
+									.skip_while(|&p| (p as u64) < range_start)
+									.take_while(|&p| (p as u64) < range_end)
+									.map(|p| p as u64),
+							);
 						}
 					}
 				}
@@ -668,9 +738,58 @@ fn get_matching_positions(node: &PlanNode, corpus: &Corpus) -> Result<Vec<u64>> 
 			Ok(positions)
 		}
 
+		PlanNode::Union(nodes) => {
+			let mut all_positions = HashSet::new();
+			for node in nodes {
+				let positions =
+					get_matching_positions_in_range(node, corpus, range_start, range_end)?;
+				all_positions.extend(positions);
+			}
+			let mut positions: Vec<u64> = all_positions.into_iter().collect();
+			positions.sort_unstable();
+			Ok(positions)
+		}
+
+		PlanNode::Intersect(nodes) => {
+			if nodes.is_empty() {
+				return Ok(Vec::new());
+			}
+			let mut result: Option<HashSet<u64>> = None;
+			for node in nodes {
+				let positions: HashSet<u64> =
+					get_matching_positions_in_range(node, corpus, range_start, range_end)?
+						.into_iter()
+						.collect();
+				result = Some(match result {
+					None => positions,
+					Some(existing) => existing.intersection(&positions).copied().collect(),
+				});
+			}
+			let mut positions: Vec<u64> = result.unwrap_or_default().into_iter().collect();
+			positions.sort_unstable();
+			Ok(positions)
+		}
+
+		PlanNode::Difference { base, subtract } => {
+			let base_positions =
+				get_matching_positions_in_range(base, corpus, range_start, range_end)?;
+			let subtract_set: HashSet<u64> =
+				get_matching_positions_in_range(subtract, corpus, range_start, range_end)?
+					.into_iter()
+					.collect();
+			Ok(base_positions
+				.into_iter()
+				.filter(|p| !subtract_set.contains(p))
+				.collect())
+		}
+
 		_ => {
 			let hits = execute_node(node, corpus)?;
-			Ok(hits.into_iter().map(|h| h.span.start).collect())
+			Ok(hits
+				.into_iter()
+				.map(|h| h.span.start)
+				.filter(|&p| p >= range_start && p < range_end)
+				.collect())
 		}
 	}
 }
