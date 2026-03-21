@@ -5,6 +5,20 @@ pub trait ForwardIndex {
 	fn get(&self, position: Position, layer: &str) -> Option<&Value>;
 	fn get_range(&self, start: Position, end: Position, layer: &str) -> Vec<Option<&Value>>;
 	fn token_count(&self) -> u64;
+
+	fn get_str(&self, position: Position, layer: &str) -> Option<&str> {
+		match self.get(position, layer)? {
+			Value::Str(s) => Some(s.as_str()),
+			Value::Int(_) => None,
+		}
+	}
+
+	fn get_int(&self, position: Position, layer: &str) -> Option<i64> {
+		match self.get(position, layer)? {
+			Value::Int(n) => Some(*n),
+			Value::Str(_) => None,
+		}
+	}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,5 +120,52 @@ mod tests {
 		assert_eq!(index.get(0, "word"), Some(&Value::from("the")));
 		assert_eq!(index.get(1, "word"), Some(&Value::from("cat")));
 		assert_eq!(index.token_count(), 3);
+	}
+
+	#[test]
+	fn get_str_returns_string_values() {
+		let mut index = InMemoryForward::new();
+		let word_layer = index.add_layer("word");
+
+		index.set(word_layer, 0, "the".into());
+		index.set(word_layer, 1, "cat".into());
+
+		assert_eq!(index.get_str(0, "word"), Some("the"));
+		assert_eq!(index.get_str(1, "word"), Some("cat"));
+		assert_eq!(index.get_str(5, "word"), None);
+		assert_eq!(index.get_str(0, "nonexistent"), None);
+	}
+
+	#[test]
+	fn get_int_returns_integer_values() {
+		let mut index = InMemoryForward::new();
+		let head_layer = index.add_layer("head");
+
+		index.set(head_layer, 0, Value::Int(3));
+		index.set(head_layer, 1, Value::Int(0));
+
+		assert_eq!(index.get_int(0, "head"), Some(3));
+		assert_eq!(index.get_int(1, "head"), Some(0));
+		assert_eq!(index.get_int(5, "head"), None);
+	}
+
+	#[test]
+	fn get_str_returns_none_for_int() {
+		let mut index = InMemoryForward::new();
+		let head_layer = index.add_layer("head");
+
+		index.set(head_layer, 0, Value::Int(3));
+
+		assert_eq!(index.get_str(0, "head"), None);
+	}
+
+	#[test]
+	fn get_int_returns_none_for_str() {
+		let mut index = InMemoryForward::new();
+		let word_layer = index.add_layer("word");
+
+		index.set(word_layer, 0, "the".into());
+
+		assert_eq!(index.get_int(0, "word"), None);
 	}
 }
