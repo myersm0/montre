@@ -23,12 +23,8 @@ struct LayerDirectory {
 
 pub struct MappedSpans {
 	_mmap: Mmap,
-	base: *const u8,
 	layers: Vec<LayerDirectory>,
 }
-
-unsafe impl Send for MappedSpans {}
-unsafe impl Sync for MappedSpans {}
 
 impl MappedSpans {
 	pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -96,14 +92,12 @@ impl MappedSpans {
 			layers.push(LayerDirectory { name, data_offset, span_count });
 		}
 
-		let base = mmap.as_ptr();
-
-		Ok(Self { _mmap: mmap, base, layers })
+		Ok(Self { _mmap: mmap, layers })
 	}
 
 	fn layer_spans(&self, entry: &LayerDirectory) -> &[Span] {
 		unsafe {
-			let ptr = self.base.add(entry.data_offset) as *const Span;
+			let ptr = self._mmap.as_ptr().add(entry.data_offset) as *const Span;
 			std::slice::from_raw_parts(ptr, entry.span_count)
 		}
 	}
