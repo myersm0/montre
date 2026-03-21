@@ -392,11 +392,20 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 	}
 }
 
+fn benefits_from_parallel(steps: &[SequenceStep]) -> bool {
+	steps.iter().any(|s| {
+		s.min != 1
+			|| s.max != Some(1)
+			|| matches!(s.node, PlanNode::ScanAll)
+			|| matches!(s.node, PlanNode::Difference { ref base, .. } if matches!(**base, PlanNode::ScanAll))
+	})
+}
+
 fn execute_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<Vec<Hit>> {
 	let doc_spans = corpus.spans.spans("document");
 
 	match doc_spans {
-		Some(spans) if spans.len() > 1 => {
+		Some(spans) if spans.len() > 1 && benefits_from_parallel(steps) => {
 			let chunk_results: Vec<Vec<Hit>> = spans
 				.par_iter()
 				.map(|span| execute_sequence_in_range(steps, corpus, span.start, span.end))
@@ -434,7 +443,7 @@ fn count_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<usize> {
 	let doc_spans = corpus.spans.spans("document");
 
 	match doc_spans {
-		Some(spans) if spans.len() > 1 => {
+		Some(spans) if spans.len() > 1 && benefits_from_parallel(steps) => {
 			let counts: Vec<usize> = spans
 				.par_iter()
 				.map(|span| {
@@ -620,6 +629,7 @@ impl RunIndex {
 		Self { runs }
 	}
 
+	#[cfg(test)]
 	fn full(token_count: u64) -> Self {
 		Self::range(0, token_count)
 	}
