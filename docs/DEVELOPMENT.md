@@ -33,6 +33,10 @@ Parallel corpora are not "two corpora joined at query time." They are one corpus
 
 Components remain independently queryable. You can query `maupassant-fr` as if the English never existed. The "single corpus" constraint is what *enables* flexible alignment, not what restricts it.
 
+### Concurrency without shared mutable state
+
+`Corpus` is immutable after construction, `Send + Sync`, and safe to share across threads. The query engine exploits this by partitioning work across documents — each document is an independent unit of computation with no cross-document dependencies during sequence execution. The build pipeline uses a similar strategy: each input file produces an independent `IndexSink`, and the results merge sequentially after parallel construction.
+
 ## Architecture
 
 ```
@@ -635,32 +639,89 @@ Recommend deferring this to Phase 2c or later. It's useful but not core to the q
 - [x] CI and release workflows
 - [x] Shared test corpus (`testdata/parallel/`)
 
+### Phase 3b: Computational parallelism (rayon) ✓
+
+- [x] Index merge operations (`merge_from` on InMemoryInverted, InMemoryForward, InMemorySpans, InMemoryLexicon)
+- [x] Parallel build: per-file IndexSink construction via `build_from_directory`
+- [x] `CorpusBuilder::from_directory` parallel constructor
+- [x] Multi-component parallel build (components built in parallel, files within each in parallel)
+- [x] Document-parallel sequence execution with range-restricted position lookups
+- [x] Adaptive dispatch heuristic (`benefits_from_parallel`)
+- [x] Parallel corpus deserialization (nested `rayon::join` for four index files)
+- [x] Criterion benchmark suite (`montre-bench` crate)
+
+**Parallel build pipeline**
+
+The build pipeline uses a two-level parallelism strategy. At the outer level, `MultiCorpusBuilder` builds components in parallel via `rayon::par_iter`. At the inner level, `build_from_directory` processes each `.conllu` file independently:
+
+1. Collect and sort file paths (deterministic ordering).
+2. `par_iter` over files: each thread opens, parses, and builds a complete per-file `IndexSink` (inverted index, forward index, spans, lexicon).
+3. Collect results in input order (rayon's `collect` preserves order).
+4. Sequential merge: iterate over per-file sinks, calling `merge_from` on the combined sink.
+
+The merge step applies a position offset so that each file's token positions land at the correct global offset. This is inherently sequential — the offset depends on the accumulated token count — but it's fast relative to parsing. The index structures support efficient merging: roaring bitmaps shift and OR, forward index data copies at an offset, spans shift boundaries, and the lexicon takes the union of term sets.
+
+Document ordering is deterministic: file paths are sorted before dispatch, and `par_iter().collect()` preserves input order regardless of thread scheduling. This guarantees identical corpus output on every build.
+
+**Document-parallel query execution**
+
+Sequence execution (the `SequenceScan` plan node) partitions work by document spans. Each document is processed independently with range-restricted position lookups:
+
+1. Retrieve document spans from the span index.
+2. `par_iter` over document spans: for each document `[start, end)`, call `run_sequence_steps_in_range` with the document bounds.
+3. Position lookups (`get_matching_positions_in_range`) restrict bitmap iteration to the document's range using `skip_while`/`take_while` on roaring iterators. `ScanAll` generates only the document's position range.
+4. Concatenate per-document results.
+
+This is correct because sequences cannot meaningfully cross document boundaries in linguistic corpora. The range restriction also provides a secondary benefit beyond parallelism: for `ScanAll` in first position, the working set per document is O(document_size) instead of O(corpus_size), which reduces the quadratic cost of span generation.
+
+Not all sequences benefit from parallel dispatch. The `benefits_from_parallel` heuristic gates parallelism on the presence of quantifiers (`min != 1` or `max != Some(1)`) or `ScanAll`/`Difference`-over-`ScanAll` steps. Fixed-length sequences like `[pos="ADJ"] [pos="NOUN"]` (two literal steps, both `min=1, max=Some(1)`) run single-threaded because the per-document dispatch overhead exceeds the parallelism benefit for these cheap queries.
+
+The `count_sequence` path uses the same document-parallel strategy, summing per-document counts instead of collecting hit vectors.
+
 ### Phase 4: Statistics & bindings
 
 - [ ] `count` command (CLI)
 - [ ] `group` command (frequency by attribute)
 - [ ] Collocation extraction
 - [ ] Python bindings (PyO3)
+- [ ] REPL mode (readline loop, corpus held in memory)
 - [ ] TUI
 
 ## Benchmarks
 
-Current numbers on Apple M-series, 1.5M token corpus (Maupassant French/English):
+Current numbers on Apple M4 Max, 1.5M token corpus (Maupassant French/English). Benchmarks driven by Criterion via the `montre-bench` crate.
+
+### Query execution
 
 | Query | Matches | Time |
 |-------|---------|------|
-| `[pos="NOUN"]` | 244,184 | 0.6ms |
+| `[pos="NOUN"]` | 244,184 | 0.7ms |
 | `[pos="ADJ"] [pos="NOUN"]` | 30,672 | 12ms |
-| `[pos="ADJ"]? [pos="NOUN"]` | 272,019 | 71ms |
-| `([pos="ADJ"] \| [pos="ADV"])+ [pos="NOUN"]` | 33,444 | 27ms |
-| `([pos="ADJ"] \| [pos="DET"])+ [pos="NOUN"]` | 198,735 | 71ms |
+| `[pos="ADJ"]? [pos="NOUN"]` | 272,019 | 22ms |
+| `([pos="ADJ"] \| [pos="ADV"])+ [pos="NOUN"]` | 33,444 | 20ms |
+| `([pos="ADJ"] \| [pos="DET"])+ [pos="NOUN"]` | 198,735 | 29ms |
 | `[pos="ADJ"]{2,4}` | 1,628 | 0.5ms |
 | `[lemma="maison"]` | ~800 | <1ms |
-| `[] [lemma="chat"]` | 120 | 132ms |
+| `[] [lemma="chat"]` | 120 | 9.5ms |
 
 `execute_count` fast path: `[pos="NOUN"]` count in 22ns (bitmap `.len()`).
 
 Alignment projection adds negligible overhead with indexed edge lookup.
+
+Quantifier queries and `ScanAll`-in-first-position use document-parallel execution (see Phase 3b). The `[] [lemma="chat"]` improvement from 132ms to 9.5ms (14×) comes from both parallelism and range restriction — each document processes O(document_size) positions instead of O(corpus_size).
+
+### Build pipeline
+
+| Benchmark | Time |
+|---|---|
+| `build_single_component` (300 .conllu files, parallel) | 452ms |
+| `build_multi_component` (2 components + alignments, parallel) | 1.32s |
+
+### Corpus loading
+
+| Benchmark | Time |
+|---|---|
+| `corpus_open` (deserialize from disk, parallel) | 285ms |
 
 ## Error handling
 
@@ -713,6 +774,23 @@ cargo test -p montre-query --test executor_integration   # integration tests
 The test suite has 140+ tests across all crates. The integration test suite (`crates/montre-query/tests/executor_integration.rs`) covers end-to-end query execution including sequences, quantifiers, alternation edge cases, within constraints, multi-document queries, alignment projection, feats decomposition, and the Results API.
 
 A shared test corpus at `testdata/parallel/` provides a small multi-component French/English corpus with sentence alignments, suitable for reuse in Julia and Python binding test suites. See `testdata/parallel/POSITIONS.md` for the position reference.
+
+## Benchmarking
+
+Criterion benchmarks live in the `montre-bench` crate (`crates/montre-bench/`). Benchmarks are driven by environment variables pointing at local data:
+
+- `MONTRE_BENCH_CORPUS` — path to a pre-built montre corpus (query benchmarks)
+- `MONTRE_BENCH_CONLLU` — path to a directory of .conllu files (single-component build + parse benchmarks)
+- `MONTRE_BENCH_MANIFEST` — path to a corpus build manifest TOML (multi-component build benchmark)
+
+```bash
+cargo bench -p montre-bench --bench query    # query and load benchmarks
+cargo bench -p montre-bench --bench build    # build pipeline benchmarks
+cargo bench -p montre-bench --bench lookup   # inverted index lookup microbenchmarks
+cargo bench -p montre-bench --bench query -- corpus_open   # filter to a single benchmark
+```
+
+Results are stored in `target/criterion/` with HTML reports.
 
 ## License
 

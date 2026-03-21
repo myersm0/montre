@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use montre_core::{Span, UnitId};
+use rayon;
 use serde::{Deserialize, Serialize};
 
 use crate::forward::InMemoryForward;
@@ -99,6 +100,39 @@ pub struct Corpus {
 	pub alignments: AlignmentIndex,
 }
 
+fn load_indexes(
+	path: &Path,
+) -> Result<(InMemoryInverted, InMemoryForward, InMemorySpans, InMemoryLexicon)> {
+	let ((inverted, forward), (spans, lexicon)) = rayon::join(
+		|| rayon::join(
+			|| -> Result<InMemoryInverted> {
+				let bytes = std::fs::read(path.join("inverted.bin"))?;
+				bincode::deserialize(&bytes)
+					.map_err(|e| IndexError::Format(format!("Failed to deserialize inverted index: {}", e)))
+			},
+			|| -> Result<InMemoryForward> {
+				let bytes = std::fs::read(path.join("forward.bin"))?;
+				bincode::deserialize(&bytes)
+					.map_err(|e| IndexError::Format(format!("Failed to deserialize forward index: {}", e)))
+			},
+		),
+		|| rayon::join(
+			|| -> Result<InMemorySpans> {
+				let bytes = std::fs::read(path.join("spans.bin"))?;
+				bincode::deserialize(&bytes)
+					.map_err(|e| IndexError::Format(format!("Failed to deserialize spans index: {}", e)))
+			},
+			|| -> Result<InMemoryLexicon> {
+				let bytes = std::fs::read(path.join("lexicon.bin"))?;
+				bincode::deserialize(&bytes)
+					.map_err(|e| IndexError::Format(format!("Failed to deserialize lexicon: {}", e)))
+			},
+		),
+	);
+
+	Ok((inverted?, forward?, spans?, lexicon?))
+}
+
 impl Corpus {
 	pub fn open(path: impl AsRef<Path>) -> Result<Self> {
 		let path = path.as_ref();
@@ -119,21 +153,7 @@ impl Corpus {
 			});
 		}
 
-		let inverted_bytes = std::fs::read(path.join("inverted.bin"))?;
-		let inverted: InMemoryInverted = bincode::deserialize(&inverted_bytes)
-			.map_err(|e| IndexError::Format(format!("Failed to deserialize inverted index: {}", e)))?;
-
-		let forward_bytes = std::fs::read(path.join("forward.bin"))?;
-		let forward: InMemoryForward = bincode::deserialize(&forward_bytes)
-			.map_err(|e| IndexError::Format(format!("Failed to deserialize forward index: {}", e)))?;
-
-		let spans_bytes = std::fs::read(path.join("spans.bin"))?;
-		let spans: InMemorySpans = bincode::deserialize(&spans_bytes)
-			.map_err(|e| IndexError::Format(format!("Failed to deserialize spans index: {}", e)))?;
-
-		let lexicon_bytes = std::fs::read(path.join("lexicon.bin"))?;
-		let lexicon: InMemoryLexicon = bincode::deserialize(&lexicon_bytes)
-			.map_err(|e| IndexError::Format(format!("Failed to deserialize lexicon: {}", e)))?;
+		let (inverted, forward, spans, lexicon) = load_indexes(path)?;
 
 		let alignments = if path.join("alignments.bin").exists() {
 			let align_bytes = std::fs::read(path.join("alignments.bin"))?;

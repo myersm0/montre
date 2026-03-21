@@ -34,6 +34,13 @@ impl InMemoryLexicon {
 		layer_to_term.push(term.to_string());
 		id
 	}
+	pub fn merge_from(&mut self, other: Self) {
+		for (layer, terms) in other.to_term {
+			for term in terms {
+				self.add_term(&layer, &term);
+			}
+		}
+	}
 }
 
 impl Default for InMemoryLexicon {

@@ -27,6 +27,15 @@ impl InMemorySpans {
 			.push(span);
 	}
 
+	pub fn merge_from(&mut self, other: Self, position_offset: u64) {
+		for (layer, spans) in other.data {
+			let target = self.data.entry(layer).or_default();
+			target.extend(spans.into_iter().map(|s| {
+				Span::new(s.start + position_offset, s.end + position_offset)
+			}));
+		}
+	}
+
 	pub fn finalize(&mut self) {
 		for spans in self.data.values_mut() {
 			spans.sort_by_key(|s| s.start);

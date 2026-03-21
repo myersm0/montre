@@ -1,14 +1,10 @@
-use std::fs::File;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
-use walkdir::WalkDir;
 
 use montre_build::builder::CorpusBuilder;
-use montre_build::format::conllu::ConllUReader;
-use montre_build::format::{CorpusReader, ParseStats};
 use montre_build::MultiCorpusBuilder;
 use montre_core::Value;
 use montre_index::ForwardIndex;
@@ -64,22 +60,6 @@ enum Commands {
 	Info {
 		corpus: PathBuf,
 	},
-}
-
-#[derive(Default)]
-struct AggregateStats {
-	documents: usize,
-	sentences_parsed: usize,
-	sentences_skipped: usize,
-	tokens_parsed: usize,
-}
-
-impl AggregateStats {
-	fn add(&mut self, stats: &ParseStats) {
-		self.sentences_parsed += stats.sentences_parsed;
-		self.sentences_skipped += stats.sentences_skipped;
-		self.tokens_parsed += stats.tokens_parsed;
-	}
 }
 
 fn main() -> Result<()> {
@@ -181,77 +161,18 @@ fn cmd_build(
 
 	tracing::info!("Building corpus '{}' from {}", corpus_name, input.display());
 
-	let mut builder = CorpusBuilder::new(&corpus_name);
-	if decompose_feats {
-		builder = builder.decompose_feats(true);
-	}
-	let mut aggregate = AggregateStats::default();
+	let builder = CorpusBuilder::from_directory(&corpus_name, &input, decompose_feats, strict)
+		.with_context(|| format!("Failed to build from {}", input.display()))?;
 
-	let entries: Vec<PathBuf> = if input.is_file() {
-		vec![input.clone()]
-	} else {
-		WalkDir::new(&input)
-			.follow_links(true)
-			.into_iter()
-			.filter_map(|e| e.ok())
-			.filter(|e| {
-				e.path()
-					.extension()
-					.map(|ext| ext == "conllu")
-					.unwrap_or(false)
-			})
-			.map(|e| e.path().to_path_buf())
-			.collect()
-	};
-
-	if entries.is_empty() {
-		anyhow::bail!("No .conllu files found in {}", input.display());
-	}
-
-	for path in entries {
-		let file =
-			File::open(&path).with_context(|| format!("Failed to open: {}", path.display()))?;
-
-		let filename = path
-			.file_name()
-			.and_then(|n| n.to_str())
-			.unwrap_or("unknown");
-
-		let mut reader = ConllUReader::new(file).with_source_name(filename);
-
-		let sentences = if strict {
-			reader.read_sentences_strict()?
-		} else {
-			reader.read_sentences()?
-		};
-
-		if !sentences.is_empty() {
-			builder.add_document(filename, sentences);
-			aggregate.documents += 1;
-		}
-		aggregate.add(reader.stats());
-	}
+	tracing::info!(
+		"Indexed {} documents, {} tokens",
+		builder.document_count(),
+		builder.current_position()
+	);
 
 	builder
 		.build(&output)
-		.with_context(|| "Failed to build corpus")?;
-
-	if aggregate.sentences_skipped > 0 {
-		tracing::info!(
-			"Parsed {} documents, {} sentences ({} skipped), {} tokens",
-			aggregate.documents,
-			aggregate.sentences_parsed,
-			aggregate.sentences_skipped,
-			aggregate.tokens_parsed
-		);
-	} else {
-		tracing::info!(
-			"Parsed {} documents, {} sentences, {} tokens",
-			aggregate.documents,
-			aggregate.sentences_parsed,
-			aggregate.tokens_parsed
-		);
-	}
+		.with_context(|| "Failed to write corpus")?;
 
 	tracing::info!("Corpus written to {}", output.display());
 	Ok(())

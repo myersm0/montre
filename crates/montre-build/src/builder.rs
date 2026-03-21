@@ -1,3 +1,5 @@
+use std::fs::File;
+use std::io::BufReader;
 use std::path::Path;
 
 use montre_core::{layers, Span, Value};
@@ -7,8 +9,11 @@ use montre_index::inverted::InMemoryInverted;
 use montre_index::lexicon::InMemoryLexicon;
 use montre_index::spans::InMemorySpans;
 use montre_index::{ForwardIndex, SpanIndex};
+use rayon::prelude::*;
+use walkdir::WalkDir;
 
-use crate::format::ParsedSentence;
+use crate::format::conllu::ConllUReader;
+use crate::format::{CorpusReader, ParsedSentence};
 use crate::Result;
 
 pub struct IndexSink {
@@ -47,6 +52,19 @@ impl IndexSink {
 	pub fn with_decompose_feats(mut self, enabled: bool) -> Self {
 		self.decompose_feats = enabled;
 		self
+	}
+
+	pub fn merge_from(&mut self, other: Self) {
+		let offset = self.current_position;
+		self.inverted.merge_from(other.inverted, offset as u32);
+		self.forward.merge_from(other.forward, offset);
+		self.spans.merge_from(other.spans, offset);
+		self.lexicon.merge_from(other.lexicon);
+		self.document_names.extend(other.document_names);
+		for (name, _) in &other.layer_indices {
+			self.ensure_layer(name);
+		}
+		self.current_position += other.current_position;
 	}
 
 	pub fn add_document(&mut self, doc_name: &str, sentences: Vec<ParsedSentence>) {
@@ -166,6 +184,74 @@ impl IndexSink {
 	}
 }
 
+pub fn build_from_directory(
+	dir: &Path,
+	decompose_feats: bool,
+	strict: bool,
+) -> Result<IndexSink> {
+	let mut files: Vec<_> = WalkDir::new(dir)
+		.into_iter()
+		.filter_map(|e| e.ok())
+		.filter(|e| {
+			e.path()
+				.extension()
+				.map(|ext| ext == "conllu")
+				.unwrap_or(false)
+		})
+		.map(|e| e.path().to_path_buf())
+		.collect();
+
+	files.sort();
+
+	let file_sinks: Vec<IndexSink> = files
+		.par_iter()
+		.map(|path| {
+			let file = File::open(path)?;
+			let reader = BufReader::new(file);
+			let mut conllu = ConllUReader::new(reader).with_source_name(
+				path.file_name()
+					.map(|s| s.to_string_lossy().to_string())
+					.unwrap_or_else(|| "unknown".into()),
+			);
+
+			let result = if strict {
+				conllu.read_sentences_strict()
+			} else {
+				conllu.read_sentences()
+			};
+
+			match result {
+				Ok(sentences) => {
+					let doc_name = path
+						.file_name()
+						.map(|s| s.to_string_lossy().to_string())
+						.unwrap_or_else(|| "unknown".into());
+					let mut sink = IndexSink::new().with_decompose_feats(decompose_feats);
+					sink.add_document(&doc_name, sentences);
+					Ok(sink)
+				}
+				Err(e) => {
+					if strict {
+						Err(e)
+					} else {
+						tracing::warn!("Skipping {:?}: {}", path, e);
+						Ok(IndexSink::new().with_decompose_feats(decompose_feats))
+					}
+				}
+			}
+		})
+		.collect::<Result<Vec<_>>>()?;
+
+	let mut combined = IndexSink::new().with_decompose_feats(decompose_feats);
+	for sink in file_sinks {
+		if sink.current_position > 0 {
+			combined.merge_from(sink);
+		}
+	}
+
+	Ok(combined)
+}
+
 pub struct CorpusBuilder {
 	name: String,
 	pub(crate) sink: IndexSink,
@@ -177,6 +263,19 @@ impl CorpusBuilder {
 			name: name.into(),
 			sink: IndexSink::new(),
 		}
+	}
+
+	pub fn from_directory(
+		name: impl Into<String>,
+		dir: &Path,
+		decompose_feats: bool,
+		strict: bool,
+	) -> Result<Self> {
+		let sink = build_from_directory(dir, decompose_feats, strict)?;
+		Ok(Self {
+			name: name.into(),
+			sink,
+		})
 	}
 
 	pub fn decompose_feats(mut self, enabled: bool) -> Self {
