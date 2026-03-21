@@ -69,6 +69,7 @@ pub struct Hit {
 ### Span
 
 ```rust
+#[repr(C)]
 pub struct Span {
     pub start: u64,    // inclusive
     pub end: u64,      // exclusive
@@ -80,20 +81,28 @@ span.contains_span(&s)  // true if s is fully inside
 span.overlaps(&s)       // true if any overlap
 ```
 
+`#[repr(C)]` guarantees a 16-byte `(u64, u64)` layout, enabling zero-copy access from memory-mapped span files.
+
 ### Token access
 
 ```rust
-use montre_core::Value;
 use montre_index::ForwardIndex;
 
-// Single position, single layer
-let val: Option<&Value> = corpus.forward.get(position, "word");
+// String layers (word, lemma, pos, feats, etc.) — preferred, zero-copy with mapped backend
+let word: Option<&str> = corpus.forward.get_str(position, "word");
+let pos: Option<&str> = corpus.forward.get_str(position, "pos");
 
-// Range of positions
+// Integer layers (head)
+let head: Option<i64> = corpus.forward.get_int(position, "head");
+
+// Range of positions (returns owned Values)
 let vals: Vec<Option<&Value>> = corpus.forward.get_range(start, end, "lemma");
+
+// Legacy: returns &Value (requires allocation on mapped backend; prefer get_str/get_int)
+let val: Option<&Value> = corpus.forward.get(position, "word");
 ```
 
-`Value` is either `Value::Str(CompactString)` or `Value::Int(i64)`.
+`Value` is either `Value::Str(CompactString)` or `Value::Int(i64)`. The `get_str` and `get_int` methods are preferred for new code — they avoid the `Value` wrapper and enable zero-copy access from the memory-mapped forward index.
 
 ### Inverted index
 
@@ -320,13 +329,15 @@ A built corpus is a directory:
 corpus/
 ├── corpus.json     # metadata (name, version, layers, components, alignments)
 ├── inverted.bin    # term → positions (bincode-serialized HashMap<String, HashMap<String, RoaringBitmap>>)
-├── forward.bin     # position → annotations per layer
-├── spans.bin       # sentence, document, and custom span layers
-├── lexicon.bin     # term dictionary per layer
+├── forward.bin     # position → annotations per layer (flat mmap format: bitmap-sparse, dictionary-coded)
+├── spans.bin       # sentence, document, and custom span layers (flat mmap format)
+├── lexicon.bin     # term dictionary per layer (bincode)
 └── alignments.bin  # alignment edges (optional, only for multi-component corpora)
 ```
 
-Index version is stored in `corpus.json` and checked on load. Current version: 2.
+Index version is stored in `corpus.json` and checked on load. Current version: 3.
+
+The `forward.bin` and `spans.bin` files use custom flat binary formats designed for memory-mapped access. They are opened via `mmap` on `Corpus::open` with no deserialization — the OS pages data into RAM on demand. The `inverted.bin` and `lexicon.bin` files are still bincode-serialized and deserialized into heap structures on open.
 
 ## Build manifest
 

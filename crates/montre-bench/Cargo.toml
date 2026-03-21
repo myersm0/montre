@@ -12,8 +12,13 @@ harness = false
 name = "build"
 harness = false
 
+[[bench]]
+name = "roaring"
+harness = false
+
 [dev-dependencies]
 criterion = { workspace = true }
+roaring = { workspace = true }
 montre-index = { workspace = true }
 montre-query = { workspace = true }
 montre-build = { workspace = true }

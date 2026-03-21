@@ -6,6 +6,7 @@ pub type Position = u64;
 pub type LayerId = u16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(C)]
 pub struct Span {
 	pub start: Position,
 	pub end: Position,

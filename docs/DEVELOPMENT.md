@@ -163,10 +163,10 @@ No strings, no formatting, no KWIC. The engine returns positions and IDs; displa
 ```
 my-corpus/
 ├── corpus.json          # metadata
-├── inverted.bin         # term → positions
-├── forward.bin          # position → annotations
-├── spans.bin            # sentence, document spans
-└── lexicon.bin          # term dictionary
+├── inverted.bin         # term → positions (bincode)
+├── forward.bin          # position → annotations (flat mmap format)
+├── spans.bin            # sentence, document spans (flat mmap format)
+└── lexicon.bin          # term dictionary (bincode)
 ```
 
 ### Multi-component corpus with alignments
@@ -647,7 +647,7 @@ Recommend deferring this to Phase 2c or later. It's useful but not core to the q
 - [x] Multi-component parallel build (components built in parallel, files within each in parallel)
 - [x] Document-parallel sequence execution with range-restricted position lookups
 - [x] Adaptive dispatch heuristic (`benefits_from_parallel`)
-- [x] Parallel corpus deserialization (nested `rayon::join` for four index files)
+- [x] Parallel corpus deserialization (`rayon::join` for inverted index and lexicon; forward and spans are memory-mapped)
 - [x] Criterion benchmark suite (`montre-bench` crate)
 
 **Parallel build pipeline**
@@ -677,6 +677,46 @@ This is correct because sequences cannot meaningfully cross document boundaries 
 Not all sequences benefit from parallel dispatch. The `benefits_from_parallel` heuristic gates parallelism on the presence of quantifiers (`min != 1` or `max != Some(1)`) or `ScanAll`/`Difference`-over-`ScanAll` steps. Fixed-length sequences like `[pos="ADJ"] [pos="NOUN"]` (two literal steps, both `min=1, max=Some(1)`) run single-threaded because the per-document dispatch overhead exceeds the parallelism benefit for these cheap queries.
 
 The `count_sequence` path uses the same document-parallel strategy, summing per-document counts instead of collecting hit vectors.
+
+### Phase 3c: Memory-mapped indexes ✓
+
+- [x] `#[repr(C)]` on `Span` (guarantees 16-byte `(u64, u64)` layout for zero-copy mmap cast)
+- [x] Flat binary span format (`MSPN` magic, version, BOM, layer directory, string pool, aligned span arrays)
+- [x] `MappedSpans`: memory-mapped span index via `memmap2`, implements `SpanIndex`
+- [x] `SpanStore` enum (`InMemory | Mapped`) implementing `SpanIndex`
+- [x] `get_str` and `get_int` methods on `ForwardIndex` trait (zero-copy string access, typed numeric access)
+- [x] Flat binary forward format (`MFWD` magic, per-layer encoding: `DictEncoded` with variable-width term IDs, `DenseNumeric` for integer layers)
+- [x] `MappedForward`: memory-mapped forward index with bitmap-sparse dictionary-coded layers, implements `ForwardIndex`
+- [x] Reader-side dense fast path: layers at 100% presence bypass roaring bitmap rank entirely
+- [x] `ForwardStore` enum (`InMemory | Mapped`) implementing `ForwardIndex`
+- [x] `Corpus` uses `SpanStore` and `ForwardStore`; forward and spans mmapped on open
+- [x] Builder writes flat formats for both spans and forward
+- [x] CLI and FFI migrated from `forward.get()` to `get_str`/`get_int`
+- [x] Index version bumped to 3
+
+**Design decisions**
+
+ELTeC profiling (10M+ tokens, 25-30 layers with decomposed morphological features) drove the forward index design. Key findings:
+
+- Layer sparsity is a gradient, not a binary split. `feats.Number` is present on 54% of tokens in French, 37% in English. `feats.Gender` is 35% / 5.6%. No natural cutoff between "dense" and "sparse."
+- Feature vocabularies are tiny: Number is {Sing, Plur}, Gender is {Masc, Fem, Neut}. Core layers vary: POS ~17 values, word ~80K, lemma ~60K.
+- A naive dense layout (8 bytes × 10M tokens × 25 layers) would be 2.4GB for French alone.
+
+The solution: uniform on-disk format (roaring presence bitmap + packed dictionary-coded term IDs per layer), with variable-width encoding (u8/u16/u32) chosen per layer based on vocabulary size. The `head` layer, which stores integer dependency head indices, uses a separate `DenseNumeric` encoding — a flat u32 array with no bitmap or term table.
+
+At open time, the reader detects fully-present layers (bitmap cardinality equals token count) and marks them for direct indexing, bypassing bitmap rank entirely. This covers word, lemma, pos, deprel — the layers that dominate collocation, KWIC, and bulk extraction. Sparse feats layers go through contains+rank at ~50ns per lookup, which is acceptable given their lower access frequency.
+
+Result: ~200MB forward index for 10M tokens across 25 layers, compared to 2.4GB dense. Corpus open time reduced by 93-96%.
+
+**Forward index on-disk format**
+
+Each layer is stored as one of two encoding kinds:
+
+*DictEncoded*: a roaring bitmap marking present positions, a sorted string term table, and a packed array of term IDs (u8, u16, or u32 depending on vocabulary size). Lookup: check bitmap → rank query → read term ID → index into term table.
+
+*DenseNumeric*: a flat u32 array indexed directly by position. Used for integer layers like `head`.
+
+The file has a header (magic, version, BOM, token count, layer count), a layer directory with per-layer encoding tag and section offsets, a string pool for layer names, and per-layer data sections. All sections are 8-byte aligned. Native endianness with a BOM field for detection.
 
 ### Phase 4: Statistics & bindings
 
@@ -719,9 +759,22 @@ Quantifier queries and `ScanAll`-in-first-position use document-parallel executi
 
 ### Corpus loading
 
-| Benchmark | Time |
-|---|---|
-| `corpus_open` (deserialize from disk, parallel) | 285ms |
+| Benchmark | Time | Notes |
+|---|---|---|
+| `corpus_open` (1.5M token Maupassant) | 20ms | forward + spans memory-mapped; inverted + lexicon bincode-deserialized |
+| `corpus_open` (1.5M + 10M token Maupassant + ELTeC-fra) | 116ms | same; remaining time is inverted index deserialization |
+| `corpus_open` (pre-mmap, v0.3, 1.5M token Maupassant) | 285ms | all four indexes bincode-deserialized with rayon |
+
+### Peak memory (query-time RSS)
+
+| Corpus | Current (mmap) | Pre-mmap (v0.3) | Reduction |
+|---|---|---|---|
+| Maupassant (1.5M tokens, 6 layers) | 94MB | 1.75GB | 18.7× |
+| Maupassant + ELTeC-fra (11.5M tokens, 25 layers) | 1.2GB | n/a | — |
+
+The mmap-backed forward and span indexes contribute only the pages the OS faults in during the query. The remaining RSS is dominated by the inverted index and lexicon, which are still heap-deserialized.
+
+Note: build-time memory is separate and unchanged by the mmap work. The build pipeline accumulates all indexes in memory before writing. For ELTeC-scale corpora (25M+ tokens, 30+ layers with decomposed feats), build-time peak RSS can reach 25GB. A streaming builder that writes indexes incrementally would address this but is not yet implemented.
 
 ## Error handling
 

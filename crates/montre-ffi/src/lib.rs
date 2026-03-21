@@ -3,7 +3,6 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 
-use montre_core::Value;
 use montre_index::{Corpus, ForwardIndex, SpanIndex};
 use montre_query::executor::{self, Hit};
 
@@ -190,11 +189,14 @@ pub unsafe extern "C" fn montre_corpus_component_language(
 // Token access
 // ---------------------------------------------------------------------------
 
-fn value_to_string(v: &Value) -> String {
-	match v {
-		Value::Str(s) => s.to_string(),
-		Value::Int(n) => n.to_string(),
+fn forward_value_string(corpus: &Corpus, position: u64, layer: &str) -> Option<String> {
+	if let Some(s) = corpus.forward.get_str(position, layer) {
+		return Some(s.to_string());
 	}
+	if let Some(n) = corpus.forward.get_int(position, layer) {
+		return Some(n.to_string());
+	}
+	None
 }
 
 #[no_mangle]
@@ -210,8 +212,8 @@ pub unsafe extern "C" fn montre_corpus_token_annotation(
 	let Some(layer_str) = borrow_cstr(layer) else {
 		return ptr::null_mut();
 	};
-	match c.forward.get(position, layer_str) {
-		Some(val) => to_cstring(&value_to_string(val)),
+	match forward_value_string(c, position, layer_str) {
+		Some(val) => to_cstring(&val),
 		None => ptr::null_mut(),
 	}
 }
@@ -231,7 +233,7 @@ pub unsafe extern "C" fn montre_corpus_span_text(
 		return ptr::null_mut();
 	};
 	let words: Vec<String> = (start..end)
-		.filter_map(|p| c.forward.get(p, layer_str).map(value_to_string))
+		.filter_map(|p| forward_value_string(c, p, layer_str))
 		.collect();
 	to_cstring(&words.join(" "))
 }
@@ -269,7 +271,7 @@ pub unsafe extern "C" fn montre_hitlist_texts(
 
 	for (i, hit) in hitlist.hits.iter().enumerate() {
 		let words: Vec<String> = (hit.span.start..hit.span.end)
-			.filter_map(|p| c.forward.get(p, layer_str).map(value_to_string))
+			.filter_map(|p| forward_value_string(c, p, layer_str))
 			.collect();
 		*array.add(i) = to_cstring(&words.join(" "));
 	}
@@ -345,8 +347,7 @@ pub unsafe extern "C" fn montre_context_tokens(
 			let relative = pos as i64 - hit.span.start as i64;
 			all_positions.push(relative as i32);
 
-			let token_str = c.forward.get(pos, layer_str)
-				.map(value_to_string)
+			let token_str = forward_value_string(c, pos, layer_str)
 				.unwrap_or_default();
 			all_tokens.push(token_str);
 		}
