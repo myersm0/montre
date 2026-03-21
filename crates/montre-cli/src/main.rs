@@ -6,7 +6,6 @@ use tracing_subscriber::EnvFilter;
 
 use montre_build::builder::CorpusBuilder;
 use montre_build::MultiCorpusBuilder;
-use montre_core::Value;
 use montre_index::ForwardIndex;
 
 #[derive(Parser)]
@@ -178,13 +177,6 @@ fn cmd_build(
 	Ok(())
 }
 
-fn value_to_str(v: &Value) -> String {
-	match v {
-		Value::Str(s) => s.to_string(),
-		Value::Int(n) => n.to_string(),
-	}
-}
-
 fn cmd_query(corpus_path: PathBuf, query: String, limit: usize, count_only: bool) -> Result<()> {
 	use std::time::Instant;
 
@@ -236,15 +228,15 @@ fn cmd_query(corpus_path: PathBuf, query: String, limit: usize, count_only: bool
 		let ctx_end = (hit.span.end + 5).min(token_count);
 
 		let left: Vec<String> = (ctx_start..hit.span.start)
-			.filter_map(|p| corpus.forward.get(p, "word").map(value_to_str))
+			.filter_map(|p| corpus.forward.get_str(p, "word").map(str::to_string))
 			.collect();
 
 		let matched: Vec<String> = (hit.span.start..hit.span.end)
-			.filter_map(|p| corpus.forward.get(p, "word").map(value_to_str))
+			.filter_map(|p| corpus.forward.get_str(p, "word").map(str::to_string))
 			.collect();
 
 		let right: Vec<String> = (hit.span.end..ctx_end)
-			.filter_map(|p| corpus.forward.get(p, "word").map(value_to_str))
+			.filter_map(|p| corpus.forward.get_str(p, "word").map(str::to_string))
 			.collect();
 
 		let doc_name = corpus.document_at(hit.span.start).unwrap_or("?");

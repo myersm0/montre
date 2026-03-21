@@ -160,9 +160,7 @@ impl IndexSink {
 			.map_err(|e| crate::BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 		std::fs::write(path.join("inverted.bin"), &inverted_bytes)?;
 
-		let forward_bytes = bincode::serialize(&self.forward)
-			.map_err(|e| crate::BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-		std::fs::write(path.join("forward.bin"), &forward_bytes)?;
+		montre_index::write_flat_forward(&self.forward, &path.join("forward.bin"))?;
 
 		montre_index::write_flat_spans(&self.spans, &path.join("spans.bin"))?;
 
@@ -171,11 +169,10 @@ impl IndexSink {
 		std::fs::write(path.join("lexicon.bin"), lexicon_bytes)?;
 
 		tracing::info!(
-			"Wrote corpus: {} tokens, {} documents, {} bytes inverted, {} bytes forward",
+			"Wrote corpus: {} tokens, {} documents, {} bytes inverted",
 			meta.token_count,
 			meta.document_names.len(),
-			inverted_bytes.len(),
-			forward_bytes.len()
+			inverted_bytes.len()
 		);
 
 		Ok(())
