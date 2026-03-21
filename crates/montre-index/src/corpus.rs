@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::forward::InMemoryForward;
 use crate::inverted::InMemoryInverted;
 use crate::lexicon::InMemoryLexicon;
-use crate::spans::InMemorySpans;
+use crate::spans_flat::{MappedSpans, SpanStore};
 use crate::{IndexError, Result, SpanIndex};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,15 +95,15 @@ pub struct Corpus {
 	pub meta: CorpusMeta,
 	pub inverted: InMemoryInverted,
 	pub forward: InMemoryForward,
-	pub spans: InMemorySpans,
+	pub spans: SpanStore,
 	pub lexicon: InMemoryLexicon,
 	pub alignments: AlignmentIndex,
 }
 
 fn load_indexes(
 	path: &Path,
-) -> Result<(InMemoryInverted, InMemoryForward, InMemorySpans, InMemoryLexicon)> {
-	let ((inverted, forward), (spans, lexicon)) = rayon::join(
+) -> Result<(InMemoryInverted, InMemoryForward, InMemoryLexicon)> {
+	let ((inverted, forward), lexicon) = rayon::join(
 		|| rayon::join(
 			|| -> Result<InMemoryInverted> {
 				let bytes = std::fs::read(path.join("inverted.bin"))?;
@@ -116,21 +116,14 @@ fn load_indexes(
 					.map_err(|e| IndexError::Format(format!("Failed to deserialize forward index: {}", e)))
 			},
 		),
-		|| rayon::join(
-			|| -> Result<InMemorySpans> {
-				let bytes = std::fs::read(path.join("spans.bin"))?;
-				bincode::deserialize(&bytes)
-					.map_err(|e| IndexError::Format(format!("Failed to deserialize spans index: {}", e)))
-			},
-			|| -> Result<InMemoryLexicon> {
-				let bytes = std::fs::read(path.join("lexicon.bin"))?;
-				bincode::deserialize(&bytes)
-					.map_err(|e| IndexError::Format(format!("Failed to deserialize lexicon: {}", e)))
-			},
-		),
+		|| -> Result<InMemoryLexicon> {
+			let bytes = std::fs::read(path.join("lexicon.bin"))?;
+			bincode::deserialize(&bytes)
+				.map_err(|e| IndexError::Format(format!("Failed to deserialize lexicon: {}", e)))
+		},
 	);
 
-	Ok((inverted?, forward?, spans?, lexicon?))
+	Ok((inverted?, forward?, lexicon?))
 }
 
 impl Corpus {
@@ -153,7 +146,8 @@ impl Corpus {
 			});
 		}
 
-		let (inverted, forward, spans, lexicon) = load_indexes(path)?;
+		let (inverted, forward, lexicon) = load_indexes(path)?;
+		let spans = SpanStore::Mapped(MappedSpans::open(path.join("spans.bin"))?);
 
 		let alignments = if path.join("alignments.bin").exists() {
 			let align_bytes = std::fs::read(path.join("alignments.bin"))?;

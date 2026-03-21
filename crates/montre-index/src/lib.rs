@@ -3,6 +3,7 @@
 pub mod inverted;
 pub mod forward;
 pub mod spans;
+pub mod spans_flat;
 pub mod lexicon;
 pub mod corpus;
 
@@ -13,6 +14,7 @@ pub use corpus::{Corpus, CorpusMeta, ComponentMeta, AlignmentMeta, AlignmentInde
 pub use inverted::{InvertedIndex, InMemoryInverted};
 pub use forward::{ForwardIndex, InMemoryForward};
 pub use spans::{SpanIndex, InMemorySpans};
+pub use spans_flat::{MappedSpans, SpanStore, write_flat_spans};
 pub use lexicon::{Lexicon, InMemoryLexicon};
 
 #[derive(Error, Debug)]
@@ -35,7 +37,7 @@ pub enum IndexError {
 
 pub type Result<T> = std::result::Result<T, IndexError>;
 
-pub const index_version: u32 = 2;
+pub const index_version: u32 = 3;
 
 pub fn open(path: impl AsRef<Path>) -> Result<Corpus> {
 	Corpus::open(path)

@@ -164,9 +164,7 @@ impl IndexSink {
 			.map_err(|e| crate::BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 		std::fs::write(path.join("forward.bin"), &forward_bytes)?;
 
-		let spans_bytes = bincode::serialize(&self.spans)
-			.map_err(|e| crate::BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-		std::fs::write(path.join("spans.bin"), spans_bytes)?;
+		montre_index::write_flat_spans(&self.spans, &path.join("spans.bin"))?;
 
 		let lexicon_bytes = bincode::serialize(&self.lexicon)
 			.map_err(|e| crate::BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
