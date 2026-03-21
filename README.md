@@ -134,6 +134,8 @@ On a 1.5M token corpus (Maupassant French/English), Apple M-series:
 
 Quantifiers use a run-based execution model that scales with matching tokens, not corpus size. The `--count-only` fast path avoids Hit allocation entirely for simple queries (22ns for `[pos="NOUN"]`).
 
+Corpus loading uses memory-mapped indexes for the forward and span stores. On the 1.5M token Maupassant corpus, `Corpus::open` completes in ~20ms with a peak RSS of 94MB (compared to 285ms and 1.75GB before mmap). On a combined 11.5M token corpus (Maupassant + ELTeC-fra, 25 annotation layers), open time is ~116ms.
+
 ## Bindings
 
 Montre ships a C FFI (`libmontre_ffi`) for embedding in other languages.
@@ -182,11 +184,13 @@ See [API.md](API.md) for the full Rust and C FFI reference.
 
 ## Status
 
-**v0.2.0**
+**v0.4.0**
 
-Working: token queries, sequences, quantifiers, alternation, regex, negation, conjunction, `within` constraints, multi-component corpora, sentence-level alignment, alignment projection, morphological feature decomposition, C FFI, Julia bindings.
+Working: token queries, sequences, quantifiers, alternation, regex, negation, conjunction, `within` constraints, multi-component corpora, sentence-level alignment, alignment projection, morphological feature decomposition, C FFI, Julia bindings, memory-mapped forward and span indexes.
 
-New in v0.2: indexed alignment projection (HashMap edge lookup, binary search for document/sentence resolution), component-scoped query function, bulk text and context-token extraction in the FFI, `execute_count` fast path, feats decomposition (`feats.Number`, `feats.Gender`, etc.).
+New in v0.4: memory-mapped corpus indexes for the forward and span stores (93-96% faster corpus opening, 18× lower query-time memory). Forward index uses bitmap-sparse dictionary-coded layers with variable-width term IDs and a reader-side fast path for fully-present layers. Index format version 3 (requires corpus rebuild from v0.3).
+
+New in v0.3: multithreaded build pipeline and document-parallel query execution via rayon. Parallel corpus deserialization.
 
 Next: labeled captures and global constraints (Phase 2b), statistics commands (`count`, `group`, collocation), additional input formats, Python bindings, TUI.
 
