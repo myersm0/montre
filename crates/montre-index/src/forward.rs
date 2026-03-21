@@ -75,6 +75,15 @@ impl InMemoryForward {
 	fn layer_index(&self, name: &str) -> Option<usize> {
 		self.layers.iter().position(|l| l == name)
 	}
+
+	pub fn layer_names(&self) -> &[String] {
+		&self.layers
+	}
+
+	pub fn layer_data(&self, name: &str) -> Option<&[Value]> {
+		let idx = self.layer_index(name)?;
+		Some(&self.data[idx])
+	}
 }
 
 impl Default for InMemoryForward {
