@@ -77,6 +77,52 @@ pub unsafe extern "C" fn montre_corpus_alignment_edge_count(
 	}
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_alignment_source_layer(
+	corpus: *const Corpus,
+	index: u32,
+) -> *mut c_char {
+	if corpus.is_null() {
+		return ptr::null_mut();
+	}
+	let c = &*corpus;
+	match c.meta.alignments.get(index as usize) {
+		Some(a) => to_cstring(&a.source_layer),
+		None => ptr::null_mut(),
+	}
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_alignment_target_layer(
+	corpus: *const Corpus,
+	index: u32,
+) -> *mut c_char {
+	if corpus.is_null() {
+		return ptr::null_mut();
+	}
+	let c = &*corpus;
+	match c.meta.alignments.get(index as usize) {
+		Some(a) => to_cstring(&a.target_layer),
+		None => ptr::null_mut(),
+	}
+}
+
+/// Returns 1 if directed, 0 if undirected, -1 if index is invalid.
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_alignment_directed(
+	corpus: *const Corpus,
+	index: u32,
+) -> i32 {
+	if corpus.is_null() {
+		return -1;
+	}
+	let c = &*corpus;
+	match c.meta.alignments.get(index as usize) {
+		Some(a) => a.directed as i32,
+		None => -1,
+	}
+}
+
 /// Project a HitList through a named alignment, returning a new HitList
 /// of target-side sentence spans.
 /// out_unmapped: number of source hits not locatable in the source component (nullable).
