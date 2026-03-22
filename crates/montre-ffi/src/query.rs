@@ -146,6 +146,54 @@ pub unsafe extern "C" fn montre_query_in_component(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn montre_query_count_in_component(
+	corpus: *const Corpus,
+	cql: *const c_char,
+	component: *const c_char,
+) -> i64 {
+	clear_error();
+	if corpus.is_null() {
+		set_error("null corpus".into());
+		return -1;
+	}
+	let Some(cql_str) = borrow_cstr(cql) else {
+		set_error("null query string".into());
+		return -1;
+	};
+	let Some(comp_str) = borrow_cstr(component) else {
+		set_error("null component name".into());
+		return -1;
+	};
+
+	let full_query = format!("{} within component:\"{}\"", cql_str, comp_str);
+
+	let parsed = match montre_query::parse(&full_query) {
+		Ok(q) => q,
+		Err(e) => {
+			set_error(e.to_string());
+			return -1;
+		}
+	};
+
+	let plan = match montre_query::planner::plan(&parsed) {
+		Ok(p) => p,
+		Err(e) => {
+			set_error(e.to_string());
+			return -1;
+		}
+	};
+
+	let c = &*corpus;
+	match executor::execute_count(&plan, c) {
+		Ok(n) => n as i64,
+		Err(e) => {
+			set_error(e.to_string());
+			-1
+		}
+	}
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn montre_hitlist_free(hits: *mut HitList) {
 	if !hits.is_null() {
 		drop(Box::from_raw(hits));
@@ -207,6 +255,132 @@ pub unsafe extern "C" fn montre_hit_sentence_index(hits: *const HitList, index: 
 		Some(hit) => hit.sentence_index,
 		None => 0,
 	}
+}
+
+/// Bulk-extract all hit start positions as a flat u64 array.
+/// Free with `montre_u64_array_free(array, len)`.
+#[no_mangle]
+pub unsafe extern "C" fn montre_hitlist_starts(
+	hits: *const HitList,
+	out_len: *mut u64,
+) -> *mut u64 {
+	if hits.is_null() || out_len.is_null() {
+		if !out_len.is_null() { *out_len = 0; }
+		return ptr::null_mut();
+	}
+	let hitlist = &*hits;
+	let count = hitlist.hits.len();
+	if count == 0 {
+		*out_len = 0;
+		return ptr::null_mut();
+	}
+
+	let layout = std::alloc::Layout::array::<u64>(count).unwrap();
+	let array = std::alloc::alloc(layout) as *mut u64;
+	if array.is_null() {
+		*out_len = 0;
+		return ptr::null_mut();
+	}
+	for (i, hit) in hitlist.hits.iter().enumerate() {
+		*array.add(i) = hit.span.start;
+	}
+	*out_len = count as u64;
+	array
+}
+
+/// Bulk-extract all hit end positions as a flat u64 array.
+/// Free with `montre_u64_array_free(array, len)`.
+#[no_mangle]
+pub unsafe extern "C" fn montre_hitlist_ends(
+	hits: *const HitList,
+	out_len: *mut u64,
+) -> *mut u64 {
+	if hits.is_null() || out_len.is_null() {
+		if !out_len.is_null() { *out_len = 0; }
+		return ptr::null_mut();
+	}
+	let hitlist = &*hits;
+	let count = hitlist.hits.len();
+	if count == 0 {
+		*out_len = 0;
+		return ptr::null_mut();
+	}
+
+	let layout = std::alloc::Layout::array::<u64>(count).unwrap();
+	let array = std::alloc::alloc(layout) as *mut u64;
+	if array.is_null() {
+		*out_len = 0;
+		return ptr::null_mut();
+	}
+	for (i, hit) in hitlist.hits.iter().enumerate() {
+		*array.add(i) = hit.span.end;
+	}
+	*out_len = count as u64;
+	array
+}
+
+/// Bulk-extract all hit document indices as a flat u64 array.
+/// Call montre_hitlist_populate_context first if you need document indices.
+/// Free with `montre_u64_array_free(array, len)`.
+#[no_mangle]
+pub unsafe extern "C" fn montre_hitlist_document_indices(
+	hits: *const HitList,
+	out_len: *mut u64,
+) -> *mut u64 {
+	if hits.is_null() || out_len.is_null() {
+		if !out_len.is_null() { *out_len = 0; }
+		return ptr::null_mut();
+	}
+	let hitlist = &*hits;
+	let count = hitlist.hits.len();
+	if count == 0 {
+		*out_len = 0;
+		return ptr::null_mut();
+	}
+
+	let layout = std::alloc::Layout::array::<u64>(count).unwrap();
+	let array = std::alloc::alloc(layout) as *mut u64;
+	if array.is_null() {
+		*out_len = 0;
+		return ptr::null_mut();
+	}
+	for (i, hit) in hitlist.hits.iter().enumerate() {
+		*array.add(i) = hit.document_index as u64;
+	}
+	*out_len = count as u64;
+	array
+}
+
+/// Bulk-extract all hit sentence indices as a flat u64 array.
+/// Call montre_hitlist_populate_context first if you need sentence indices.
+/// Free with `montre_u64_array_free(array, len)`.
+#[no_mangle]
+pub unsafe extern "C" fn montre_hitlist_sentence_indices(
+	hits: *const HitList,
+	out_len: *mut u64,
+) -> *mut u64 {
+	if hits.is_null() || out_len.is_null() {
+		if !out_len.is_null() { *out_len = 0; }
+		return ptr::null_mut();
+	}
+	let hitlist = &*hits;
+	let count = hitlist.hits.len();
+	if count == 0 {
+		*out_len = 0;
+		return ptr::null_mut();
+	}
+
+	let layout = std::alloc::Layout::array::<u64>(count).unwrap();
+	let array = std::alloc::alloc(layout) as *mut u64;
+	if array.is_null() {
+		*out_len = 0;
+		return ptr::null_mut();
+	}
+	for (i, hit) in hitlist.hits.iter().enumerate() {
+		*array.add(i) = hit.sentence_index as u64;
+	}
+	*out_len = count as u64;
+	array
 }
 
 #[no_mangle]

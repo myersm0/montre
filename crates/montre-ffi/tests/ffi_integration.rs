@@ -295,6 +295,34 @@ fn single_component_lifecycle() {
 		let adj_q = cstr(r#"[pos="ADJ"]"#);
 		assert_eq!(montre_query_count(corpus, adj_q.as_ptr()), 1);
 
+		// bulk hit field extraction: hits has 2 NOUN hits with context populated
+		let mut bulk_len: u64 = 0;
+		let starts = montre_hitlist_starts(hits, &mut bulk_len);
+		assert_eq!(bulk_len, 2);
+		let s0 = *starts.add(0);
+		let s1 = *starts.add(1);
+		assert_ne!(s0, s1); // two different positions
+		montre_u64_array_free(starts, bulk_len);
+
+		let ends = montre_hitlist_ends(hits, &mut bulk_len);
+		assert_eq!(bulk_len, 2);
+		// each NOUN hit is a single token, so end = start + 1
+		assert_eq!(*ends.add(0), s0 + 1);
+		assert_eq!(*ends.add(1), s1 + 1);
+		montre_u64_array_free(ends, bulk_len);
+
+		let doc_indices = montre_hitlist_document_indices(hits, &mut bulk_len);
+		assert_eq!(bulk_len, 2);
+		assert_eq!(*doc_indices.add(0), 0); // single-doc corpus
+		assert_eq!(*doc_indices.add(1), 0);
+		montre_u64_array_free(doc_indices, bulk_len);
+
+		let sent_indices = montre_hitlist_sentence_indices(hits, &mut bulk_len);
+		assert_eq!(bulk_len, 2);
+		// two nouns in different sentences
+		assert_ne!(*sent_indices.add(0), *sent_indices.add(1));
+		montre_u64_array_free(sent_indices, bulk_len);
+
 		montre_hitlist_free(single_hits);
 		montre_hitlist_free(hits);
 		montre_corpus_close(corpus);
@@ -363,6 +391,13 @@ fn multi_component_lifecycle() {
 		// invalid document
 		assert_eq!(montre_corpus_component_for_document(corpus, 99), -1);
 
+		// component token counts
+		let en_tokens = montre_corpus_component_token_count(corpus, 0);
+		let fr_tokens = montre_corpus_component_token_count(corpus, 1);
+		assert_eq!(en_tokens, 9); // 4 + 5
+		assert_eq!(fr_tokens, 9); // 4 + 5
+		assert_eq!(montre_corpus_component_token_count(corpus, 99), -1);
+
 		// query in component
 		let q = cstr(r#"[lemma="chat"]"#);
 		let fr = cstr("fr");
@@ -375,6 +410,13 @@ fn multi_component_lifecycle() {
 		let cat_q = cstr(r#"[lemma="cat"]"#);
 		let en_cat = montre_query_in_component(corpus, cat_q.as_ptr(), en.as_ptr());
 		assert_eq!(montre_hitlist_len(en_cat), 1);
+
+		// query_count_in_component
+		let noun_q = cstr(r#"[pos="NOUN"]"#);
+		let fr_noun_count = montre_query_count_in_component(corpus, noun_q.as_ptr(), fr.as_ptr());
+		let en_noun_count = montre_query_count_in_component(corpus, noun_q.as_ptr(), en.as_ptr());
+		assert_eq!(fr_noun_count, 2); // chat, maison
+		assert_eq!(en_noun_count, 2); // cat, house
 
 		// alignment metadata
 		assert_eq!(montre_corpus_alignment_count(corpus), 1);

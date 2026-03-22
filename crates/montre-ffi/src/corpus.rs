@@ -1,7 +1,7 @@
 use std::os::raw::c_char;
 use std::ptr;
 
-use montre_index::{Corpus, InvertedIndex};
+use montre_index::{Corpus, InvertedIndex, SpanIndex};
 
 use crate::error::{set_error, clear_error};
 use crate::strings::{to_cstring, borrow_cstr};
@@ -166,6 +166,36 @@ pub unsafe extern "C" fn montre_corpus_component_for_document(
 		}
 	}
 	-1
+}
+
+/// Returns the total token count for a component.
+/// Returns -1 if the component index is invalid or the corpus has no document spans.
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_component_token_count(
+	corpus: *const Corpus,
+	index: u32,
+) -> i64 {
+	if corpus.is_null() {
+		return -1;
+	}
+	let c = &*corpus;
+	let Some(comp) = c.components().get(index as usize) else {
+		return -1;
+	};
+	let (doc_start, doc_end) = comp.document_range;
+	if doc_start >= doc_end {
+		return 0;
+	}
+	let Some(doc_spans) = c.spans.spans("document") else {
+		return -1;
+	};
+	let Some(first) = doc_spans.get(doc_start) else {
+		return -1;
+	};
+	let Some(last) = doc_spans.get(doc_end - 1) else {
+		return -1;
+	};
+	(last.end - first.start) as i64
 }
 
 /// Return all distinct values for a layer from the inverted index.
