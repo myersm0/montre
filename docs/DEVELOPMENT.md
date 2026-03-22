@@ -35,7 +35,7 @@ Components remain independently queryable. You can query `maupassant-fr` as if t
 
 ### Concurrency without shared mutable state
 
-`Corpus` is immutable after construction, `Send + Sync`, and safe to share across threads. The query engine exploits this by partitioning work across documents — each document is an independent unit of computation with no cross-document dependencies during sequence execution. The build pipeline uses a similar strategy: each input file produces an independent `IndexSink`, and the results merge sequentially after parallel construction.
+`Corpus` is immutable after construction, `Send + Sync`, and safe to share across threads. The query engine exploits this by partitioning work across documents — each document is an independent unit of computation with no cross-document dependencies during sequence execution. The build pipeline uses a similar strategy: each input file produces an independent `IndexSink` via parallel parsing, and the results merge sequentially after construction. Multi-component builds process components sequentially (each component fully built and dropped before the next starts) to bound memory, while files within each component are parsed in parallel.
 
 ## Architecture
 
@@ -641,25 +641,27 @@ Recommend deferring this to Phase 2c or later. It's useful but not core to the q
 
 ### Phase 3b: Computational parallelism (rayon) ✓
 
-- [x] Index merge operations (`merge_from` on InMemoryInverted, InMemoryForward, InMemorySpans, InMemoryLexicon)
-- [x] Parallel build: per-file IndexSink construction via `build_from_directory`
-- [x] `CorpusBuilder::from_directory` parallel constructor
-- [x] Multi-component parallel build (components built in parallel, files within each in parallel)
+- [x] Index merge operations (`merge_from` on InMemoryInverted, InMemorySpans, InMemoryLexicon)
+- [x] Parallel build: per-file IndexSink construction via `build_from_directory_streaming`
+- [x] `CorpusBuilder::from_directory` parallel constructor (streaming)
+- [x] Multi-component build (components built sequentially, files within each in parallel)
 - [x] Document-parallel sequence execution with range-restricted position lookups
 - [x] Adaptive dispatch heuristic (`benefits_from_parallel`)
 - [x] Parallel corpus deserialization (`rayon::join` for inverted index and lexicon; forward and spans are memory-mapped)
 - [x] Criterion benchmark suite (`montre-bench` crate)
 
-**Parallel build pipeline**
+**Build pipeline**
 
-The build pipeline uses a two-level parallelism strategy. At the outer level, `MultiCorpusBuilder` builds components in parallel via `rayon::par_iter`. At the inner level, `build_from_directory` processes each `.conllu` file independently:
+The build pipeline uses a two-level strategy. At the outer level, `MultiCorpusBuilder` builds components sequentially — each component is fully built, merged, and dropped before the next starts. This ensures that only one component's per-file sinks are in memory at a time. At the inner level, `build_from_directory_streaming` processes each `.conllu` file independently:
 
 1. Collect and sort file paths (deterministic ordering).
 2. `par_iter` over files: each thread opens, parses, and builds a complete per-file `IndexSink` (inverted index, forward index, spans, lexicon).
 3. Collect results in input order (rayon's `collect` preserves order).
-4. Sequential merge: iterate over per-file sinks, calling `merge_from` on the combined sink.
+4. Sequential merge: iterate over per-file sinks. For each sink, extract forward data via `take_forward()` and append to the `StreamingForwardWriter` (written to per-layer temp files), then merge the remaining indexes (inverted, spans, lexicon) into the combined sink via `merge_from`.
 
-The merge step applies a position offset so that each file's token positions land at the correct global offset. This is inherently sequential — the offset depends on the accumulated token count — but it's fast relative to parsing. The index structures support efficient merging: roaring bitmaps shift and OR, forward index data copies at an offset, spans shift boundaries, and the lexicon takes the union of term sets.
+The combined sink's `forward` field is `None` (created via `IndexSink::new_without_forward()`), so no forward data accumulates in memory during the merge. At write time, the `StreamingForwardWriter` reads each temp file one layer at a time, builds the MFWD flat format, and writes `forward.bin`.
+
+The merge step applies a position offset so that each file's token positions land at the correct global offset. This is inherently sequential — the offset depends on the accumulated token count — but it's fast relative to parsing. The index structures support efficient merging: roaring bitmaps shift and OR, spans shift boundaries, and the lexicon takes the union of term sets.
 
 Document ordering is deterministic: file paths are sorted before dispatch, and `par_iter().collect()` preserves input order regardless of thread scheduling. This guarantees identical corpus output on every build.
 
@@ -718,6 +720,30 @@ Each layer is stored as one of two encoding kinds:
 
 The file has a header (magic, version, BOM, token count, layer count), a layer directory with per-layer encoding tag and section offsets, a string pool for layer names, and per-layer data sections. All sections are 8-byte aligned. Native endianness with a BOM field for detection.
 
+### Phase 3d: Streaming forward builder ✓
+
+- [x] `IndexSink::forward` changed to `Option<InMemoryForward>` (absent during merge phase)
+- [x] `IndexSink::new_without_forward()` constructor for merge-target sinks
+- [x] `IndexSink::take_forward()` extracts forward data for streaming
+- [x] Unified `merge_from` that skips forward when `None`
+- [x] Unified `write` that skips `forward.bin` when forward is `None`
+- [x] `StreamingForwardWriter`: per-layer temp files, tagged binary format, `finalize` reads one layer at a time
+- [x] `Drop` on `StreamingForwardWriter` for automatic temp dir cleanup
+- [x] `build_from_directory_streaming`: parallel file parsing, streaming forward extraction during merge
+- [x] `MultiCorpusBuilder::build` uses sequential component builds with streaming forward
+- [x] `CorpusBuilder::from_directory` uses streaming path
+- [x] Non-streaming `build_from_directory` removed (no remaining callers)
+- [x] `write_mfwd` extracted from `write_flat_forward` for reuse by streaming writer
+- [x] `LayerBuild`, `build_dict_encoded_layer`, `build_dense_numeric_layer` made pub in `forward_flat`
+
+**Memory reduction**
+
+The forward index is the dominant memory consumer at build time: 10M tokens × 25 layers × 32 bytes per `Value` = ~8GB per component. Previously, both per-file sinks and the combined sink accumulated forward data in memory. With two components built in parallel, three copies of the forward index could coexist, reaching 25-35GB peak RSS.
+
+The streaming forward writer eliminates forward accumulation in the combined sink. During the per-file merge loop, each sink's `InMemoryForward` is extracted and appended to per-layer temp files on disk. The combined sink holds only inverted, spans, and lexicon data. At write time, temp files are read back one layer at a time (peak: ~320MB for a 10M-token dense layer), converted to MFWD `LayerBuild` structures, and serialized.
+
+Combined with sequential component builds (each component fully built and dropped before the next starts), peak RSS dropped from 35GB to 8.3GB for a two-component ELTeC corpus (~20M tokens, 25 layers). The remaining ~8GB is dominated by the per-file sinks coexisting after `par_iter().collect()` and before the sequential merge consumes them.
+
 ### Phase 4: Statistics & bindings
 
 - [ ] `count` command (CLI)
@@ -774,7 +800,13 @@ Quantifier queries and `ScanAll`-in-first-position use document-parallel executi
 
 The mmap-backed forward and span indexes contribute only the pages the OS faults in during the query. The remaining RSS is dominated by the inverted index and lexicon, which are still heap-deserialized.
 
-Note: build-time memory is separate and unchanged by the mmap work. The build pipeline accumulates all indexes in memory before writing. For ELTeC-scale corpora (25M+ tokens, 30+ layers with decomposed feats), build-time peak RSS can reach 25GB. A streaming builder that writes indexes incrementally would address this but is not yet implemented.
+### Peak memory (build-time RSS)
+
+| Corpus | Current (streaming) | Pre-streaming |
+|---|---|---|
+| ELTeC fr+en (20M tokens, 25 layers, 2 components) | 8.3GB | 35GB |
+
+The streaming forward writer avoids accumulating forward index data in the combined sink during the merge phase. Sequential component builds ensure only one component's per-file sinks are in memory at a time. The remaining build-time RSS is dominated by the per-file sinks coexisting after parallel parsing (before merge) and the growing inverted index.
 
 ## Error handling
 

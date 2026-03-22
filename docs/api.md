@@ -192,9 +192,19 @@ use montre_build::builder::CorpusBuilder;
 use montre_build::format::conllu::ConllUReader;
 use montre_build::format::CorpusReader;
 
-// Single-component build
+// Single-component build from a directory (preferred for large corpora —
+// uses streaming forward writer to avoid accumulating forward index in memory)
+let builder = CorpusBuilder::from_directory(
+    "my-corpus",
+    Path::new("data/"),
+    true,       // decompose_feats
+    false,      // strict
+)?;
+builder.build("output/path")?;
+
+// Incremental build (forward index accumulates in memory)
 let mut builder = CorpusBuilder::new("my-corpus")
-    .decompose_feats(true);      // optional: index feats.Number, feats.Gender, etc.
+    .decompose_feats(true);
 
 let file = std::fs::File::open("data.conllu")?;
 let mut reader = ConllUReader::new(file);
@@ -202,7 +212,7 @@ let sentences = reader.read_sentences()?;
 builder.add_document("data.conllu", sentences);
 builder.build("output/path")?;
 
-// Multi-component build from manifest
+// Multi-component build from manifest (streaming, sequential components)
 use montre_build::MultiCorpusBuilder;
 
 MultiCorpusBuilder::from_manifest("corpus.toml")?
