@@ -5,6 +5,7 @@ mod tokens;
 mod query;
 mod spans;
 mod alignment;
+mod build;
 
 use montre_query::executor::Hit;
 

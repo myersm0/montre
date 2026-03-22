@@ -12,3 +12,4 @@ crate-type = ["cdylib", "staticlib"]
 montre-core = { workspace = true }
 montre-index = { workspace = true }
 montre-query = { workspace = true }
+montre-build = { workspace = true }
