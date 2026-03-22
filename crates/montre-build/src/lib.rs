@@ -2,6 +2,7 @@ pub mod format;
 pub mod builder;
 pub mod manifest;
 pub mod multi;
+pub mod streaming_forward;
 
 use std::path::Path;
 use thiserror::Error;

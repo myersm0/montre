@@ -136,6 +136,8 @@ Quantifiers use a run-based execution model that scales with matching tokens, no
 
 Corpus loading uses memory-mapped indexes for the forward and span stores. On the 1.5M token Maupassant corpus, `Corpus::open` completes in ~20ms with a peak RSS of 94MB (compared to 285ms and 1.75GB before mmap). On a combined 11.5M token corpus (Maupassant + ELTeC-fra, 25 annotation layers), open time is ~116ms.
 
+For a two-component ELTeC corpus (~20M tokens, 25 layers), build-time peak RSS is ~8GB.
+
 ## Bindings
 
 Montre ships a C FFI (`libmontre_ffi`) for embedding in other languages.
@@ -174,7 +176,7 @@ for hit in corpus.query('[pos="DET"] [pos="NOUN"]'):
 montre-core     Primitives: Span, Token, Position, Value
 montre-index    Inverted index, forward index, span index, corpus loading
 montre-query    CQL parser, query planner, executor
-montre-build    Corpus construction from CoNLL-U, multi-component builder
+montre-build    Corpus construction from CoNLL-U, multi-component builder, streaming forward writer
 montre-cli      Command-line interface
 montre-ffi      C FFI for language bindings (35 exported functions)
 montre-py       Python bindings (PyO3, stub)
@@ -188,7 +190,7 @@ See [API.md](API.md) for the full Rust and C FFI reference.
 
 Working: token queries, sequences, quantifiers, alternation, regex, negation, conjunction, `within` constraints, multi-component corpora, sentence-level alignment, alignment projection, morphological feature decomposition, C FFI, Julia bindings, memory-mapped forward and span indexes.
 
-New in v0.4: memory-mapped corpus indexes for the forward and span stores (93-96% faster corpus opening, 18× lower query-time memory). Forward index uses bitmap-sparse dictionary-coded layers with variable-width term IDs and a reader-side fast path for fully-present layers. Index format version 3 (requires corpus rebuild from v0.3).
+New in v0.4: memory-mapped corpus indexes for the forward and span stores (93-96% faster corpus opening, 18× lower query-time memory). Forward index uses bitmap-sparse dictionary-coded layers with variable-width term IDs and a reader-side fast path for fully-present layers. Streaming forward builder reduces build-time peak memory by 4× for large multi-component corpora. Index format version 3 (requires corpus rebuild from v0.3).
 
 New in v0.3: multithreaded build pipeline and document-parallel query execution via rayon. Parallel corpus deserialization.
 
