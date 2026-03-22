@@ -5,19 +5,16 @@ use std::path::Path;
 
 use montre_core::UnitId;
 use montre_index::corpus::{AlignmentIndex, AlignmentMeta, ComponentMeta, CorpusMeta};
-use montre_index::ForwardIndex;
 use montre_index::SpanIndex;
-use rayon::prelude::*;
 
-use crate::builder::{build_from_directory, IndexSink};
+use crate::builder::{build_from_directory_streaming, IndexSink};
 use crate::manifest::Manifest;
+use crate::streaming_forward::StreamingForwardWriter;
 use crate::{BuildError, Result};
 
-struct ComponentResult {
-	name: String,
-	language: String,
-	sink: IndexSink,
-}
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static BUILD_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub struct MultiCorpusBuilder {
 	manifest: Manifest,
@@ -56,55 +53,53 @@ impl MultiCorpusBuilder {
 	}
 
 	pub fn build(self, output_path: impl AsRef<Path>) -> Result<()> {
+		let build_id = BUILD_COUNTER.fetch_add(1, Ordering::SeqCst);
+		let temp_dir = std::env::temp_dir().join(format!(
+			"montre_build_{}_{}", std::process::id(), build_id
+		));
+		let mut streaming_forward = StreamingForwardWriter::new(&temp_dir)?;
+
 		let mut component_names: Vec<String> =
 			self.manifest.components.keys().cloned().collect();
 		component_names.sort();
 
-		let component_results: Vec<ComponentResult> = component_names
-			.par_iter()
-			.map(|name| {
-				let config = self
-					.manifest
-					.components
-					.get(name)
-					.ok_or_else(|| BuildError::UnknownComponent(name.clone()))?;
-
-				let component_path = self.manifest_dir.join(&config.path);
-				let language = config.language.clone().unwrap_or_default();
-
-				let sink = build_from_directory(
-					&component_path,
-					self.decompose_feats,
-					self.strict,
-				)?;
-
-				tracing::info!(
-					"Component '{}': {} documents, {} tokens",
-					name,
-					sink.document_names.len(),
-					sink.current_position
-				);
-
-				Ok(ComponentResult {
-					name: name.clone(),
-					language,
-					sink,
-				})
-			})
-			.collect::<Result<Vec<_>>>()?;
-
 		let mut combined = IndexSink::new().with_decompose_feats(self.decompose_feats);
 		let mut components = Vec::new();
 
-		for (id, result) in component_results.into_iter().enumerate() {
+		for (id, name) in component_names.iter().enumerate() {
+			let config = self
+				.manifest
+				.components
+				.get(name)
+				.ok_or_else(|| BuildError::UnknownComponent(name.clone()))?;
+
+			let component_path = self.manifest_dir.join(&config.path);
+			let language = config.language.clone().unwrap_or_default();
+
+			let offset = combined.current_position;
+			let sink = build_from_directory_streaming(
+				&component_path,
+				self.decompose_feats,
+				self.strict,
+				&mut streaming_forward,
+				offset,
+			)?;
+
+			tracing::info!(
+				"Component '{}': {} documents, {} tokens",
+				name,
+				sink.document_names.len(),
+				sink.current_position
+			);
+
 			let doc_start = combined.document_names.len();
-			combined.merge_from(result.sink);
+			combined.merge_from_no_forward(sink);
 			let doc_end = combined.document_names.len();
 
 			components.push(ComponentMeta {
 				id: id as u32,
-				name: result.name,
-				language: result.language,
+				name: name.clone(),
+				language,
 				document_range: (doc_start, doc_end),
 			});
 		}
@@ -200,7 +195,7 @@ impl MultiCorpusBuilder {
 		let meta = CorpusMeta {
 			name: self.manifest.corpus.name.clone(),
 			version: montre_index::index_version,
-			token_count: combined.forward.token_count(),
+			token_count: combined.current_position,
 			layers: combined
 				.layer_indices
 				.iter()
@@ -226,7 +221,9 @@ impl MultiCorpusBuilder {
 			meta.alignments.len()
 		);
 
-		combined.write(path, meta)?;
+		combined.write_without_forward(path, meta)?;
+		streaming_forward.finalize(&path.join("forward.bin"))?;
+		streaming_forward.cleanup();
 
 		if let Some(bytes) = alignment_bytes {
 			std::fs::write(path.join("alignments.bin"), bytes)?;

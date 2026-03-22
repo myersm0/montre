@@ -18,23 +18,23 @@ const DIR_ENTRY_SIZE: usize = 64;
 pub const ENCODING_DICT: u8 = 0x01;
 pub const ENCODING_DENSE_NUMERIC: u8 = 0x02;
 
-fn align_to_8(n: usize) -> usize {
+pub fn align_to_8(n: usize) -> usize {
 	(n + 7) & !7
 }
 
-struct LayerBuild {
-	name: String,
-	encoding: u8,
-	id_width: u8,
-	vocab_count: u32,
-	data_count: u64,
-	term_offsets: Vec<u32>,
-	term_strings: Vec<u8>,
-	bitmap_bytes: Vec<u8>,
-	data_bytes: Vec<u8>,
+pub struct LayerBuild {
+	pub name: String,
+	pub encoding: u8,
+	pub id_width: u8,
+	pub vocab_count: u32,
+	pub data_count: u64,
+	pub term_offsets: Vec<u32>,
+	pub term_strings: Vec<u8>,
+	pub bitmap_bytes: Vec<u8>,
+	pub data_bytes: Vec<u8>,
 }
 
-fn build_dict_encoded_layer(name: &str, data: &[Value]) -> LayerBuild {
+pub fn build_dict_encoded_layer(name: &str, data: &[Value]) -> LayerBuild {
 	let mut bitmap = RoaringBitmap::new();
 	let mut raw_values: Vec<&str> = Vec::new();
 
@@ -94,7 +94,7 @@ fn build_dict_encoded_layer(name: &str, data: &[Value]) -> LayerBuild {
 	}
 }
 
-fn build_dense_numeric_layer(name: &str, data: &[Value], token_count: u64) -> LayerBuild {
+pub fn build_dense_numeric_layer(name: &str, data: &[Value], token_count: u64) -> LayerBuild {
 	let mut data_bytes = Vec::with_capacity(token_count as usize * 4);
 	for pos in 0..token_count as usize {
 		let val = data.get(pos).and_then(|v| match v {
@@ -117,11 +117,11 @@ fn build_dense_numeric_layer(name: &str, data: &[Value], token_count: u64) -> La
 	}
 }
 
-fn is_numeric_layer(data: &[Value]) -> bool {
+pub fn is_numeric_layer(data: &[Value]) -> bool {
 	data.iter().any(|v| matches!(v, Value::Int(_)))
 }
 
-fn term_table_size(layer: &LayerBuild) -> usize {
+pub fn term_table_size(layer: &LayerBuild) -> usize {
 	layer.term_offsets.len() * 4 + layer.term_strings.len()
 }
 
@@ -145,9 +145,17 @@ pub fn write_flat_forward(
 		}
 	}
 
+	write_mfwd(&layers, token_count, path)
+}
+
+pub fn write_mfwd(
+	layers: &[LayerBuild],
+	token_count: u64,
+	path: impl AsRef<Path>,
+) -> std::io::Result<()> {
 	let mut string_pool = Vec::new();
 	let mut name_entries: Vec<(u64, u32)> = Vec::new();
-	for layer in &layers {
+	for layer in layers {
 		let offset = string_pool.len() as u64;
 		string_pool.extend_from_slice(layer.name.as_bytes());
 		name_entries.push((offset, layer.name.len() as u32));
@@ -159,7 +167,7 @@ pub fn write_flat_forward(
 	let mut section_offsets: Vec<(usize, usize, usize)> = Vec::new();
 	let mut offset = string_pool_end;
 
-	for layer in &layers {
+	for layer in layers {
 		if layer.encoding == ENCODING_DICT {
 			let vocab_offset = offset;
 			offset += align_to_8(term_table_size(layer));
@@ -208,7 +216,7 @@ pub fn write_flat_forward(
 	file.write_all(&string_pool)?;
 	write_padding(&mut file, string_pool.len(), align_to_8(string_pool.len()))?;
 
-	for layer in &layers {
+	for layer in layers {
 		if layer.encoding == ENCODING_DICT {
 			for &off in &layer.term_offsets {
 				file.write_all(&off.to_ne_bytes())?;

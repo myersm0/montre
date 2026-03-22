@@ -67,6 +67,24 @@ impl IndexSink {
 		self.current_position += other.current_position;
 	}
 
+	pub fn merge_from_no_forward(&mut self, other: Self) {
+		let offset = self.current_position;
+		self.inverted.merge_from(other.inverted, offset as u32);
+		self.spans.merge_from(other.spans, offset);
+		self.lexicon.merge_from(other.lexicon);
+		self.document_names.extend(other.document_names);
+		for (name, _) in &other.layer_indices {
+			self.ensure_layer(name);
+		}
+		self.current_position += other.current_position;
+	}
+
+	pub fn take_forward(&mut self) -> InMemoryForward {
+		let mut empty = InMemoryForward::new();
+		std::mem::swap(&mut self.forward, &mut empty);
+		empty
+	}
+
 	pub fn add_document(&mut self, doc_name: &str, sentences: Vec<ParsedSentence>) {
 		let doc_start = self.current_position;
 
@@ -177,6 +195,37 @@ impl IndexSink {
 
 		Ok(())
 	}
+
+	pub fn write_without_forward(mut self, path: &Path, meta: CorpusMeta) -> Result<()> {
+		self.spans.finalize();
+
+		if path.exists() {
+			std::fs::remove_dir_all(path)?;
+		}
+		std::fs::create_dir_all(path)?;
+
+		let meta_json = serde_json::to_string_pretty(&meta)?;
+		std::fs::write(path.join("corpus.json"), meta_json)?;
+
+		let inverted_bytes = bincode::serialize(&self.inverted)
+			.map_err(|e| crate::BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+		std::fs::write(path.join("inverted.bin"), &inverted_bytes)?;
+
+		montre_index::write_flat_spans(&self.spans, &path.join("spans.bin"))?;
+
+		let lexicon_bytes = bincode::serialize(&self.lexicon)
+			.map_err(|e| crate::BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+		std::fs::write(path.join("lexicon.bin"), lexicon_bytes)?;
+
+		tracing::info!(
+			"Wrote corpus (forward written separately): {} tokens, {} documents, {} bytes inverted",
+			meta.token_count,
+			meta.document_names.len(),
+			inverted_bytes.len()
+		);
+
+		Ok(())
+	}
 }
 
 pub fn build_from_directory(
@@ -241,6 +290,79 @@ pub fn build_from_directory(
 	for sink in file_sinks {
 		if sink.current_position > 0 {
 			combined.merge_from(sink);
+		}
+	}
+
+	Ok(combined)
+}
+
+pub fn build_from_directory_streaming(
+	dir: &Path,
+	decompose_feats: bool,
+	strict: bool,
+	streaming_forward: &mut crate::streaming_forward::StreamingForwardWriter,
+	position_offset: u64,
+) -> Result<IndexSink> {
+	let mut files: Vec<_> = WalkDir::new(dir)
+		.into_iter()
+		.filter_map(|e| e.ok())
+		.filter(|e| {
+			e.path()
+				.extension()
+				.map(|ext| ext == "conllu")
+				.unwrap_or(false)
+		})
+		.map(|e| e.path().to_path_buf())
+		.collect();
+
+	files.sort();
+
+	let file_sinks: Vec<IndexSink> = files
+		.par_iter()
+		.map(|path| {
+			let file = File::open(path)?;
+			let reader = BufReader::new(file);
+			let mut conllu = ConllUReader::new(reader).with_source_name(
+				path.file_name()
+					.map(|s| s.to_string_lossy().to_string())
+					.unwrap_or_else(|| "unknown".into()),
+			);
+
+			let result = if strict {
+				conllu.read_sentences_strict()
+			} else {
+				conllu.read_sentences()
+			};
+
+			match result {
+				Ok(sentences) => {
+					let doc_name = path
+						.file_name()
+						.map(|s| s.to_string_lossy().to_string())
+						.unwrap_or_else(|| "unknown".into());
+					let mut sink = IndexSink::new().with_decompose_feats(decompose_feats);
+					sink.add_document(&doc_name, sentences);
+					Ok(sink)
+				}
+				Err(e) => {
+					if strict {
+						Err(e)
+					} else {
+						tracing::warn!("Skipping {:?}: {}", path, e);
+						Ok(IndexSink::new().with_decompose_feats(decompose_feats))
+					}
+				}
+			}
+		})
+		.collect::<Result<Vec<_>>>()?;
+
+	let mut combined = IndexSink::new().with_decompose_feats(decompose_feats);
+	for mut sink in file_sinks {
+		if sink.current_position > 0 {
+			let forward = sink.take_forward();
+			let offset = position_offset + combined.current_position;
+			streaming_forward.append_from(forward, offset)?;
+			combined.merge_from_no_forward(sink);
 		}
 	}
 
