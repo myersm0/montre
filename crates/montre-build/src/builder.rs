@@ -8,7 +8,7 @@ use montre_index::forward::InMemoryForward;
 use montre_index::inverted::InMemoryInverted;
 use montre_index::lexicon::InMemoryLexicon;
 use montre_index::spans::InMemorySpans;
-use montre_index::{ForwardIndex, SpanIndex};
+use montre_index::SpanIndex;
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
@@ -18,7 +18,7 @@ use crate::Result;
 
 pub struct IndexSink {
 	pub(crate) inverted: InMemoryInverted,
-	pub(crate) forward: InMemoryForward,
+	pub(crate) forward: Option<InMemoryForward>,
 	pub(crate) spans: InMemorySpans,
 	pub(crate) lexicon: InMemoryLexicon,
 	pub(crate) layer_indices: Vec<(String, usize)>,
@@ -39,7 +39,27 @@ impl IndexSink {
 
 		Self {
 			inverted: InMemoryInverted::new(),
-			forward,
+			forward: Some(forward),
+			spans: InMemorySpans::new(),
+			lexicon: InMemoryLexicon::new(),
+			layer_indices,
+			current_position: 0,
+			document_names: Vec::new(),
+			decompose_feats: false,
+		}
+	}
+
+	pub fn new_without_forward() -> Self {
+		let layer_indices: Vec<(String, usize)> =
+			[layers::WORD, layers::LEMMA, layers::POS, layers::XPOS, layers::FEATS, layers::DEPREL]
+				.iter()
+				.enumerate()
+				.map(|(i, &name)| (name.to_string(), i))
+				.collect();
+
+		Self {
+			inverted: InMemoryInverted::new(),
+			forward: None,
 			spans: InMemorySpans::new(),
 			lexicon: InMemoryLexicon::new(),
 			layer_indices,
@@ -57,7 +77,9 @@ impl IndexSink {
 	pub fn merge_from(&mut self, other: Self) {
 		let offset = self.current_position;
 		self.inverted.merge_from(other.inverted, offset as u32);
-		self.forward.merge_from(other.forward, offset);
+		if let (Some(ref mut self_fwd), Some(other_fwd)) = (&mut self.forward, other.forward) {
+			self_fwd.merge_from(other_fwd, offset);
+		}
 		self.spans.merge_from(other.spans, offset);
 		self.lexicon.merge_from(other.lexicon);
 		self.document_names.extend(other.document_names);
@@ -67,22 +89,8 @@ impl IndexSink {
 		self.current_position += other.current_position;
 	}
 
-	pub fn merge_from_no_forward(&mut self, other: Self) {
-		let offset = self.current_position;
-		self.inverted.merge_from(other.inverted, offset as u32);
-		self.spans.merge_from(other.spans, offset);
-		self.lexicon.merge_from(other.lexicon);
-		self.document_names.extend(other.document_names);
-		for (name, _) in &other.layer_indices {
-			self.ensure_layer(name);
-		}
-		self.current_position += other.current_position;
-	}
-
-	pub fn take_forward(&mut self) -> InMemoryForward {
-		let mut empty = InMemoryForward::new();
-		std::mem::swap(&mut self.forward, &mut empty);
-		empty
+	pub fn take_forward(&mut self) -> Option<InMemoryForward> {
+		self.forward.take()
 	}
 
 	pub fn add_document(&mut self, doc_name: &str, sentences: Vec<ParsedSentence>) {
@@ -149,15 +157,20 @@ impl IndexSink {
 		if self.layer_indices.iter().any(|(n, _)| n == name) {
 			return;
 		}
-		let idx = self.forward.add_layer(name);
+		let idx = match self.forward {
+			Some(ref mut fwd) => fwd.add_layer(name),
+			None => 0,
+		};
 		self.layer_indices.push((name.to_string(), idx));
 	}
 
 	fn add_token_annotation(&mut self, position: u64, layer: &str, value: &str) {
 		self.inverted.insert(layer, value, [position]);
 
-		if let Some((_, layer_idx)) = self.layer_indices.iter().find(|(name, _)| name == layer) {
-			self.forward.set(*layer_idx, position, Value::from(value));
+		if let Some(ref mut fwd) = self.forward {
+			if let Some((_, layer_idx)) = self.layer_indices.iter().find(|(name, _)| name == layer) {
+				fwd.set(*layer_idx, position, Value::from(value));
+			}
 		}
 
 		self.lexicon.add_term(layer, value);
@@ -178,7 +191,9 @@ impl IndexSink {
 			.map_err(|e| crate::BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 		std::fs::write(path.join("inverted.bin"), &inverted_bytes)?;
 
-		montre_index::write_flat_forward(&self.forward, &path.join("forward.bin"))?;
+		if let Some(ref forward) = self.forward {
+			montre_index::write_flat_forward(forward, &path.join("forward.bin"))?;
+		}
 
 		montre_index::write_flat_spans(&self.spans, &path.join("spans.bin"))?;
 
@@ -195,105 +210,6 @@ impl IndexSink {
 
 		Ok(())
 	}
-
-	pub fn write_without_forward(mut self, path: &Path, meta: CorpusMeta) -> Result<()> {
-		self.spans.finalize();
-
-		if path.exists() {
-			std::fs::remove_dir_all(path)?;
-		}
-		std::fs::create_dir_all(path)?;
-
-		let meta_json = serde_json::to_string_pretty(&meta)?;
-		std::fs::write(path.join("corpus.json"), meta_json)?;
-
-		let inverted_bytes = bincode::serialize(&self.inverted)
-			.map_err(|e| crate::BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-		std::fs::write(path.join("inverted.bin"), &inverted_bytes)?;
-
-		montre_index::write_flat_spans(&self.spans, &path.join("spans.bin"))?;
-
-		let lexicon_bytes = bincode::serialize(&self.lexicon)
-			.map_err(|e| crate::BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-		std::fs::write(path.join("lexicon.bin"), lexicon_bytes)?;
-
-		tracing::info!(
-			"Wrote corpus (forward written separately): {} tokens, {} documents, {} bytes inverted",
-			meta.token_count,
-			meta.document_names.len(),
-			inverted_bytes.len()
-		);
-
-		Ok(())
-	}
-}
-
-pub fn build_from_directory(
-	dir: &Path,
-	decompose_feats: bool,
-	strict: bool,
-) -> Result<IndexSink> {
-	let mut files: Vec<_> = WalkDir::new(dir)
-		.into_iter()
-		.filter_map(|e| e.ok())
-		.filter(|e| {
-			e.path()
-				.extension()
-				.map(|ext| ext == "conllu")
-				.unwrap_or(false)
-		})
-		.map(|e| e.path().to_path_buf())
-		.collect();
-
-	files.sort();
-
-	let file_sinks: Vec<IndexSink> = files
-		.par_iter()
-		.map(|path| {
-			let file = File::open(path)?;
-			let reader = BufReader::new(file);
-			let mut conllu = ConllUReader::new(reader).with_source_name(
-				path.file_name()
-					.map(|s| s.to_string_lossy().to_string())
-					.unwrap_or_else(|| "unknown".into()),
-			);
-
-			let result = if strict {
-				conllu.read_sentences_strict()
-			} else {
-				conllu.read_sentences()
-			};
-
-			match result {
-				Ok(sentences) => {
-					let doc_name = path
-						.file_name()
-						.map(|s| s.to_string_lossy().to_string())
-						.unwrap_or_else(|| "unknown".into());
-					let mut sink = IndexSink::new().with_decompose_feats(decompose_feats);
-					sink.add_document(&doc_name, sentences);
-					Ok(sink)
-				}
-				Err(e) => {
-					if strict {
-						Err(e)
-					} else {
-						tracing::warn!("Skipping {:?}: {}", path, e);
-						Ok(IndexSink::new().with_decompose_feats(decompose_feats))
-					}
-				}
-			}
-		})
-		.collect::<Result<Vec<_>>>()?;
-
-	let mut combined = IndexSink::new().with_decompose_feats(decompose_feats);
-	for sink in file_sinks {
-		if sink.current_position > 0 {
-			combined.merge_from(sink);
-		}
-	}
-
-	Ok(combined)
 }
 
 pub fn build_from_directory_streaming(
@@ -356,13 +272,13 @@ pub fn build_from_directory_streaming(
 		})
 		.collect::<Result<Vec<_>>>()?;
 
-	let mut combined = IndexSink::new().with_decompose_feats(decompose_feats);
-	for mut sink in file_sinks {
-		if sink.current_position > 0 {
-			let forward = sink.take_forward();
-			let offset = position_offset + combined.current_position;
-			streaming_forward.append_from(forward, offset)?;
-			combined.merge_from_no_forward(sink);
+	let mut combined = IndexSink::new_without_forward().with_decompose_feats(decompose_feats);
+	for mut sink in file_sinks {		if sink.current_position > 0 {
+			if let Some(forward) = sink.take_forward() {
+				let offset = position_offset + combined.current_position;
+				streaming_forward.append_from(forward, offset)?;
+			}
+			combined.merge_from(sink);
 		}
 	}
 
@@ -372,6 +288,7 @@ pub fn build_from_directory_streaming(
 pub struct CorpusBuilder {
 	name: String,
 	pub(crate) sink: IndexSink,
+	streaming_forward: Option<crate::streaming_forward::StreamingForwardWriter>,
 }
 
 impl CorpusBuilder {
@@ -379,6 +296,7 @@ impl CorpusBuilder {
 		Self {
 			name: name.into(),
 			sink: IndexSink::new(),
+			streaming_forward: None,
 		}
 	}
 
@@ -388,10 +306,19 @@ impl CorpusBuilder {
 		decompose_feats: bool,
 		strict: bool,
 	) -> Result<Self> {
-		let sink = build_from_directory(dir, decompose_feats, strict)?;
+		use std::sync::atomic::{AtomicU64, Ordering};
+		static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+		let build_id = COUNTER.fetch_add(1, Ordering::SeqCst);
+		let temp_dir = std::env::temp_dir().join(format!(
+			"montre_cb_{}_{}", std::process::id(), build_id
+		));
+		let mut streaming_forward = crate::streaming_forward::StreamingForwardWriter::new(&temp_dir)?;
+		let sink = build_from_directory_streaming(dir, decompose_feats, strict, &mut streaming_forward, 0)?;
 		Ok(Self {
 			name: name.into(),
 			sink,
+			streaming_forward: Some(streaming_forward),
 		})
 	}
 
@@ -416,11 +343,11 @@ impl CorpusBuilder {
 		self.sink.document_names.len()
 	}
 
-	pub fn build(self, output_path: impl AsRef<Path>) -> Result<()> {
+	pub fn build(mut self, output_path: impl AsRef<Path>) -> Result<()> {
 		let meta = CorpusMeta {
 			name: self.name,
 			version: montre_index::index_version,
-			token_count: self.sink.forward.token_count(),
+			token_count: self.sink.current_position,
 			layers: self.sink.layer_indices.iter().map(|(n, _)| n.clone()).collect(),
 			span_layers: self.sink.spans.layers().into_iter().map(String::from).collect(),
 			document_names: self.sink.document_names.clone(),
@@ -428,7 +355,14 @@ impl CorpusBuilder {
 			alignments: Vec::new(),
 		};
 
-		self.sink.write(output_path.as_ref(), meta)
+		let path = output_path.as_ref();
+		self.sink.write(path, meta)?;
+
+		if let Some(ref mut streaming) = self.streaming_forward {
+			streaming.finalize(&path.join("forward.bin"))?;
+		}
+
+		Ok(())
 	}
 }
 

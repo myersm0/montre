@@ -84,10 +84,6 @@ impl StreamingForwardWriter {
 		forward_flat::write_mfwd(&layer_builds, self.token_count, output_path)
 	}
 
-	pub fn cleanup(&self) {
-		let _ = std::fs::remove_dir_all(&self.temp_dir);
-	}
-
 	fn get_or_create_layer(&mut self, name: &str, is_numeric: bool) -> std::io::Result<&mut LayerFile> {
 		if let Some(&idx) = self.layer_index.get(name) {
 			return Ok(&mut self.layers[idx].1);
@@ -107,6 +103,12 @@ impl StreamingForwardWriter {
 		self.layers.push((name.to_string(), layer_file));
 		self.layer_index.insert(name.to_string(), idx);
 		Ok(&mut self.layers[idx].1)
+	}
+}
+
+impl Drop for StreamingForwardWriter {
+	fn drop(&mut self) {
+		let _ = std::fs::remove_dir_all(&self.temp_dir);
 	}
 }
 

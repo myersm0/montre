@@ -63,7 +63,7 @@ impl MultiCorpusBuilder {
 			self.manifest.components.keys().cloned().collect();
 		component_names.sort();
 
-		let mut combined = IndexSink::new().with_decompose_feats(self.decompose_feats);
+		let mut combined = IndexSink::new_without_forward().with_decompose_feats(self.decompose_feats);
 		let mut components = Vec::new();
 
 		for (id, name) in component_names.iter().enumerate() {
@@ -93,7 +93,7 @@ impl MultiCorpusBuilder {
 			);
 
 			let doc_start = combined.document_names.len();
-			combined.merge_from_no_forward(sink);
+			combined.merge_from(sink);
 			let doc_end = combined.document_names.len();
 
 			components.push(ComponentMeta {
@@ -221,9 +221,8 @@ impl MultiCorpusBuilder {
 			meta.alignments.len()
 		);
 
-		combined.write_without_forward(path, meta)?;
+		combined.write(path, meta)?;
 		streaming_forward.finalize(&path.join("forward.bin"))?;
-		streaming_forward.cleanup();
 
 		if let Some(bytes) = alignment_bytes {
 			std::fs::write(path.join("alignments.bin"), bytes)?;
