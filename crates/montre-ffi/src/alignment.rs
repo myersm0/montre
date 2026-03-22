@@ -123,6 +123,57 @@ pub unsafe extern "C" fn montre_corpus_alignment_directed(
 	}
 }
 
+/// Return all alignment edges as a flat u32 array of quads:
+/// [src_doc, src_sent, tgt_doc, tgt_sent, ...].
+/// out_len receives the number of edges (array length is out_len * 4).
+/// Free with `montre_u32_array_free(array, out_len * 4)`.
+/// Returns null if the alignment does not exist.
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_alignment_edges(
+	corpus: *const Corpus,
+	name: *const c_char,
+	out_len: *mut u64,
+) -> *mut u32 {
+	if corpus.is_null() || out_len.is_null() {
+		if !out_len.is_null() { *out_len = 0; }
+		return ptr::null_mut();
+	}
+	let c = &*corpus;
+	let Some(name_str) = borrow_cstr(name) else {
+		*out_len = 0;
+		return ptr::null_mut();
+	};
+	let Some(edges) = c.alignment_edges(name_str) else {
+		*out_len = 0;
+		return ptr::null_mut();
+	};
+
+	let edge_count = edges.len();
+	if edge_count == 0 {
+		*out_len = 0;
+		return ptr::null_mut();
+	}
+
+	let flat_len = edge_count * 4;
+	let layout = std::alloc::Layout::array::<u32>(flat_len).unwrap();
+	let array = std::alloc::alloc(layout) as *mut u32;
+	if array.is_null() {
+		*out_len = 0;
+		return ptr::null_mut();
+	}
+
+	for (i, &((src_doc, src_sent), (tgt_doc, tgt_sent))) in edges.iter().enumerate() {
+		let base = i * 4;
+		*array.add(base) = src_doc;
+		*array.add(base + 1) = src_sent;
+		*array.add(base + 2) = tgt_doc;
+		*array.add(base + 3) = tgt_sent;
+	}
+
+	*out_len = edge_count as u64;
+	array
+}
+
 /// Project a HitList through a named alignment, returning a new HitList
 /// of target-side sentence spans.
 /// out_unmapped: number of source hits not locatable in the source component (nullable).
