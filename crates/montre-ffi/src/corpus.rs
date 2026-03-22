@@ -1,7 +1,7 @@
 use std::os::raw::c_char;
 use std::ptr;
 
-use montre_index::Corpus;
+use montre_index::{Corpus, InvertedIndex};
 
 use crate::error::{set_error, clear_error};
 use crate::strings::{to_cstring, borrow_cstr};
@@ -166,4 +166,52 @@ pub unsafe extern "C" fn montre_corpus_component_for_document(
 		}
 	}
 	-1
+}
+
+/// Return all distinct values for a layer from the inverted index.
+/// Returns a string array of `out_len` entries (caller gets ownership).
+/// Free with `montre_string_array_free(array, len)`.
+/// Returns null if the layer does not exist.
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_inverted_values(
+	corpus: *const Corpus,
+	layer: *const c_char,
+	out_len: *mut u64,
+) -> *mut *mut c_char {
+	if corpus.is_null() || out_len.is_null() {
+		if !out_len.is_null() {
+			*out_len = 0;
+		}
+		return ptr::null_mut();
+	}
+	let c = &*corpus;
+	let Some(layer_str) = borrow_cstr(layer) else {
+		*out_len = 0;
+		return ptr::null_mut();
+	};
+
+	let Some(values) = c.inverted.values(layer_str) else {
+		*out_len = 0;
+		return ptr::null_mut();
+	};
+
+	let count = values.len();
+	if count == 0 {
+		*out_len = 0;
+		return ptr::null_mut();
+	}
+
+	let layout = std::alloc::Layout::array::<*mut c_char>(count).unwrap();
+	let array = std::alloc::alloc(layout) as *mut *mut c_char;
+	if array.is_null() {
+		*out_len = 0;
+		return ptr::null_mut();
+	}
+
+	for (i, val) in values.iter().enumerate() {
+		*array.add(i) = to_cstring(val);
+	}
+
+	*out_len = count as u64;
+	array
 }
