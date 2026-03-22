@@ -755,11 +755,12 @@ Combined with sequential component builds (each component fully built and droppe
 - [x] Component-scoped count (`montre_query_count_in_component`)
 - [x] Bulk hit field extraction as flat arrays (`montre_hitlist_starts`, `_ends`, `_document_indices`, `_sentence_indices`)
 - [x] Build from FFI: single-component (`montre_build_directory`) and multi-component (`montre_build_manifest`)
+- [x] Raw alignment edge access (`montre_corpus_alignment_edges`: flat u32 quad array)
 - [x] `montre-build` added as FFI crate dependency
-- [x] Integration test suite (`tests/ffi_integration.rs`): 3 tests covering all 55 functions
+- [x] Integration test suite (`tests/ffi_integration.rs`): 3 tests covering all 57 functions
 - [x] Zero-length allocation guards in bulk extraction functions
 
-Expands the FFI surface from 35 to 55 exported functions. All existing function signatures and semantics are unchanged. The module structure maps to the API's logical groupings: corpus lifecycle, token access, query execution, span access, alignment, and build.
+Expands the FFI surface from 35 to 57 exported functions. All existing function signatures and semantics are unchanged. The module structure maps to the API's logical groupings: corpus lifecycle, token access, query execution, span access, alignment, and build.
 
 ### Phase 4: Statistics & bindings
 
