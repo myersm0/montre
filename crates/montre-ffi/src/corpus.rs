@@ -125,3 +125,45 @@ pub unsafe extern "C" fn montre_corpus_component_language(
 		None => ptr::null_mut(),
 	}
 }
+
+/// Get the half-open document index range [start, end) for a component.
+/// Returns 1 on success, 0 if the corpus or component index is invalid.
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_component_document_range(
+	corpus: *const Corpus,
+	index: u32,
+	out_start: *mut u32,
+	out_end: *mut u32,
+) -> i32 {
+	if corpus.is_null() || out_start.is_null() || out_end.is_null() {
+		return 0;
+	}
+	let c = &*corpus;
+	let Some(comp) = c.components().get(index as usize) else {
+		return 0;
+	};
+	*out_start = comp.document_range.0 as u32;
+	*out_end = comp.document_range.1 as u32;
+	1
+}
+
+/// Find the component index for a given document index.
+/// Returns -1 if the document index does not belong to any component.
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_component_for_document(
+	corpus: *const Corpus,
+	doc_index: u32,
+) -> i32 {
+	if corpus.is_null() {
+		return -1;
+	}
+	let c = &*corpus;
+	for (i, comp) in c.components().iter().enumerate() {
+		if (doc_index as usize) >= comp.document_range.0
+			&& (doc_index as usize) < comp.document_range.1
+		{
+			return i as i32;
+		}
+	}
+	-1
+}
