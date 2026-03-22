@@ -76,7 +76,7 @@ Components remain independently queryable. You can query `maupassant-fr` as if t
 | `montre-build` | Corpus construction from source formats | `montre-core`, `montre-index` |
 | `montre-query` | Query parsing, planning, execution | `montre-core`, `montre-index` |
 | `montre-cli` | Command-line interface | all of the above |
-| `montre-ffi` | C FFI for Julia/Python/R bindings | `montre-core`, `montre-index`, `montre-query` |
+| `montre-ffi` | C FFI for Julia/Python/R bindings | `montre-core`, `montre-index`, `montre-query`, `montre-build` |
 | `montre-py` | Python bindings (future) | all of the above |
 
 ## Data model
@@ -618,7 +618,7 @@ Recommend deferring this to Phase 2c or later. It's useful but not core to the q
 
 ### Phase 3a: FFI, performance, code quality ✓
 
-- [x] C FFI crate (`montre-ffi`, 35 exported functions)
+- [x] C FFI crate (`montre-ffi`, 55 exported functions across 8 modules)
 - [x] Inverted index: two-level HashMap (zero-alloc lookups)
 - [x] Binary search in FilterBySpan and FilterByComponent
 - [x] ScanAll: `RunIndex::full` avoids materializing all positions
@@ -743,6 +743,23 @@ The forward index is the dominant memory consumer at build time: 10M tokens × 2
 The streaming forward writer eliminates forward accumulation in the combined sink. During the per-file merge loop, each sink's `InMemoryForward` is extracted and appended to per-layer temp files on disk. The combined sink holds only inverted, spans, and lexicon data. At write time, temp files are read back one layer at a time (peak: ~320MB for a 10M-token dense layer), converted to MFWD `LayerBuild` structures, and serialized.
 
 Combined with sequential component builds (each component fully built and dropped before the next starts), peak RSS dropped from 35GB to 8.3GB for a two-component ELTeC corpus (~20M tokens, 25 layers). The remaining ~8GB is dominated by the per-file sinks coexisting after `par_iter().collect()` and before the sequential merge consumes them.
+
+### Phase 3e: FFI overhaul ✓
+
+- [x] Module restructuring: single `lib.rs` (836 lines) split into 8 modules (`error`, `strings`, `corpus`, `tokens`, `query`, `spans`, `alignment`, `build`)
+- [x] Span index access via FFI (`montre_corpus_span_layer_count`, `span_layer_name`, `span_count`, `span_at`, `span_containing`)
+- [x] Component metadata: document range, component-for-document lookup, per-component token count
+- [x] Alignment metadata: source/target layer, directed flag
+- [x] Inverted index introspection (`montre_corpus_inverted_values`)
+- [x] Bulk forward range access (`montre_corpus_token_annotations`)
+- [x] Component-scoped count (`montre_query_count_in_component`)
+- [x] Bulk hit field extraction as flat arrays (`montre_hitlist_starts`, `_ends`, `_document_indices`, `_sentence_indices`)
+- [x] Build from FFI: single-component (`montre_build_directory`) and multi-component (`montre_build_manifest`)
+- [x] `montre-build` added as FFI crate dependency
+- [x] Integration test suite (`tests/ffi_integration.rs`): 3 tests covering all 55 functions
+- [x] Zero-length allocation guards in bulk extraction functions
+
+Expands the FFI surface from 35 to 55 exported functions. All existing function signatures and semantics are unchanged. The module structure maps to the API's logical groupings: corpus lifecycle, token access, query execution, span access, alignment, and build.
 
 ### Phase 4: Statistics & bindings
 

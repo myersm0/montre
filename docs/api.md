@@ -248,7 +248,7 @@ BuildError::Alignment(String)
 
 ## C FFI
 
-The `montre-ffi` crate exports 35 `extern "C"` functions. All string arguments are `*const c_char` (null-terminated). All returned strings are owned by Rust; copy and free with `montre_string_free`.
+The `montre-ffi` crate exports 55 `extern "C"` functions across eight modules. All string arguments are `*const c_char` (null-terminated). All returned strings are owned by Rust; copy and free with `montre_string_free`.
 
 ### Error handling
 
@@ -275,6 +275,16 @@ char      *montre_corpus_document_name(const void *corpus, uint32_t index);
 uint32_t   montre_corpus_component_count(const void *corpus);
 char      *montre_corpus_component_name(const void *corpus, uint32_t index);
 char      *montre_corpus_component_language(const void *corpus, uint32_t index);
+int32_t    montre_corpus_component_document_range(const void *corpus, uint32_t index, uint32_t *out_start, uint32_t *out_end);
+int32_t    montre_corpus_component_for_document(const void *corpus, uint32_t doc_index);
+int64_t    montre_corpus_component_token_count(const void *corpus, uint32_t index);
+```
+
+### Inverted index introspection
+
+```c
+// All distinct values for a layer (e.g., all POS tags). Free with montre_string_array_free.
+char **montre_corpus_inverted_values(const void *corpus, const char *layer, uint64_t *out_len);
 ```
 
 ### Token access
@@ -282,6 +292,9 @@ char      *montre_corpus_component_language(const void *corpus, uint32_t index);
 ```c
 char *montre_corpus_token_annotation(const void *corpus, uint64_t position, const char *layer);
 char *montre_corpus_span_text(const void *corpus, uint64_t start, uint64_t end, const char *layer);
+
+// Bulk annotation extraction for a position range. Free with montre_string_array_free.
+char **montre_corpus_token_annotations(const void *corpus, uint64_t start, uint64_t end, const char *layer, uint64_t *out_len);
 ```
 
 ### Query
@@ -290,6 +303,7 @@ char *montre_corpus_span_text(const void *corpus, uint64_t start, uint64_t end, 
 void    *montre_query(const void *corpus, const char *cql);
 void    *montre_query_in_component(const void *corpus, const char *cql, const char *component);
 int64_t  montre_query_count(const void *corpus, const char *cql);
+int64_t  montre_query_count_in_component(const void *corpus, const char *cql, const char *component);
 void     montre_hitlist_free(void *hits);
 uint64_t montre_hitlist_len(const void *hits);
 uint64_t montre_hit_start(const void *hits, uint64_t index);
@@ -297,6 +311,12 @@ uint64_t montre_hit_end(const void *hits, uint64_t index);
 uint32_t montre_hit_document_index(const void *hits, uint64_t index);
 uint32_t montre_hit_sentence_index(const void *hits, uint64_t index);
 void     montre_hitlist_populate_context(void *hits, const void *corpus);
+
+// Bulk hit field extraction as flat u64 arrays. Free with montre_u64_array_free.
+uint64_t *montre_hitlist_starts(const void *hits, uint64_t *out_len);
+uint64_t *montre_hitlist_ends(const void *hits, uint64_t *out_len);
+uint64_t *montre_hitlist_document_indices(const void *hits, uint64_t *out_len);
+uint64_t *montre_hitlist_sentence_indices(const void *hits, uint64_t *out_len);
 ```
 
 ### Bulk extraction
@@ -322,6 +342,9 @@ char    *montre_corpus_alignment_name(const void *corpus, uint32_t index);
 char    *montre_corpus_alignment_source(const void *corpus, uint32_t index);
 char    *montre_corpus_alignment_target(const void *corpus, uint32_t index);
 uint64_t montre_corpus_alignment_edge_count(const void *corpus, uint32_t index);
+char    *montre_corpus_alignment_source_layer(const void *corpus, uint32_t index);
+char    *montre_corpus_alignment_target_layer(const void *corpus, uint32_t index);
+int32_t  montre_corpus_alignment_directed(const void *corpus, uint32_t index);
 
 void *montre_project(
     const void *corpus, const void *source_hits, const char *alignment_name,
@@ -330,6 +353,27 @@ void *montre_project(
 ```
 
 The three out-parameters on `montre_project` are nullable. Pass NULL for any diagnostics you don't need.
+
+### Span index access
+
+```c
+uint32_t montre_corpus_span_layer_count(const void *corpus);
+char    *montre_corpus_span_layer_name(const void *corpus, uint32_t index);
+int64_t  montre_corpus_span_count(const void *corpus, const char *layer);
+int32_t  montre_corpus_span_at(const void *corpus, const char *layer, uint64_t index, uint64_t *out_start, uint64_t *out_end);
+int64_t  montre_corpus_span_containing(const void *corpus, const char *layer, uint64_t position, uint64_t *out_start, uint64_t *out_end);
+```
+
+`montre_corpus_span_containing` returns the span index, or -1 if not found. The out-parameters are nullable — pass NULL if you only need the index.
+
+### Build
+
+```c
+int32_t montre_build_directory(const char *name, const char *input_dir, const char *output_dir, int32_t decompose_feats, int32_t strict);
+int32_t montre_build_manifest(const char *manifest_path, const char *output_dir, int32_t decompose_feats, int32_t strict);
+```
+
+Both return 1 on success, 0 on failure. Check `montre_last_error()` on failure. For `montre_build_manifest`, a nonzero `decompose_feats` overrides the manifest setting; zero leaves the manifest default.
 
 ## Corpus format
 
