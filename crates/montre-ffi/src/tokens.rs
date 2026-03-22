@@ -55,6 +55,52 @@ pub unsafe extern "C" fn montre_corpus_span_text(
 	to_cstring(&words.join(" "))
 }
 
+/// Bulk-extract annotations for a range of positions [start, end).
+/// Returns a string array of `out_len` entries (caller gets ownership).
+/// Positions with no value for the layer produce empty strings.
+/// Free with `montre_string_array_free(array, len)`.
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_token_annotations(
+	corpus: *const Corpus,
+	start: u64,
+	end: u64,
+	layer: *const c_char,
+	out_len: *mut u64,
+) -> *mut *mut c_char {
+	if corpus.is_null() || out_len.is_null() {
+		if !out_len.is_null() {
+			*out_len = 0;
+		}
+		return ptr::null_mut();
+	}
+	let c = &*corpus;
+	let Some(layer_str) = borrow_cstr(layer) else {
+		*out_len = 0;
+		return ptr::null_mut();
+	};
+
+	let count = (end.saturating_sub(start)) as usize;
+	if count == 0 {
+		*out_len = 0;
+		return ptr::null_mut();
+	}
+
+	let layout = std::alloc::Layout::array::<*mut c_char>(count).unwrap();
+	let array = std::alloc::alloc(layout) as *mut *mut c_char;
+	if array.is_null() {
+		*out_len = 0;
+		return ptr::null_mut();
+	}
+
+	for (i, pos) in (start..end).enumerate() {
+		let val = forward_value_string(c, pos, layer_str).unwrap_or_default();
+		*array.add(i) = to_cstring(&val);
+	}
+
+	*out_len = count as u64;
+	array
+}
+
 /// Bulk-extract matched text for every hit in a HitList.
 /// Returns an array of `len` C strings (caller gets ownership).
 /// Free with `montre_string_array_free(array, len)`.
