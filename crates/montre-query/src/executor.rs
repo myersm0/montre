@@ -26,6 +26,12 @@ impl Hit {
 	}
 }
 
+#[derive(Debug, Clone)]
+struct ActiveMatch {
+	start: u64,
+	captures: Vec<(String, Span)>,
+}
+
 fn binary_search_span(spans: &[Span], position: u64) -> Option<usize> {
 	if spans.is_empty() {
 		return None;
@@ -468,11 +474,15 @@ fn execute_sequence_in_range(
 
 	let mut hits: Vec<Hit> = active
 		.into_iter()
-		.flat_map(|(end, starts)| {
-			starts
+		.flat_map(|(end, matches)| {
+			matches
 				.into_iter()
-				.filter(move |&start| end > start)
-				.map(move |start| Hit::new(Span::new(start, end)))
+				.filter(move |m| end > m.start)
+				.map(move |m| {
+					let mut hit = Hit::new(Span::new(m.start, end));
+					hit.captures = m.captures;
+					hit
+				})
 		})
 		.collect();
 
@@ -493,8 +503,8 @@ fn count_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<usize> {
 					)?;
 					Ok(active
 						.into_iter()
-						.map(|(end, starts)| {
-							starts.into_iter().filter(|&start| end > start).count()
+						.map(|(end, matches)| {
+							matches.into_iter().filter(|m| end > m.start).count()
 						})
 						.sum())
 				})
@@ -508,8 +518,8 @@ fn count_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<usize> {
 			)?;
 			Ok(active
 				.into_iter()
-				.map(|(end, starts)| {
-					starts.into_iter().filter(|&start| end > start).count()
+				.map(|(end, matches)| {
+					matches.into_iter().filter(|m| end > m.start).count()
 				})
 				.sum())
 		}
@@ -521,7 +531,7 @@ fn run_sequence_steps_in_range(
 	corpus: &Corpus,
 	range_start: u64,
 	range_end: u64,
-) -> Result<HashMap<u64, Vec<u64>>> {
+) -> Result<HashMap<u64, Vec<ActiveMatch>>> {
 	if steps.is_empty() || range_start >= range_end {
 		return Ok(HashMap::new());
 	}
@@ -544,15 +554,26 @@ fn run_sequence_steps_in_range(
 	let first_step = &steps[0];
 	let first_runs = &run_indices[0];
 
-	let mut active: HashMap<u64, Vec<u64>> = HashMap::new();
+	let mut active: HashMap<u64, Vec<ActiveMatch>> = HashMap::new();
 
 	for (start, end) in first_runs.spans_for_quantifier(first_step.min, first_step.max) {
-		active.entry(end).or_default().push(start);
+		let captures = match first_step.label {
+			Some(ref label) => vec![(label.clone(), Span::new(start, end))],
+			None => Vec::new(),
+		};
+		active.entry(end).or_default().push(ActiveMatch { start, captures });
 	}
 
 	if first_step.min == 0 && steps.len() > 1 {
 		for run in &run_indices[1].runs {
-			active.entry(run.start).or_default().push(run.start);
+			let captures = match first_step.label {
+				Some(ref label) => vec![(label.clone(), Span::new(run.start, run.start))],
+				None => Vec::new(),
+			};
+			active.entry(run.start).or_default().push(ActiveMatch {
+				start: run.start,
+				captures,
+			});
 		}
 	}
 
@@ -568,12 +589,19 @@ fn run_sequence_steps_in_range(
 		let runs = &run_indices[step_idx + 1];
 		let is_scan_all = matches!(step.node, PlanNode::ScanAll);
 
-		let mut next_active: HashMap<u64, Vec<u64>> = HashMap::new();
+		let mut next_active: HashMap<u64, Vec<ActiveMatch>> = HashMap::new();
 
-		for (end_pos, starts) in &active {
+		for (end_pos, matches) in &active {
 			if step.min == 0 {
-				for &s in starts {
-					next_active.entry(*end_pos).or_default().push(s);
+				for m in matches {
+					let mut captures = m.captures.clone();
+					if let Some(ref label) = step.label {
+						captures.push((label.clone(), Span::new(*end_pos, *end_pos)));
+					}
+					next_active.entry(*end_pos).or_default().push(ActiveMatch {
+						start: m.start,
+						captures,
+					});
 				}
 			}
 
@@ -584,15 +612,22 @@ fn run_sequence_steps_in_range(
 			};
 
 			for new_end in continuations {
-				for &s in starts {
-					next_active.entry(new_end).or_default().push(s);
+				for m in matches {
+					let mut captures = m.captures.clone();
+					if let Some(ref label) = step.label {
+						captures.push((label.clone(), Span::new(*end_pos, new_end)));
+					}
+					next_active.entry(new_end).or_default().push(ActiveMatch {
+						start: m.start,
+						captures,
+					});
 				}
 			}
 		}
 
-		for starts in next_active.values_mut() {
-			starts.sort_unstable();
-			starts.dedup();
+		for matches in next_active.values_mut() {
+			matches.sort_unstable_by_key(|m| m.start);
+			matches.dedup_by_key(|m| m.start);
 		}
 
 		active = next_active;
