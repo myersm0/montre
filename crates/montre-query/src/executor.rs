@@ -464,47 +464,69 @@ fn execute_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<Vec<Hit>>
 	}
 }
 
+fn has_labels(steps: &[SequenceStep]) -> bool {
+	steps.iter().any(|s| s.label.is_some())
+}
+
 fn execute_sequence_in_range(
 	steps: &[SequenceStep],
 	corpus: &Corpus,
 	range_start: u64,
 	range_end: u64,
 ) -> Result<Vec<Hit>> {
-	let active = run_sequence_steps_in_range(steps, corpus, range_start, range_end)?;
+	if has_labels(steps) {
+		let active = run_sequence_steps_labeled(steps, corpus, range_start, range_end)?;
 
-	let mut hits: Vec<Hit> = active
-		.into_iter()
-		.flat_map(|(end, matches)| {
-			matches
-				.into_iter()
-				.filter(move |m| end > m.start)
-				.map(move |m| {
-					let mut hit = Hit::new(Span::new(m.start, end));
-					hit.captures = m.captures;
-					hit
-				})
-		})
-		.collect();
+		let mut hits: Vec<Hit> = active
+			.into_iter()
+			.flat_map(|(end, matches)| {
+				matches
+					.into_iter()
+					.filter(move |m| end > m.start)
+					.map(move |m| {
+						let mut hit = Hit::new(Span::new(m.start, end));
+						hit.captures = m.captures;
+						hit
+					})
+			})
+			.collect();
 
-	hits.sort_by_key(|h| (h.span.start, h.span.end));
-	Ok(hits)
+		hits.sort_by_key(|h| (h.span.start, h.span.end));
+		Ok(hits)
+	} else {
+		let active = run_sequence_steps_unlabeled(steps, corpus, range_start, range_end)?;
+
+		let mut hits: Vec<Hit> = active
+			.into_iter()
+			.flat_map(|(end, starts)| {
+				starts
+					.into_iter()
+					.filter(move |&start| end > start)
+					.map(move |start| Hit::new(Span::new(start, end)))
+			})
+			.collect();
+
+		hits.sort_by_key(|h| (h.span.start, h.span.end));
+		Ok(hits)
+	}
 }
 
 fn count_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<usize> {
 	let doc_spans = corpus.spans.spans("document");
 
+	// count path never needs captures, always use the fast unlabeled path
 	match doc_spans {
 		Some(spans) if spans.len() > 1 && benefits_from_parallel(steps) => {
 			let counts: Vec<usize> = spans
 				.par_iter()
 				.map(|span| {
-					let active = run_sequence_steps_in_range(
+					let active = run_sequence_steps_unlabeled(
 						steps, corpus, span.start, span.end,
 					)?;
 					Ok(active
 						.into_iter()
-						.map(|(end, matches)| {
-							matches.into_iter().filter(|m| end > m.start).count()
+						.map(|(end, starts)| {
+							starts.into_iter().filter(|&start| end > start).count()
 						})
 						.sum())
 				})
@@ -513,30 +535,26 @@ fn count_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<usize> {
 			Ok(counts.into_iter().sum())
 		}
 		_ => {
-			let active = run_sequence_steps_in_range(
+			let active = run_sequence_steps_unlabeled(
 				steps, corpus, 0, corpus.token_count(),
 			)?;
 			Ok(active
 				.into_iter()
-				.map(|(end, matches)| {
-					matches.into_iter().filter(|m| end > m.start).count()
+				.map(|(end, starts)| {
+					starts.into_iter().filter(|&start| end > start).count()
 				})
 				.sum())
 		}
 	}
 }
 
-fn run_sequence_steps_in_range(
+fn build_run_indices(
 	steps: &[SequenceStep],
 	corpus: &Corpus,
 	range_start: u64,
 	range_end: u64,
-) -> Result<HashMap<u64, Vec<ActiveMatch>>> {
-	if steps.is_empty() || range_start >= range_end {
-		return Ok(HashMap::new());
-	}
-
-	let run_indices: Vec<RunIndex> = steps
+) -> Vec<RunIndex> {
+	steps
 		.iter()
 		.map(|step| {
 			if matches!(step.node, PlanNode::ScanAll) {
@@ -549,7 +567,96 @@ fn run_sequence_steps_in_range(
 				RunIndex::from_positions(&positions)
 			}
 		})
-		.collect();
+		.collect()
+}
+
+// Fast path: no labels, no capture tracking. Active set is HashMap<end, Vec<start>>.
+fn run_sequence_steps_unlabeled(
+	steps: &[SequenceStep],
+	corpus: &Corpus,
+	range_start: u64,
+	range_end: u64,
+) -> Result<HashMap<u64, Vec<u64>>> {
+	if steps.is_empty() || range_start >= range_end {
+		return Ok(HashMap::new());
+	}
+
+	let run_indices = build_run_indices(steps, corpus, range_start, range_end);
+
+	let first_step = &steps[0];
+	let first_runs = &run_indices[0];
+
+	let mut active: HashMap<u64, Vec<u64>> = HashMap::new();
+
+	for (start, end) in first_runs.spans_for_quantifier(first_step.min, first_step.max) {
+		active.entry(end).or_default().push(start);
+	}
+
+	if first_step.min == 0 && steps.len() > 1 {
+		for run in &run_indices[1].runs {
+			active.entry(run.start).or_default().push(run.start);
+		}
+	}
+
+	if active.is_empty() {
+		return Ok(HashMap::new());
+	}
+
+	for (step_idx, step) in steps[1..].iter().enumerate() {
+		if active.is_empty() {
+			break;
+		}
+
+		let runs = &run_indices[step_idx + 1];
+		let is_scan_all = matches!(step.node, PlanNode::ScanAll);
+
+		let mut next_active: HashMap<u64, Vec<u64>> = HashMap::new();
+
+		for (end_pos, starts) in &active {
+			if step.min == 0 {
+				for &s in starts {
+					next_active.entry(*end_pos).or_default().push(s);
+				}
+			}
+
+			let continuations = if is_scan_all {
+				spans_for_scan_all(*end_pos, step.min, step.max, range_end)
+			} else {
+				runs.continuations_at(*end_pos, step.min, step.max)
+			};
+
+			for new_end in continuations {
+				for &s in starts {
+					next_active.entry(new_end).or_default().push(s);
+				}
+			}
+		}
+
+		for starts in next_active.values_mut() {
+			starts.sort_unstable();
+			starts.dedup();
+		}
+
+		active = next_active;
+	}
+
+	Ok(active)
+}
+
+// Labeled path: tracks captures through ActiveMatch. Only used when at least one
+// step carries a label. The capture Vec cloning is the reason this is kept separate
+// from the unlabeled fast path — on ScanAll-first queries the overhead is ~60%.
+fn run_sequence_steps_labeled(
+	steps: &[SequenceStep],
+	corpus: &Corpus,
+	range_start: u64,
+	range_end: u64,
+) -> Result<HashMap<u64, Vec<ActiveMatch>>> {
+	if steps.is_empty() || range_start >= range_end {
+		return Ok(HashMap::new());
+	}
+
+	let run_indices = build_run_indices(steps, corpus, range_start, range_end);
 
 	let first_step = &steps[0];
 	let first_runs = &run_indices[0];
