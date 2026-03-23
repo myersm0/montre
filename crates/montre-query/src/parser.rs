@@ -140,22 +140,41 @@ impl<'a> Parser<'a> {
 
 			if self.try_consume_str("within") {
 				self.skip_whitespace();
+				let keyword = self.parse_identifier()?;
+				self.skip_whitespace();
 
-				if self.try_consume_str("component") {
-					self.consume(':')?;
-					self.skip_whitespace();
-					let component = self.parse_component_name()?;
-					result = Query::WithinComponent {
-						inner: Box::new(result),
-						components: vec![component],
-					};
-				} else {
-					let layer = self.parse_identifier()?;
-					let layer = expand_span_alias(&layer);
-					result = Query::Within {
-						inner: Box::new(result),
-						span_layer: layer,
-					};
+				match keyword.as_str() {
+					"component" if self.peek_char() == Some(':') => {
+						self.pos += 1;
+						self.skip_whitespace();
+						let components = self.parse_name_list()?;
+						result = Query::WithinComponent {
+							inner: Box::new(result),
+							components,
+						};
+					}
+					"component" => {
+						return Err(QueryError::Parse {
+							position: self.pos,
+							message: "Expected ':' after 'component'".into(),
+						});
+					}
+					"doc" | "document" if self.peek_char() == Some(':') => {
+						self.pos += 1;
+						self.skip_whitespace();
+						let documents = self.parse_name_list()?;
+						result = Query::WithinDocument {
+							inner: Box::new(result),
+							documents,
+						};
+					}
+					_ => {
+						let layer = expand_span_alias(&keyword);
+						result = Query::Within {
+							inner: Box::new(result),
+							span_layer: layer,
+						};
+					}
 				}
 			} else if self.remaining().starts_with('=') && !self.remaining().starts_with("==") {
 				self.pos += 1;
@@ -179,7 +198,7 @@ impl<'a> Parser<'a> {
 		Ok(result)
 	}
 
-	fn parse_component_name(&mut self) -> Result<String> {
+	fn parse_name(&mut self) -> Result<String> {
 		if self.peek_char() == Some('"') {
 			self.pos += 1;
 			let start = self.pos;
@@ -198,6 +217,19 @@ impl<'a> Parser<'a> {
 		} else {
 			self.parse_identifier()
 		}
+	}
+
+	fn parse_name_list(&mut self) -> Result<Vec<String>> {
+		let mut names = vec![self.parse_name()?];
+		loop {
+			self.skip_whitespace();
+			if !self.try_consume(',') {
+				break;
+			}
+			self.skip_whitespace();
+			names.push(self.parse_name()?);
+		}
+		Ok(names)
 	}
 
 	fn parse_sequence(&mut self) -> Result<Query> {
@@ -799,5 +831,77 @@ mod tests {
 			}
 			_ => panic!("Expected Project query"),
 		}
+	}
+
+	#[test]
+	fn parse_within_document_named() {
+		let query = parse(r#"[pos="NOUN"] within doc:"la-parure""#).unwrap();
+		match query {
+			Query::WithinDocument { documents, .. } => {
+				assert_eq!(documents, vec!["la-parure"]);
+			}
+			_ => panic!("Expected WithinDocument query"),
+		}
+	}
+
+	#[test]
+	fn parse_within_document_named_full() {
+		let query = parse(r#"[pos="NOUN"] within document:"la-parure""#).unwrap();
+		match query {
+			Query::WithinDocument { documents, .. } => {
+				assert_eq!(documents, vec!["la-parure"]);
+			}
+			_ => panic!("Expected WithinDocument query"),
+		}
+	}
+
+	#[test]
+	fn parse_within_document_plural() {
+		let query = parse(r#"[pos="NOUN"] within doc:"la-parure","boule-de-suif""#).unwrap();
+		match query {
+			Query::WithinDocument { documents, .. } => {
+				assert_eq!(documents, vec!["la-parure", "boule-de-suif"]);
+			}
+			_ => panic!("Expected WithinDocument query"),
+		}
+	}
+
+	#[test]
+	fn parse_within_component_plural() {
+		let query = parse(r#"[pos="NOUN"] within component:fr,en"#).unwrap();
+		match query {
+			Query::WithinComponent { components, .. } => {
+				assert_eq!(components, vec!["fr", "en"]);
+			}
+			_ => panic!("Expected WithinComponent query"),
+		}
+	}
+
+	#[test]
+	fn parse_within_component_plural_quoted() {
+		let query =
+			parse(r#"[pos="NOUN"] within component:"maupassant-fr","maupassant-en""#).unwrap();
+		match query {
+			Query::WithinComponent { components, .. } => {
+				assert_eq!(components, vec!["maupassant-fr", "maupassant-en"]);
+			}
+			_ => panic!("Expected WithinComponent query"),
+		}
+	}
+
+	#[test]
+	fn parse_within_doc_containment_still_works() {
+		let query = parse(r#"[pos="NOUN"] within doc"#).unwrap();
+		match query {
+			Query::Within { span_layer, .. } => {
+				assert_eq!(span_layer, "document");
+			}
+			_ => panic!("Expected Within query"),
+		}
+	}
+
+	#[test]
+	fn parse_within_component_no_colon_fails() {
+		assert!(parse(r#"[pos="NOUN"] within component"#).is_err());
 	}
 }
