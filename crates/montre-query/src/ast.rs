@@ -22,7 +22,11 @@ pub enum Query {
 	},
 	WithinComponent {
 		inner: Box<Query>,
-		component: String,
+		components: Vec<String>,
+	},
+	WithinDocument {
+		inner: Box<Query>,
+		documents: Vec<String>,
 	},
 	Project {
 		inner: Box<Query>,

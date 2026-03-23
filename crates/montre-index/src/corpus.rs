@@ -192,6 +192,20 @@ impl Corpus {
 		self.meta.document_names.get(idx).map(|s| s.as_str())
 	}
 
+	pub fn document_index_by_name(&self, name: &str) -> Option<usize> {
+		self.meta.document_names.iter().position(|n| n == name)
+	}
+
+	pub fn document_indices_by_name(&self, names: &[String]) -> Vec<usize> {
+		self.meta
+			.document_names
+			.iter()
+			.enumerate()
+			.filter(|(_, n)| names.iter().any(|name| name == n.as_str()))
+			.map(|(idx, _)| idx)
+			.collect()
+	}
+
 	pub fn components(&self) -> &[ComponentMeta] {
 		&self.meta.components
 	}

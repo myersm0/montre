@@ -140,22 +140,41 @@ impl<'a> Parser<'a> {
 
 			if self.try_consume_str("within") {
 				self.skip_whitespace();
+				let keyword = self.parse_identifier()?;
+				self.skip_whitespace();
 
-				if self.try_consume_str("component") {
-					self.consume(':')?;
-					self.skip_whitespace();
-					let component = self.parse_component_name()?;
-					result = Query::WithinComponent {
-						inner: Box::new(result),
-						component,
-					};
-				} else {
-					let layer = self.parse_identifier()?;
-					let layer = expand_span_alias(&layer);
-					result = Query::Within {
-						inner: Box::new(result),
-						span_layer: layer,
-					};
+				match keyword.as_str() {
+					"component" if self.peek_char() == Some(':') => {
+						self.pos += 1;
+						self.skip_whitespace();
+						let components = self.parse_name_list()?;
+						result = Query::WithinComponent {
+							inner: Box::new(result),
+							components,
+						};
+					}
+					"component" => {
+						return Err(QueryError::Parse {
+							position: self.pos,
+							message: "Expected ':' after 'component'".into(),
+						});
+					}
+					"doc" | "document" if self.peek_char() == Some(':') => {
+						self.pos += 1;
+						self.skip_whitespace();
+						let documents = self.parse_name_list()?;
+						result = Query::WithinDocument {
+							inner: Box::new(result),
+							documents,
+						};
+					}
+					_ => {
+						let layer = expand_span_alias(&keyword);
+						result = Query::Within {
+							inner: Box::new(result),
+							span_layer: layer,
+						};
+					}
 				}
 			} else if self.remaining().starts_with('=') && !self.remaining().starts_with("==") {
 				self.pos += 1;
@@ -179,7 +198,7 @@ impl<'a> Parser<'a> {
 		Ok(result)
 	}
 
-	fn parse_component_name(&mut self) -> Result<String> {
+	fn parse_name(&mut self) -> Result<String> {
 		if self.peek_char() == Some('"') {
 			self.pos += 1;
 			let start = self.pos;
@@ -198,6 +217,19 @@ impl<'a> Parser<'a> {
 		} else {
 			self.parse_identifier()
 		}
+	}
+
+	fn parse_name_list(&mut self) -> Result<Vec<String>> {
+		let mut names = vec![self.parse_name()?];
+		loop {
+			self.skip_whitespace();
+			if !self.try_consume(',') {
+				break;
+			}
+			self.skip_whitespace();
+			names.push(self.parse_name()?);
+		}
+		Ok(names)
 	}
 
 	fn parse_sequence(&mut self) -> Result<Query> {
@@ -231,7 +263,11 @@ impl<'a> Parser<'a> {
 		match self.peek_char() {
 			None => true,
 			Some('|') | Some(')') => true,
-			Some('w') => self.remaining().starts_with("within"),
+			Some('w') => {
+				let r = self.remaining();
+				r.starts_with("within")
+					&& r[6..].chars().next().map_or(true, |c| !c.is_alphanumeric() && c != '_')
+			}
 			Some('=') if !self.remaining().starts_with("==") => true,
 			_ => false,
 		}
@@ -254,6 +290,7 @@ impl<'a> Parser<'a> {
 				self.consume(')')?;
 				Ok(inner)
 			}
+			Some(c) if c.is_alphabetic() => self.parse_labeled_atom(),
 			Some(c) => Err(QueryError::Parse {
 				position: self.pos,
 				message: format!("Unexpected character: '{}'", c),
@@ -263,6 +300,34 @@ impl<'a> Parser<'a> {
 				message: "Unexpected end of input".into(),
 			}),
 		}
+	}
+
+	fn parse_labeled_atom(&mut self) -> Result<Query> {
+		let save = self.pos;
+		let name = self.parse_identifier()?;
+
+		if self.peek_char() != Some(':') {
+			self.pos = save;
+			return Err(QueryError::Parse {
+				position: self.pos,
+				message: format!("Unexpected identifier '{}' (did you mean a label like '{}:[...]'?)", name, name),
+			});
+		}
+		self.pos += 1;
+
+		const RESERVED: &[&str] = &["doc", "document", "s", "sent", "sentence", "p", "para", "paragraph", "component"];
+		if RESERVED.contains(&name.as_str()) {
+			return Err(QueryError::Parse {
+				position: save,
+				message: format!("'{}' is reserved and cannot be used as a label name", name),
+			});
+		}
+
+		let inner = self.parse_atom()?;
+		Ok(Query::Capture {
+			name,
+			inner: Box::new(inner),
+		})
 	}
 
 	fn parse_quantifier(&mut self, inner: Query) -> Result<Query> {
@@ -755,8 +820,8 @@ mod tests {
 	fn parse_within_component() {
 		let query = parse(r#"[pos="NOUN"] within component:fr"#).unwrap();
 		match query {
-			Query::WithinComponent { component, .. } => {
-				assert_eq!(component, "fr");
+			Query::WithinComponent { components, .. } => {
+				assert_eq!(components, vec!["fr"]);
 			}
 			_ => panic!("Expected WithinComponent query"),
 		}
@@ -766,8 +831,8 @@ mod tests {
 	fn parse_within_component_quoted() {
 		let query = parse(r#"[pos="NOUN"] within component:"maupassant-fr""#).unwrap();
 		match query {
-			Query::WithinComponent { component, .. } => {
-				assert_eq!(component, "maupassant-fr");
+			Query::WithinComponent { components, .. } => {
+				assert_eq!(components, vec!["maupassant-fr"]);
 			}
 			_ => panic!("Expected WithinComponent query"),
 		}
@@ -791,13 +856,173 @@ mod tests {
 			Query::Project { alignment, inner } => {
 				assert_eq!(alignment, "labse");
 				match *inner {
-					Query::WithinComponent { component, .. } => {
-						assert_eq!(component, "fr");
+					Query::WithinComponent { components, .. } => {
+						assert_eq!(components, vec!["fr"]);
 					}
 					_ => panic!("Expected WithinComponent inside Project"),
 				}
 			}
 			_ => panic!("Expected Project query"),
+		}
+	}
+
+	#[test]
+	fn parse_within_document_named() {
+		let query = parse(r#"[pos="NOUN"] within doc:"la-parure""#).unwrap();
+		match query {
+			Query::WithinDocument { documents, .. } => {
+				assert_eq!(documents, vec!["la-parure"]);
+			}
+			_ => panic!("Expected WithinDocument query"),
+		}
+	}
+
+	#[test]
+	fn parse_within_document_named_full() {
+		let query = parse(r#"[pos="NOUN"] within document:"la-parure""#).unwrap();
+		match query {
+			Query::WithinDocument { documents, .. } => {
+				assert_eq!(documents, vec!["la-parure"]);
+			}
+			_ => panic!("Expected WithinDocument query"),
+		}
+	}
+
+	#[test]
+	fn parse_within_document_plural() {
+		let query = parse(r#"[pos="NOUN"] within doc:"la-parure","boule-de-suif""#).unwrap();
+		match query {
+			Query::WithinDocument { documents, .. } => {
+				assert_eq!(documents, vec!["la-parure", "boule-de-suif"]);
+			}
+			_ => panic!("Expected WithinDocument query"),
+		}
+	}
+
+	#[test]
+	fn parse_within_component_plural() {
+		let query = parse(r#"[pos="NOUN"] within component:fr,en"#).unwrap();
+		match query {
+			Query::WithinComponent { components, .. } => {
+				assert_eq!(components, vec!["fr", "en"]);
+			}
+			_ => panic!("Expected WithinComponent query"),
+		}
+	}
+
+	#[test]
+	fn parse_within_component_plural_quoted() {
+		let query =
+			parse(r#"[pos="NOUN"] within component:"maupassant-fr","maupassant-en""#).unwrap();
+		match query {
+			Query::WithinComponent { components, .. } => {
+				assert_eq!(components, vec!["maupassant-fr", "maupassant-en"]);
+			}
+			_ => panic!("Expected WithinComponent query"),
+		}
+	}
+
+	#[test]
+	fn parse_within_doc_containment_still_works() {
+		let query = parse(r#"[pos="NOUN"] within doc"#).unwrap();
+		match query {
+			Query::Within { span_layer, .. } => {
+				assert_eq!(span_layer, "document");
+			}
+			_ => panic!("Expected Within query"),
+		}
+	}
+
+	#[test]
+	fn parse_within_component_no_colon_fails() {
+		assert!(parse(r#"[pos="NOUN"] within component"#).is_err());
+	}
+
+	#[test]
+	fn parse_label_basic() {
+		let query = parse(r#"a:[pos="ADJ"] [pos="NOUN"]"#).unwrap();
+		match query {
+			Query::Sequence(parts) => {
+				assert_eq!(parts.len(), 2);
+				match &parts[0] {
+					Query::Capture { name, inner } => {
+						assert_eq!(name, "a");
+						assert!(matches!(**inner, Query::Token(_)));
+					}
+					_ => panic!("Expected Capture"),
+				}
+			}
+			_ => panic!("Expected Sequence"),
+		}
+	}
+
+	#[test]
+	fn parse_label_on_group() {
+		let query = parse(r#"x:([pos="ADJ"] | [pos="ADV"])"#).unwrap();
+		match query {
+			Query::Capture { name, inner } => {
+				assert_eq!(name, "x");
+				assert!(matches!(*inner, Query::Or(_)));
+			}
+			_ => panic!("Expected Capture"),
+		}
+	}
+
+	#[test]
+	fn parse_label_with_quantifier() {
+		let query = parse(r#"a:[pos="ADJ"]+ [pos="NOUN"]"#).unwrap();
+		match query {
+			Query::Sequence(parts) => {
+				assert_eq!(parts.len(), 2);
+				match &parts[0] {
+					Query::Repetition { inner, min, max } => {
+						assert_eq!(*min, 1);
+						assert_eq!(*max, None);
+						assert!(matches!(**inner, Query::Capture { .. }));
+					}
+					_ => panic!("Expected Repetition wrapping Capture"),
+				}
+			}
+			_ => panic!("Expected Sequence"),
+		}
+	}
+
+	#[test]
+	fn parse_multiple_labels() {
+		let query = parse(r#"a:[pos="ADJ"] b:[pos="NOUN"]"#).unwrap();
+		match query {
+			Query::Sequence(parts) => {
+				assert_eq!(parts.len(), 2);
+				match &parts[0] {
+					Query::Capture { name, .. } => assert_eq!(name, "a"),
+					_ => panic!("Expected Capture"),
+				}
+				match &parts[1] {
+					Query::Capture { name, .. } => assert_eq!(name, "b"),
+					_ => panic!("Expected Capture"),
+				}
+			}
+			_ => panic!("Expected Sequence"),
+		}
+	}
+
+	#[test]
+	fn parse_label_reserved_word_fails() {
+		assert!(parse(r#"doc:[pos="NOUN"]"#).is_err());
+		assert!(parse(r#"s:[pos="NOUN"]"#).is_err());
+		assert!(parse(r#"component:[pos="NOUN"]"#).is_err());
+		assert!(parse(r#"sentence:[pos="NOUN"]"#).is_err());
+	}
+
+	#[test]
+	fn parse_label_on_quoted_word() {
+		let query = parse(r#"a:"house""#).unwrap();
+		match query {
+			Query::Capture { name, inner } => {
+				assert_eq!(name, "a");
+				assert!(matches!(*inner, Query::Token(_)));
+			}
+			_ => panic!("Expected Capture"),
 		}
 	}
 }

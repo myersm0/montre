@@ -26,6 +26,12 @@ impl Hit {
 	}
 }
 
+#[derive(Debug, Clone)]
+struct ActiveMatch {
+	start: u64,
+	captures: Vec<(String, Span)>,
+}
+
 fn binary_search_span(spans: &[Span], position: u64) -> Option<usize> {
 	if spans.is_empty() {
 		return None;
@@ -289,12 +295,17 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 			Ok(hits)
 		}
 
-		PlanNode::FilterByComponent { inner, component } => {
+		PlanNode::FilterByComponent { inner, components } => {
 			let hits = execute_node(inner, corpus)?;
 
-			let Some(comp_meta) = corpus.component(component) else {
+			let comp_metas: Vec<&ComponentMeta> = components
+				.iter()
+				.filter_map(|name| corpus.component(name))
+				.collect();
+
+			if comp_metas.is_empty() {
 				return Ok(Vec::new());
-			};
+			}
 
 			let Some(doc_spans) = corpus.spans.spans("document") else {
 				return Ok(Vec::new());
@@ -306,8 +317,44 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 					binary_search_span(doc_spans, hit.span.start)
 						.map(|doc_idx| {
 							hit.span.end <= doc_spans[doc_idx].end
-								&& doc_idx >= comp_meta.document_range.0
-								&& doc_idx < comp_meta.document_range.1
+								&& comp_metas.iter().any(|comp| {
+									doc_idx >= comp.document_range.0
+										&& doc_idx < comp.document_range.1
+								})
+						})
+						.unwrap_or(false)
+				})
+				.collect();
+
+			Ok(hits)
+		}
+
+		PlanNode::FilterByDocument { inner, documents } => {
+			let hits = execute_node(inner, corpus)?;
+
+			let Some(doc_spans) = corpus.spans.spans("document") else {
+				return Ok(Vec::new());
+			};
+
+			let matching_indices: HashSet<usize> = corpus
+				.document_names()
+				.iter()
+				.enumerate()
+				.filter(|(_, name)| documents.iter().any(|d| d == name.as_str()))
+				.map(|(idx, _)| idx)
+				.collect();
+
+			if matching_indices.is_empty() {
+				return Ok(Vec::new());
+			}
+
+			let hits = hits
+				.into_iter()
+				.filter(|hit| {
+					binary_search_span(doc_spans, hit.span.start)
+						.map(|doc_idx| {
+							hit.span.end <= doc_spans[doc_idx].end
+								&& matching_indices.contains(&doc_idx)
 						})
 						.unwrap_or(false)
 				})
@@ -417,37 +464,63 @@ fn execute_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<Vec<Hit>>
 	}
 }
 
+fn has_labels(steps: &[SequenceStep]) -> bool {
+	steps.iter().any(|s| s.label.is_some())
+}
+
 fn execute_sequence_in_range(
 	steps: &[SequenceStep],
 	corpus: &Corpus,
 	range_start: u64,
 	range_end: u64,
 ) -> Result<Vec<Hit>> {
-	let active = run_sequence_steps_in_range(steps, corpus, range_start, range_end)?;
+	if has_labels(steps) {
+		let active = run_sequence_steps_labeled(steps, corpus, range_start, range_end)?;
 
-	let mut hits: Vec<Hit> = active
-		.into_iter()
-		.flat_map(|(end, starts)| {
-			starts
-				.into_iter()
-				.filter(move |&start| end > start)
-				.map(move |start| Hit::new(Span::new(start, end)))
-		})
-		.collect();
+		let mut hits: Vec<Hit> = active
+			.into_iter()
+			.flat_map(|(end, matches)| {
+				matches
+					.into_iter()
+					.filter(move |m| end > m.start)
+					.map(move |m| {
+						let mut hit = Hit::new(Span::new(m.start, end));
+						hit.captures = m.captures;
+						hit
+					})
+			})
+			.collect();
 
-	hits.sort_by_key(|h| (h.span.start, h.span.end));
-	Ok(hits)
+		hits.sort_by_key(|h| (h.span.start, h.span.end));
+		Ok(hits)
+	} else {
+		let active = run_sequence_steps_unlabeled(steps, corpus, range_start, range_end)?;
+
+		let mut hits: Vec<Hit> = active
+			.into_iter()
+			.flat_map(|(end, starts)| {
+				starts
+					.into_iter()
+					.filter(move |&start| end > start)
+					.map(move |start| Hit::new(Span::new(start, end)))
+			})
+			.collect();
+
+		hits.sort_by_key(|h| (h.span.start, h.span.end));
+		Ok(hits)
+	}
 }
 
 fn count_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<usize> {
 	let doc_spans = corpus.spans.spans("document");
 
+	// count path never needs captures, always use the fast unlabeled path
 	match doc_spans {
 		Some(spans) if spans.len() > 1 && benefits_from_parallel(steps) => {
 			let counts: Vec<usize> = spans
 				.par_iter()
 				.map(|span| {
-					let active = run_sequence_steps_in_range(
+					let active = run_sequence_steps_unlabeled(
 						steps, corpus, span.start, span.end,
 					)?;
 					Ok(active
@@ -462,7 +535,7 @@ fn count_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<usize> {
 			Ok(counts.into_iter().sum())
 		}
 		_ => {
-			let active = run_sequence_steps_in_range(
+			let active = run_sequence_steps_unlabeled(
 				steps, corpus, 0, corpus.token_count(),
 			)?;
 			Ok(active
@@ -475,17 +548,13 @@ fn count_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<usize> {
 	}
 }
 
-fn run_sequence_steps_in_range(
+fn build_run_indices(
 	steps: &[SequenceStep],
 	corpus: &Corpus,
 	range_start: u64,
 	range_end: u64,
-) -> Result<HashMap<u64, Vec<u64>>> {
-	if steps.is_empty() || range_start >= range_end {
-		return Ok(HashMap::new());
-	}
-
-	let run_indices: Vec<RunIndex> = steps
+) -> Vec<RunIndex> {
+	steps
 		.iter()
 		.map(|step| {
 			if matches!(step.node, PlanNode::ScanAll) {
@@ -498,7 +567,21 @@ fn run_sequence_steps_in_range(
 				RunIndex::from_positions(&positions)
 			}
 		})
-		.collect();
+		.collect()
+}
+
+// Fast path: no labels, no capture tracking. Active set is HashMap<end, Vec<start>>.
+fn run_sequence_steps_unlabeled(
+	steps: &[SequenceStep],
+	corpus: &Corpus,
+	range_start: u64,
+	range_end: u64,
+) -> Result<HashMap<u64, Vec<u64>>> {
+	if steps.is_empty() || range_start >= range_end {
+		return Ok(HashMap::new());
+	}
+
+	let run_indices = build_run_indices(steps, corpus, range_start, range_end);
 
 	let first_step = &steps[0];
 	let first_runs = &run_indices[0];
@@ -552,6 +635,106 @@ fn run_sequence_steps_in_range(
 		for starts in next_active.values_mut() {
 			starts.sort_unstable();
 			starts.dedup();
+		}
+
+		active = next_active;
+	}
+
+	Ok(active)
+}
+
+// Labeled path: tracks captures through ActiveMatch. Only used when at least one
+// step carries a label. The capture Vec cloning is the reason this is kept separate
+// from the unlabeled fast path — on ScanAll-first queries the overhead is ~60%.
+fn run_sequence_steps_labeled(
+	steps: &[SequenceStep],
+	corpus: &Corpus,
+	range_start: u64,
+	range_end: u64,
+) -> Result<HashMap<u64, Vec<ActiveMatch>>> {
+	if steps.is_empty() || range_start >= range_end {
+		return Ok(HashMap::new());
+	}
+
+	let run_indices = build_run_indices(steps, corpus, range_start, range_end);
+
+	let first_step = &steps[0];
+	let first_runs = &run_indices[0];
+
+	let mut active: HashMap<u64, Vec<ActiveMatch>> = HashMap::new();
+
+	for (start, end) in first_runs.spans_for_quantifier(first_step.min, first_step.max) {
+		let captures = match first_step.label {
+			Some(ref label) => vec![(label.clone(), Span::new(start, end))],
+			None => Vec::new(),
+		};
+		active.entry(end).or_default().push(ActiveMatch { start, captures });
+	}
+
+	if first_step.min == 0 && steps.len() > 1 {
+		for run in &run_indices[1].runs {
+			let captures = match first_step.label {
+				Some(ref label) => vec![(label.clone(), Span::new(run.start, run.start))],
+				None => Vec::new(),
+			};
+			active.entry(run.start).or_default().push(ActiveMatch {
+				start: run.start,
+				captures,
+			});
+		}
+	}
+
+	if active.is_empty() {
+		return Ok(HashMap::new());
+	}
+
+	for (step_idx, step) in steps[1..].iter().enumerate() {
+		if active.is_empty() {
+			break;
+		}
+
+		let runs = &run_indices[step_idx + 1];
+		let is_scan_all = matches!(step.node, PlanNode::ScanAll);
+
+		let mut next_active: HashMap<u64, Vec<ActiveMatch>> = HashMap::new();
+
+		for (end_pos, matches) in &active {
+			if step.min == 0 {
+				for m in matches {
+					let mut captures = m.captures.clone();
+					if let Some(ref label) = step.label {
+						captures.push((label.clone(), Span::new(*end_pos, *end_pos)));
+					}
+					next_active.entry(*end_pos).or_default().push(ActiveMatch {
+						start: m.start,
+						captures,
+					});
+				}
+			}
+
+			let continuations = if is_scan_all {
+				spans_for_scan_all(*end_pos, step.min, step.max, range_end)
+			} else {
+				runs.continuations_at(*end_pos, step.min, step.max)
+			};
+
+			for new_end in continuations {
+				for m in matches {
+					let mut captures = m.captures.clone();
+					if let Some(ref label) = step.label {
+						captures.push((label.clone(), Span::new(*end_pos, new_end)));
+					}
+					next_active.entry(new_end).or_default().push(ActiveMatch {
+						start: m.start,
+						captures,
+					});
+				}
+			}
+		}
+
+		for matches in next_active.values_mut() {
+			matches.sort_unstable_by_key(|m| m.start);
+			matches.dedup_by_key(|m| m.start);
 		}
 
 		active = next_active;

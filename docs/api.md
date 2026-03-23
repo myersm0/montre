@@ -12,8 +12,10 @@ let corpus = montre_index::open("path/to/corpus")?;
 corpus.token_count()       // total tokens across all components
 corpus.layers()            // &[String]: ["word", "lemma", "pos", ...]
 corpus.document_names()    // &[String]
-corpus.components()        // &[ComponentMeta]
 corpus.document_at(pos)    // Option<&str>: document name for a position
+corpus.document_index_by_name("la-parure")   // Option<usize>
+corpus.document_indices_by_name(&names)      // Vec<usize>
+corpus.components()        // &[ComponentMeta]
 ```
 
 `Corpus` is immutable after construction, `Send + Sync`, and safe to share across threads.
@@ -62,7 +64,7 @@ pub struct Hit {
     pub span: Span,                      // token position range [start, end)
     pub document_index: u32,             // populated by populate_context
     pub sentence_index: u32,             // populated by populate_context
-    pub captures: Vec<(String, Span)>,   // labeled submatches (Phase 2b)
+    pub captures: Vec<(String, Span)>,   // labeled submatches (populated by labeled queries, e.g. a:[pos="ADJ"])
 }
 ```
 
@@ -248,7 +250,7 @@ BuildError::Alignment(String)
 
 ## C FFI
 
-The `montre-ffi` crate exports 55 `extern "C"` functions across eight modules. All string arguments are `*const c_char` (null-terminated). All returned strings are owned by Rust; copy and free with `montre_string_free`.
+The `montre-ffi` crate exports 57 `extern "C"` functions across eight modules. All string arguments are `*const c_char` (null-terminated). All returned strings are owned by Rust; copy and free with `montre_string_free`.
 
 ### Error handling
 
@@ -259,6 +261,7 @@ const char *montre_last_error(void);      // NULL if no error
 void montre_string_free(char *s);
 void montre_string_array_free(char **arr, uint64_t len);
 void montre_i32_array_free(int32_t *arr, uint64_t len);
+void montre_u32_array_free(uint32_t *arr, uint64_t len);
 void montre_u64_array_free(uint64_t *arr, uint64_t len);
 ```
 
@@ -345,6 +348,10 @@ uint64_t montre_corpus_alignment_edge_count(const void *corpus, uint32_t index);
 char    *montre_corpus_alignment_source_layer(const void *corpus, uint32_t index);
 char    *montre_corpus_alignment_target_layer(const void *corpus, uint32_t index);
 int32_t  montre_corpus_alignment_directed(const void *corpus, uint32_t index);
+
+// Raw edge access: flat array of [src_doc, src_sent, tgt_doc, tgt_sent, ...] quads.
+// out_len receives edge count (array length is out_len * 4). Free with montre_u32_array_free.
+uint32_t *montre_corpus_alignment_edges(const void *corpus, const char *name, uint64_t *out_len);
 
 void *montre_project(
     const void *corpus, const void *source_hits, const char *alignment_name,

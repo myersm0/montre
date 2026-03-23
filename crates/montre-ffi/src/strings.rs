@@ -50,6 +50,15 @@ pub unsafe extern "C" fn montre_i32_array_free(array: *mut i32, len: u64) {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn montre_u32_array_free(array: *mut u32, len: u64) {
+	if array.is_null() || len == 0 {
+		return;
+	}
+	let layout = std::alloc::Layout::array::<u32>(len as usize).unwrap();
+	std::alloc::dealloc(array as *mut u8, layout);
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn montre_u64_array_free(array: *mut u64, len: u64) {
 	if array.is_null() || len == 0 {
 		return;

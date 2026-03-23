@@ -422,6 +422,7 @@ fn multi_component_lifecycle() {
 		assert_eq!(montre_corpus_alignment_count(corpus), 1);
 		let align_name = read_cstr(montre_corpus_alignment_name(corpus, 0));
 		assert_eq!(align_name, "sentence");
+		let align = cstr("sentence");
 
 		let source = read_cstr(montre_corpus_alignment_source(corpus, 0));
 		let target = read_cstr(montre_corpus_alignment_target(corpus, 0));
@@ -441,8 +442,31 @@ fn multi_component_lifecycle() {
 		// invalid alignment index
 		assert_eq!(montre_corpus_alignment_directed(corpus, 99), -1);
 
+		// alignment edge access
+		let mut edge_count: u64 = 0;
+		let edges = montre_corpus_alignment_edges(corpus, align.as_ptr(), &mut edge_count);
+		assert!(!edges.is_null());
+		assert_eq!(edge_count, 2); // 2 sentence pairs
+		// each edge is [src_doc, src_sent, tgt_doc, tgt_sent]
+		let e0_src_doc = *edges.add(0);
+		let e0_src_sent = *edges.add(1);
+		let e0_tgt_doc = *edges.add(2);
+		let e0_tgt_sent = *edges.add(3);
+		// first edge maps sentence 0 → sentence 0
+		assert_eq!(e0_src_sent, 0);
+		assert_eq!(e0_tgt_sent, 0);
+		// src and tgt docs should be 0 (first doc within each component)
+		assert_eq!(e0_src_doc, 0);
+		assert_eq!(e0_tgt_doc, 0);
+		montre_u32_array_free(edges, edge_count * 4);
+
+		// nonexistent alignment returns null
+		let bad_align = cstr("nonexistent");
+		let null_edges = montre_corpus_alignment_edges(corpus, bad_align.as_ptr(), &mut edge_count);
+		assert!(null_edges.is_null());
+		assert_eq!(edge_count, 0);
+
 		// projection: French [lemma="chat"] → English sentence
-		let align = cstr("sentence");
 		let mut unmapped: u64 = 0;
 		let mut no_align: u64 = 0;
 		let mut projected: u64 = 0;

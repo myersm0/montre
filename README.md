@@ -39,8 +39,16 @@ montre query my-corpus/ '[pos="ADJ"] [pos="NOUN"]'
 # Count matches
 montre query my-corpus/ '[pos="ADJ"]+ [pos="NOUN"]' --count-only
 
+# Filter by document or component
+montre query my-corpus/ '[pos="ADJ"] [pos="NOUN"]' --document la-parure
+montre query my-corpus/ '[pos="ADJ"] [pos="NOUN"]' --component fr --document la-parure,boule-de-suif
+
 # Corpus info
 montre info my-corpus/
+
+# List documents
+montre docs my-corpus/
+montre docs my-corpus/ --component maupassant-fr
 ```
 
 ## What is Montre?
@@ -83,6 +91,15 @@ Montre uses a CQL-based query language:
 
 # Component filtering (multi-component corpora)
 [pos="NOUN"] within component:"maupassant-fr"
+[pos="NOUN"] within component:fr,en
+
+# Document filtering
+[pos="ADJ"] [pos="NOUN"] within doc:"la-parure"
+[pos="ADJ"] [pos="NOUN"] within doc:"la-parure","boule-de-suif"
+
+# Labeled captures
+a:[pos="ADJ"] b:[pos="NOUN"]
+a:[pos="ADJ"]+ [pos="NOUN"]
 
 # Alignment projection
 [lemma="maison"] within component:fr =labse=>
@@ -178,7 +195,7 @@ montre-index    Inverted index, forward index, span index, corpus loading
 montre-query    CQL parser, query planner, executor
 montre-build    Corpus construction from CoNLL-U, multi-component builder, streaming forward writer
 montre-cli      Command-line interface
-montre-ffi      C FFI for language bindings (35 exported functions)
+montre-ffi      C FFI for language bindings (57 exported functions)
 montre-py       Python bindings (PyO3, stub)
 ```
 
@@ -188,13 +205,13 @@ See [API.md](API.md) for the full Rust and C FFI reference.
 
 **v0.4.0**
 
-Working: token queries, sequences, quantifiers, alternation, regex, negation, conjunction, `within` constraints, multi-component corpora, sentence-level alignment, alignment projection, morphological feature decomposition, C FFI, Julia bindings, memory-mapped forward and span indexes.
+Working: token queries, sequences, quantifiers, alternation, regex, negation, conjunction, `within` constraints, multi-component corpora, sentence-level alignment, alignment projection, morphological feature decomposition, document-name filtering, labeled captures, C FFI, Julia bindings, memory-mapped forward and span indexes.
 
-New in v0.4: memory-mapped corpus indexes for the forward and span stores (93-96% faster corpus opening, 18× lower query-time memory). Forward index uses bitmap-sparse dictionary-coded layers with variable-width term IDs and a reader-side fast path for fully-present layers. Streaming forward builder reduces build-time peak memory by 4× for large multi-component corpora. Index format version 3 (requires corpus rebuild from v0.3).
+New in v0.4: memory-mapped corpus indexes for the forward and span stores (93-96% faster corpus opening, 18× lower query-time memory). Forward index uses bitmap-sparse dictionary-coded layers with variable-width term IDs and a reader-side fast path for fully-present layers. Streaming forward builder reduces build-time peak memory by 4× for large multi-component corpora. Index format version 3 (requires corpus rebuild from v0.3). Document-name filtering (`within doc:"name"`), plural component/document filters, labeled captures with Option C semantics.
 
 New in v0.3: multithreaded build pipeline and document-parallel query execution via rayon. Parallel corpus deserialization.
 
-Next: labeled captures and global constraints (Phase 2b), statistics commands (`count`, `group`, collocation), additional input formats, Python bindings, TUI.
+Next: global constraints (`:: a.lemma = b.lemma`), statistics commands (`count`, `group`, collocation), additional input formats, Python bindings, REPL, TUI.
 
 ## License
 

@@ -24,7 +24,11 @@ pub enum PlanNode {
 	},
 	FilterByComponent {
 		inner: Box<PlanNode>,
-		component: String,
+		components: Vec<String>,
+	},
+	FilterByDocument {
+		inner: Box<PlanNode>,
+		documents: Vec<String>,
 	},
 	ProjectAlignment {
 		inner: Box<PlanNode>,
@@ -40,6 +44,7 @@ pub struct SequenceStep {
 	pub node: PlanNode,
 	pub min: u32,
 	pub max: Option<u32>,
+	pub label: Option<String>,
 }
 
 impl SequenceStep {
@@ -48,11 +53,12 @@ impl SequenceStep {
 			node,
 			min: 1,
 			max: Some(1),
+			label: None,
 		}
 	}
 
 	pub fn repeated(node: PlanNode, min: u32, max: Option<u32>) -> Self {
-		Self { node, min, max }
+		Self { node, min, max, label: None }
 	}
 }
 
@@ -66,6 +72,13 @@ pub fn plan(query: &Query) -> Result<QueryPlan> {
 	Ok(QueryPlan { root })
 }
 
+fn extract_label(query: &Query) -> (Option<String>, &Query) {
+	match query {
+		Query::Capture { name, inner } => (Some(name.clone()), inner),
+		_ => (None, query),
+	}
+}
+
 fn plan_node(query: &Query) -> Result<PlanNode> {
 	match query {
 		Query::Token(pattern) => plan_token(pattern),
@@ -75,12 +88,24 @@ fn plan_node(query: &Query) -> Result<PlanNode> {
 			for q in parts {
 				match q {
 					Query::Repetition { inner, min, max } => {
-						let inner_plan = plan_node(inner)?;
-						steps.push(SequenceStep::repeated(inner_plan, *min, *max));
+						let (label, actual_inner) = extract_label(inner);
+						let inner_plan = plan_node(actual_inner)?;
+						steps.push(SequenceStep {
+							node: inner_plan,
+							min: *min,
+							max: *max,
+							label,
+						});
 					}
 					_ => {
-						let node = plan_node(q)?;
-						steps.push(SequenceStep::once(node));
+						let (label, actual) = extract_label(q);
+						let node = plan_node(actual)?;
+						steps.push(SequenceStep {
+							node,
+							min: 1,
+							max: Some(1),
+							label,
+						});
 					}
 				}
 			}
@@ -88,9 +113,15 @@ fn plan_node(query: &Query) -> Result<PlanNode> {
 		}
 
 		Query::Repetition { inner, min, max } => {
-			let inner_plan = plan_node(inner)?;
+			let (label, actual_inner) = extract_label(inner);
+			let inner_plan = plan_node(actual_inner)?;
 			Ok(PlanNode::SequenceScan {
-				steps: vec![SequenceStep::repeated(inner_plan, *min, *max)],
+				steps: vec![SequenceStep {
+					node: inner_plan,
+					min: *min,
+					max: *max,
+					label,
+				}],
 			})
 		}
 
@@ -115,15 +146,31 @@ fn plan_node(query: &Query) -> Result<PlanNode> {
 			})
 		}
 
-		Query::Capture { inner, .. } => {
-			plan_node(inner)
+		Query::Capture { name, inner } => {
+			let inner_plan = plan_node(inner)?;
+			Ok(PlanNode::SequenceScan {
+				steps: vec![SequenceStep {
+					node: inner_plan,
+					min: 1,
+					max: Some(1),
+					label: Some(name.clone()),
+				}],
+			})
 		}
 
-		Query::WithinComponent { inner, component } => {
+		Query::WithinComponent { inner, components } => {
 			let inner_plan = plan_node(inner)?;
 			Ok(PlanNode::FilterByComponent {
 				inner: Box::new(inner_plan),
-				component: component.clone(),
+				components: components.clone(),
+			})
+		}
+
+		Query::WithinDocument { inner, documents } => {
+			let inner_plan = plan_node(inner)?;
+			Ok(PlanNode::FilterByDocument {
+				inner: Box::new(inner_plan),
+				documents: documents.clone(),
 			})
 		}
 
