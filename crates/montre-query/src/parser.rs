@@ -263,7 +263,11 @@ impl<'a> Parser<'a> {
 		match self.peek_char() {
 			None => true,
 			Some('|') | Some(')') => true,
-			Some('w') => self.remaining().starts_with("within"),
+			Some('w') => {
+				let r = self.remaining();
+				r.starts_with("within")
+					&& r[6..].chars().next().map_or(true, |c| !c.is_alphanumeric() && c != '_')
+			}
 			Some('=') if !self.remaining().starts_with("==") => true,
 			_ => false,
 		}
@@ -286,6 +290,7 @@ impl<'a> Parser<'a> {
 				self.consume(')')?;
 				Ok(inner)
 			}
+			Some(c) if c.is_alphabetic() => self.parse_labeled_atom(),
 			Some(c) => Err(QueryError::Parse {
 				position: self.pos,
 				message: format!("Unexpected character: '{}'", c),
@@ -295,6 +300,34 @@ impl<'a> Parser<'a> {
 				message: "Unexpected end of input".into(),
 			}),
 		}
+	}
+
+	fn parse_labeled_atom(&mut self) -> Result<Query> {
+		let save = self.pos;
+		let name = self.parse_identifier()?;
+
+		if self.peek_char() != Some(':') {
+			self.pos = save;
+			return Err(QueryError::Parse {
+				position: self.pos,
+				message: format!("Unexpected identifier '{}' (did you mean a label like '{}:[...]'?)", name, name),
+			});
+		}
+		self.pos += 1;
+
+		const RESERVED: &[&str] = &["doc", "document", "s", "sent", "sentence", "p", "para", "paragraph", "component"];
+		if RESERVED.contains(&name.as_str()) {
+			return Err(QueryError::Parse {
+				position: save,
+				message: format!("'{}' is reserved and cannot be used as a label name", name),
+			});
+		}
+
+		let inner = self.parse_atom()?;
+		Ok(Query::Capture {
+			name,
+			inner: Box::new(inner),
+		})
 	}
 
 	fn parse_quantifier(&mut self, inner: Query) -> Result<Query> {
@@ -903,5 +936,93 @@ mod tests {
 	#[test]
 	fn parse_within_component_no_colon_fails() {
 		assert!(parse(r#"[pos="NOUN"] within component"#).is_err());
+	}
+
+	#[test]
+	fn parse_label_basic() {
+		let query = parse(r#"a:[pos="ADJ"] [pos="NOUN"]"#).unwrap();
+		match query {
+			Query::Sequence(parts) => {
+				assert_eq!(parts.len(), 2);
+				match &parts[0] {
+					Query::Capture { name, inner } => {
+						assert_eq!(name, "a");
+						assert!(matches!(**inner, Query::Token(_)));
+					}
+					_ => panic!("Expected Capture"),
+				}
+			}
+			_ => panic!("Expected Sequence"),
+		}
+	}
+
+	#[test]
+	fn parse_label_on_group() {
+		let query = parse(r#"x:([pos="ADJ"] | [pos="ADV"])"#).unwrap();
+		match query {
+			Query::Capture { name, inner } => {
+				assert_eq!(name, "x");
+				assert!(matches!(*inner, Query::Or(_)));
+			}
+			_ => panic!("Expected Capture"),
+		}
+	}
+
+	#[test]
+	fn parse_label_with_quantifier() {
+		let query = parse(r#"a:[pos="ADJ"]+ [pos="NOUN"]"#).unwrap();
+		match query {
+			Query::Sequence(parts) => {
+				assert_eq!(parts.len(), 2);
+				match &parts[0] {
+					Query::Repetition { inner, min, max } => {
+						assert_eq!(*min, 1);
+						assert_eq!(*max, None);
+						assert!(matches!(**inner, Query::Capture { .. }));
+					}
+					_ => panic!("Expected Repetition wrapping Capture"),
+				}
+			}
+			_ => panic!("Expected Sequence"),
+		}
+	}
+
+	#[test]
+	fn parse_multiple_labels() {
+		let query = parse(r#"a:[pos="ADJ"] b:[pos="NOUN"]"#).unwrap();
+		match query {
+			Query::Sequence(parts) => {
+				assert_eq!(parts.len(), 2);
+				match &parts[0] {
+					Query::Capture { name, .. } => assert_eq!(name, "a"),
+					_ => panic!("Expected Capture"),
+				}
+				match &parts[1] {
+					Query::Capture { name, .. } => assert_eq!(name, "b"),
+					_ => panic!("Expected Capture"),
+				}
+			}
+			_ => panic!("Expected Sequence"),
+		}
+	}
+
+	#[test]
+	fn parse_label_reserved_word_fails() {
+		assert!(parse(r#"doc:[pos="NOUN"]"#).is_err());
+		assert!(parse(r#"s:[pos="NOUN"]"#).is_err());
+		assert!(parse(r#"component:[pos="NOUN"]"#).is_err());
+		assert!(parse(r#"sentence:[pos="NOUN"]"#).is_err());
+	}
+
+	#[test]
+	fn parse_label_on_quoted_word() {
+		let query = parse(r#"a:"house""#).unwrap();
+		match query {
+			Query::Capture { name, inner } => {
+				assert_eq!(name, "a");
+				assert!(matches!(*inner, Query::Token(_)));
+			}
+			_ => panic!("Expected Capture"),
+		}
 	}
 }
