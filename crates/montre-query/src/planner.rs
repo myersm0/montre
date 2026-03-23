@@ -24,7 +24,11 @@ pub enum PlanNode {
 	},
 	FilterByComponent {
 		inner: Box<PlanNode>,
-		component: String,
+		components: Vec<String>,
+	},
+	FilterByDocument {
+		inner: Box<PlanNode>,
+		documents: Vec<String>,
 	},
 	ProjectAlignment {
 		inner: Box<PlanNode>,
@@ -119,11 +123,19 @@ fn plan_node(query: &Query) -> Result<PlanNode> {
 			plan_node(inner)
 		}
 
-		Query::WithinComponent { inner, component } => {
+		Query::WithinComponent { inner, components } => {
 			let inner_plan = plan_node(inner)?;
 			Ok(PlanNode::FilterByComponent {
 				inner: Box::new(inner_plan),
-				component: component.clone(),
+				components: components.clone(),
+			})
+		}
+
+		Query::WithinDocument { inner, documents } => {
+			let inner_plan = plan_node(inner)?;
+			Ok(PlanNode::FilterByDocument {
+				inner: Box::new(inner_plan),
+				documents: documents.clone(),
 			})
 		}
 

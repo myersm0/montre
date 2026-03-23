@@ -289,12 +289,17 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 			Ok(hits)
 		}
 
-		PlanNode::FilterByComponent { inner, component } => {
+		PlanNode::FilterByComponent { inner, components } => {
 			let hits = execute_node(inner, corpus)?;
 
-			let Some(comp_meta) = corpus.component(component) else {
+			let comp_metas: Vec<&ComponentMeta> = components
+				.iter()
+				.filter_map(|name| corpus.component(name))
+				.collect();
+
+			if comp_metas.is_empty() {
 				return Ok(Vec::new());
-			};
+			}
 
 			let Some(doc_spans) = corpus.spans.spans("document") else {
 				return Ok(Vec::new());
@@ -306,8 +311,44 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 					binary_search_span(doc_spans, hit.span.start)
 						.map(|doc_idx| {
 							hit.span.end <= doc_spans[doc_idx].end
-								&& doc_idx >= comp_meta.document_range.0
-								&& doc_idx < comp_meta.document_range.1
+								&& comp_metas.iter().any(|comp| {
+									doc_idx >= comp.document_range.0
+										&& doc_idx < comp.document_range.1
+								})
+						})
+						.unwrap_or(false)
+				})
+				.collect();
+
+			Ok(hits)
+		}
+
+		PlanNode::FilterByDocument { inner, documents } => {
+			let hits = execute_node(inner, corpus)?;
+
+			let Some(doc_spans) = corpus.spans.spans("document") else {
+				return Ok(Vec::new());
+			};
+
+			let matching_indices: HashSet<usize> = corpus
+				.document_names()
+				.iter()
+				.enumerate()
+				.filter(|(_, name)| documents.iter().any(|d| d == name.as_str()))
+				.map(|(idx, _)| idx)
+				.collect();
+
+			if matching_indices.is_empty() {
+				return Ok(Vec::new());
+			}
+
+			let hits = hits
+				.into_iter()
+				.filter(|hit| {
+					binary_search_span(doc_spans, hit.span.start)
+						.map(|doc_idx| {
+							hit.span.end <= doc_spans[doc_idx].end
+								&& matching_indices.contains(&doc_idx)
 						})
 						.unwrap_or(false)
 				})

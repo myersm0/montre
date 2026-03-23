@@ -147,7 +147,7 @@ impl<'a> Parser<'a> {
 					let component = self.parse_component_name()?;
 					result = Query::WithinComponent {
 						inner: Box::new(result),
-						component,
+						components: vec![component],
 					};
 				} else {
 					let layer = self.parse_identifier()?;
@@ -755,8 +755,8 @@ mod tests {
 	fn parse_within_component() {
 		let query = parse(r#"[pos="NOUN"] within component:fr"#).unwrap();
 		match query {
-			Query::WithinComponent { component, .. } => {
-				assert_eq!(component, "fr");
+			Query::WithinComponent { components, .. } => {
+				assert_eq!(components, vec!["fr"]);
 			}
 			_ => panic!("Expected WithinComponent query"),
 		}
@@ -766,8 +766,8 @@ mod tests {
 	fn parse_within_component_quoted() {
 		let query = parse(r#"[pos="NOUN"] within component:"maupassant-fr""#).unwrap();
 		match query {
-			Query::WithinComponent { component, .. } => {
-				assert_eq!(component, "maupassant-fr");
+			Query::WithinComponent { components, .. } => {
+				assert_eq!(components, vec!["maupassant-fr"]);
 			}
 			_ => panic!("Expected WithinComponent query"),
 		}
@@ -791,8 +791,8 @@ mod tests {
 			Query::Project { alignment, inner } => {
 				assert_eq!(alignment, "labse");
 				match *inner {
-					Query::WithinComponent { component, .. } => {
-						assert_eq!(component, "fr");
+					Query::WithinComponent { components, .. } => {
+						assert_eq!(components, vec!["fr"]);
 					}
 					_ => panic!("Expected WithinComponent inside Project"),
 				}
