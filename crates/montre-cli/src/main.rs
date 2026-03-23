@@ -54,10 +54,23 @@ enum Commands {
 
 		#[arg(long)]
 		count_only: bool,
+
+		#[arg(long, value_delimiter = ',', help = "Restrict to named component(s)")]
+		component: Vec<String>,
+
+		#[arg(long, value_delimiter = ',', help = "Restrict to named document(s)")]
+		document: Vec<String>,
 	},
 
 	Info {
 		corpus: PathBuf,
+	},
+
+	Docs {
+		corpus: PathBuf,
+
+		#[arg(long, help = "Filter by component")]
+		component: Option<String>,
 	},
 }
 
@@ -98,8 +111,11 @@ fn main() -> Result<()> {
 			query,
 			limit,
 			count_only,
-		} => cmd_query(corpus, query, limit, count_only),
+			component,
+			document,
+		} => cmd_query(corpus, query, limit, count_only, component, document),
 		Commands::Info { corpus } => cmd_info(corpus),
+		Commands::Docs { corpus, component } => cmd_docs(corpus, component),
 	}
 }
 
@@ -177,15 +193,36 @@ fn cmd_build(
 	Ok(())
 }
 
-fn cmd_query(corpus_path: PathBuf, query: String, limit: usize, count_only: bool) -> Result<()> {
+fn cmd_query(
+	corpus_path: PathBuf,
+	query: String,
+	limit: usize,
+	count_only: bool,
+	components: Vec<String>,
+	documents: Vec<String>,
+) -> Result<()> {
 	use std::time::Instant;
 
 	let corpus = montre_index::open(&corpus_path)
 		.with_context(|| format!("Failed to open corpus: {}", corpus_path.display()))?;
 
+	let mut full_query = query.clone();
+	if !components.is_empty() {
+		let names: Vec<String> = components.iter().map(|c| format!("\"{}\"", c)).collect();
+		full_query = format!("{} within component:{}", full_query, names.join(","));
+	}
+	if !documents.is_empty() {
+		let resolved: Vec<String> = documents
+			.iter()
+			.map(|d| resolve_document_name(d, corpus.document_names()))
+			.collect::<Result<_>>()?;
+		let names: Vec<String> = resolved.iter().map(|d| format!("\"{}\"", d)).collect();
+		full_query = format!("{} within doc:{}", full_query, names.join(","));
+	}
+
 	let parse_start = Instant::now();
-	let parsed =
-		montre_query::parse(&query).with_context(|| format!("Failed to parse query: {}", query))?;
+	let parsed = montre_query::parse(&full_query)
+		.with_context(|| format!("Failed to parse query: {}", full_query))?;
 	let parse_time = parse_start.elapsed();
 
 	let plan_start = Instant::now();
@@ -287,6 +324,66 @@ fn cmd_info(corpus_path: PathBuf) -> Result<()> {
 				align.source_layer,
 				align.edge_count
 			);
+		}
+	}
+
+	Ok(())
+}
+
+fn resolve_document_name(input: &str, doc_names: &[String]) -> Result<String> {
+	if doc_names.iter().any(|n| n == input) {
+		return Ok(input.to_string());
+	}
+
+	let stem_matches: Vec<&String> = doc_names
+		.iter()
+		.filter(|n| {
+			std::path::Path::new(n.as_str())
+				.file_stem()
+				.and_then(|s| s.to_str())
+				== Some(input)
+		})
+		.collect();
+
+	match stem_matches.len() {
+		1 => Ok(stem_matches[0].clone()),
+		0 => anyhow::bail!(
+			"Document '{}' not found. Use `montre docs` to list available documents.",
+			input
+		),
+		_ => anyhow::bail!(
+			"Document '{}' is ambiguous, matches: {}",
+			input,
+			stem_matches.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+		),
+	}
+}
+
+fn cmd_docs(corpus_path: PathBuf, component: Option<String>) -> Result<()> {
+	let corpus = montre_index::open(&corpus_path)
+		.with_context(|| format!("Failed to open corpus: {}", corpus_path.display()))?;
+
+	let doc_names = corpus.document_names();
+
+	let range = match component {
+		Some(ref name) => {
+			let comp = corpus.component(name).with_context(|| {
+				let available: Vec<&str> =
+					corpus.components().iter().map(|c| c.name.as_str()).collect();
+				format!(
+					"Component '{}' not found. Available: {}",
+					name,
+					available.join(", ")
+				)
+			})?;
+			comp.document_range.0..comp.document_range.1
+		}
+		None => 0..doc_names.len(),
+	};
+
+	for idx in range {
+		if let Some(name) = doc_names.get(idx) {
+			println!("{:>4}  {}", idx, name);
 		}
 	}
 
