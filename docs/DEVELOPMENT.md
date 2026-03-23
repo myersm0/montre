@@ -363,7 +363,7 @@ CQL string
 [pos="DET"] [pos="NOUN"]    # sequence
 ```
 
-### Phase 2a: Query language MVP
+### Phase 2a: Query language MVP ✓
 
 ```cql
 [pos!="PUNCT"]              # negation
@@ -375,13 +375,18 @@ CQL string
 [pos="NOUN"] | [pos="VERB"] # alternation
 [pos="DET"] [pos="ADJ"]* [pos="NOUN"]  within s    # sentence constraint
 [lemma="house"] within doc                          # document constraint
+[pos="NOUN"] within doc:"la-parure"                 # named document filter
+[pos="NOUN"] within doc:"la-parure","boule-de-suif" # plural document filter
+[pos="NOUN"] within component:fr,en                 # plural component filter
 ```
 
 ### Phase 2b: Labels, global constraints, named query results
 
 ```cql
-# Labels mark positions
+# Labels mark positions (implemented)
 a:[pos="ADJ"] [pos="NOUN"]
+a:[pos="ADJ"]+ [pos="NOUN"]        # captures full quantified span
+a:[pos="ADJ"] b:[pos="NOUN"]       # multiple labels
 
 # Global constraints express relationships
 a:[word=".*"] []{0,5} b:[] :: a.word = b.word     # repetition
@@ -456,6 +461,8 @@ Note: Not all constructs will be implemented simultaneously. Early versions prio
 - [x] Quantifiers (`+`, `*`, `?`, `{n,m}`)
 - [x] Alternation (`|`)
 - [x] `within s` / `within doc` constraints
+- [x] `within doc:"name"` / `within doc:"a","b"` (named document filter, plural)
+- [x] `within component:a,b` (plural component filter)
 - [x] N-token sequences (arbitrary length)
 - [x] Run-based quantifier execution (see below)
 
@@ -465,7 +472,7 @@ Quantifiers are implemented as *run-based span generators*, not per-position exp
 
 1. **Run detection**: Convert positions to maximal contiguous runs in O(k) where k = matching tokens
 2. **Span generation**: First step generates spans from runs; subsequent steps probe runs at boundary positions
-3. **Boundary tracking**: Active set stored as `HashMap<end, Vec<start>>` to avoid O(N²) blowup
+3. **Boundary tracking**: Active set stored as `HashMap<end, Vec<start>>` (unlabeled fast path) or `HashMap<end, Vec<ActiveMatch>>` (labeled path with capture tracking) to avoid O(N²) blowup
 4. **Epsilon handling**: `min=0` propagates spans unchanged (no zero-length span materialization)
 
 This model:
@@ -486,47 +493,40 @@ Performance on test corpus (Maupassant sub-corpus of stories from Isosceles corp
 
 ### Phase 2b: Labels & global constraints
 
-- [ ] Label syntax (`a:[pos="ADJ"]`)
+- [x] Label syntax (`a:[pos="ADJ"]`)
+- [x] Capture tracking in executor (Option C: full quantified span)
+- [x] Reserved-word check for label names
 - [ ] Global constraints (`:: a.lemma = b.lemma`)
 - [ ] `distance(a, b)` function
-- [ ] Named Query Results
-- [ ] Set operations (subset, difference, intersection)
-- [ ] `expand` to sentence/document
+- [ ] Named Query Results (deferred to REPL/bindings layer)
+- [ ] Set operations (subset, difference, intersection) (deferred to REPL/bindings layer)
+- [ ] `expand` to sentence/document (deferred to REPL/bindings layer)
 
 **Implementation plan**
 
 Phase 2b introduces *labeled captures* and *global constraints*. This is a significant extension because constraints operate over the full match, not just local token properties.
 
-**Step 1: Labels in AST and parser**
+**Step 1: Labels in AST and parser** ✓
 
-Extend `Query` AST:
-```rust
-Query::Labeled {
-    name: String,
-    inner: Box<Query>,
-}
-```
+The existing `Query::Capture { name, inner }` AST variant is used. Parser recognizes `a:[...]` syntax in `parse_labeled_atom`. Labels can appear on any query element, including groups and quantified expressions. Reserved words (`doc`, `document`, `s`, `sent`, `sentence`, `p`, `para`, `paragraph`, `component`) cannot be used as label names.
 
-Parser recognizes `a:[...]` syntax. Labels can appear on any query element, including groups and quantified expressions.
+**Step 2: Captures in Hit** ✓
 
-**Step 2: Captures in Hit**
+`Hit.captures: Vec<(String, Span)>` is populated by the executor during sequence execution.
 
-The `Hit` struct already has `captures: Vec<(String, Span)>`. The executor must populate this when labeled nodes match.
+**Step 3: Planner changes** ✓
 
-**Step 3: Planner changes**
+`SequenceStep` carries `label: Option<String>`. The `extract_label` helper peels `Capture` wrappers from AST nodes and places the label on the corresponding step. Labels inside quantified expressions (`a:[pos="ADJ"]+`) are correctly extracted from `Repetition { inner: Capture { ... } }`.
 
-Labels are transparent to the planner — they wrap nodes without changing execution strategy. The planner passes label information through to the executor.
+**Step 4: Executor capture tracking** ✓
 
-**Step 4: Executor capture tracking**
+Capture semantics: **Option C** — labels on quantified expressions capture the full quantified span. `a:[pos="ADJ"]+` produces one capture `("a", span)` covering the entire adjective run. Attribute access on multi-token captures (for future global constraints) refers to the first token.
 
-During sequence execution, track which labeled subexpressions matched at which spans. After a complete match, record `(label_name, span)` pairs in the Hit.
+Two execution paths to avoid performance regression:
+- `run_sequence_steps_unlabeled`: original `HashMap<u64, Vec<u64>>` fast path, used when no labels are present
+- `run_sequence_steps_labeled`: `HashMap<u64, Vec<ActiveMatch>>` path with capture tracking, used only when `has_labels(steps)` is true
 
-Key complexity: a label inside a quantified expression (e.g., `a:[pos="ADJ"]+`) may capture multiple spans. Decide semantics:
-- Option A: Capture first occurrence only
-- Option B: Capture all occurrences (changes capture type to `Vec<Span>`)
-- Option C: Capture the full quantified span
-
-Recommend Option C for simplicity — the label captures the entire quantified match, not individual repetitions.
+The bifurcation avoids ~60% regression on ScanAll-first queries caused by `ActiveMatch`/`Vec` clone overhead. Shared `build_run_indices` helper eliminates code duplication for run index construction.
 
 **Step 5: Global constraints**
 

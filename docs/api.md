@@ -12,8 +12,10 @@ let corpus = montre_index::open("path/to/corpus")?;
 corpus.token_count()       // total tokens across all components
 corpus.layers()            // &[String]: ["word", "lemma", "pos", ...]
 corpus.document_names()    // &[String]
-corpus.components()        // &[ComponentMeta]
 corpus.document_at(pos)    // Option<&str>: document name for a position
+corpus.document_index_by_name("la-parure")   // Option<usize>
+corpus.document_indices_by_name(&names)      // Vec<usize>
+corpus.components()        // &[ComponentMeta]
 ```
 
 `Corpus` is immutable after construction, `Send + Sync`, and safe to share across threads.
@@ -62,7 +64,7 @@ pub struct Hit {
     pub span: Span,                      // token position range [start, end)
     pub document_index: u32,             // populated by populate_context
     pub sentence_index: u32,             // populated by populate_context
-    pub captures: Vec<(String, Span)>,   // labeled submatches (Phase 2b)
+    pub captures: Vec<(String, Span)>,   // labeled submatches (populated by labeled queries, e.g. a:[pos="ADJ"])
 }
 ```
 
