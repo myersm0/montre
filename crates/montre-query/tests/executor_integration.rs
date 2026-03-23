@@ -50,6 +50,24 @@ fn query_count(corpus: &Corpus, query_str: &str) -> usize {
 	results.len()
 }
 
+fn query_captures(corpus: &Corpus, query_str: &str) -> Vec<((u64, u64), Vec<(String, (u64, u64))>)> {
+	let parsed = montre_query::parse(query_str).unwrap();
+	let plan = montre_query::planner::plan(&parsed).unwrap();
+	let results = montre_query::executor::execute(&plan, corpus).unwrap();
+	results
+		.hits()
+		.iter()
+		.map(|h| {
+			let caps: Vec<(String, (u64, u64))> = h
+				.captures
+				.iter()
+				.map(|(name, span)| (name.clone(), (span.start, span.end)))
+				.collect();
+			((h.span.start, h.span.end), caps)
+		})
+		.collect()
+}
+
 // ---- Test corpus ----
 // Sentence 1 (pos 0-9):  The/DET quick/ADJ brown/ADJ fox/NOUN jumps/VERB over/ADP the/DET lazy/ADJ dog/NOUN ./PUNCT
 // Sentence 2 (pos 10-15): Dogs/NOUN and/CCONJ cats/NOUN are/AUX pets/NOUN ./PUNCT
@@ -814,4 +832,81 @@ fn decomposed_feats_not_present_without_flag() {
 	let layers = corpus.layers();
 	assert!(layers.contains(&"feats".to_string()));
 	assert!(!layers.contains(&"feats.Gender".to_string()));
+}
+
+// ===========================================================================
+// Captures
+// ===========================================================================
+
+#[test]
+fn capture_no_labels() {
+	let corpus = build_corpus(SAMPLE);
+	let results = query_captures(&corpus, r#"[pos="ADJ"] [pos="NOUN"]"#);
+	assert_eq!(results.len(), 2);
+	assert!(results[0].1.is_empty());
+	assert!(results[1].1.is_empty());
+}
+
+#[test]
+fn capture_single_label() {
+	let corpus = build_corpus(SAMPLE);
+	// a:brown fox, a:lazy dog
+	let results = query_captures(&corpus, r#"a:[pos="ADJ"] [pos="NOUN"]"#);
+	assert_eq!(results.len(), 2);
+
+	assert_eq!(results[0].0, (2, 4));
+	assert_eq!(results[0].1, vec![("a".into(), (2, 3))]);
+
+	assert_eq!(results[1].0, (7, 9));
+	assert_eq!(results[1].1, vec![("a".into(), (7, 8))]);
+}
+
+#[test]
+fn capture_two_labels() {
+	let corpus = build_corpus(SAMPLE);
+	let results = query_captures(&corpus, r#"a:[pos="ADJ"] b:[pos="NOUN"]"#);
+	assert_eq!(results.len(), 2);
+
+	assert_eq!(results[0].0, (2, 4));
+	assert_eq!(results[0].1, vec![("a".into(), (2, 3)), ("b".into(), (3, 4))]);
+
+	assert_eq!(results[1].0, (7, 9));
+	assert_eq!(results[1].1, vec![("a".into(), (7, 8)), ("b".into(), (8, 9))]);
+}
+
+#[test]
+fn capture_quantified_label() {
+	let corpus = build_corpus(SAMPLE);
+	// a:[pos="ADJ"]+ captures the full adjective run
+	let results = query_captures(&corpus, r#"a:[pos="ADJ"]+ [pos="NOUN"]"#);
+	assert_eq!(results.len(), 3);
+
+	// "quick brown" fox
+	assert_eq!(results[0].0, (1, 4));
+	assert_eq!(results[0].1, vec![("a".into(), (1, 3))]);
+
+	// "brown" fox
+	assert_eq!(results[1].0, (2, 4));
+	assert_eq!(results[1].1, vec![("a".into(), (2, 3))]);
+
+	// "lazy" dog
+	assert_eq!(results[2].0, (7, 9));
+	assert_eq!(results[2].1, vec![("a".into(), (7, 8))]);
+}
+
+#[test]
+fn capture_single_token_query() {
+	let corpus = build_corpus(SAMPLE);
+	// bare labeled query, not in a sequence
+	let results = query_captures(&corpus, r#"a:[pos="ADJ"]"#);
+	assert_eq!(results.len(), 3);
+
+	assert_eq!(results[0].0, (1, 2));
+	assert_eq!(results[0].1, vec![("a".into(), (1, 2))]);
+
+	assert_eq!(results[1].0, (2, 3));
+	assert_eq!(results[1].1, vec![("a".into(), (2, 3))]);
+
+	assert_eq!(results[2].0, (7, 8));
+	assert_eq!(results[2].1, vec![("a".into(), (7, 8))]);
 }
