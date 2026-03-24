@@ -158,6 +158,22 @@ fn count_node(node: &PlanNode, corpus: &Corpus) -> Result<usize> {
 
 		PlanNode::SequenceScan { steps } => count_sequence(steps, corpus),
 
+		PlanNode::Difference { base, subtract } => {
+			match (base.as_ref(), subtract.as_ref()) {
+				(PlanNode::ScanAll, PlanNode::ScanLiteral { layer, value }) => {
+					let total = corpus.token_count() as usize;
+					let excluded = corpus.inverted.get(layer, value)
+						.map(|b| b.len() as usize)
+						.unwrap_or(0);
+					Ok(total - excluded)
+				}
+				_ => {
+					let hits = execute_node(node, corpus)?;
+					Ok(hits.len())
+				}
+			}
+		}
+
 		_ => {
 			let hits = execute_node(node, corpus)?;
 			Ok(hits.len())
