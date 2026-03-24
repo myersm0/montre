@@ -2,12 +2,18 @@
 [![CI](https://github.com/myersm0/montre/actions/workflows/ci.yml/badge.svg)](https://github.com/myersm0/montre/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/myersm0/montre)](https://github.com/myersm0/montre/releases/latest)
 
-A modern, embeddable query engine for corpus linguistics.
+A modern, embeddable corpus query engine with first-class support for aligned corpora.
 
-> **montre** *(/mɔ̃tʁ/):* to show; to reveal; to make visible (French)
-> *From Latin* **monstrare** "to point out, indicate."
+> **montre** *(/mɔ̃tʁ/):* to show; to reveal; to make visible (French)  
+> *From Latin* **monstrare** “to point out, indicate.”
 
-Montre is particularly suited for aligned literary corpora and multi-edition corpora.
+No server, external services, or prerequisites.
+
+A corpus is a self-contained directory with its own data, indexes, and (optionally) alignments. Build it in one line from your annotation files, or from a TOML manifest describing multiple components.
+
+Designed to be used from the CLI or embedded directly in Julia or Python.
+
+---
 
 ## Install
 
@@ -15,52 +21,32 @@ Montre is particularly suited for aligned literary corpora and multi-edition cor
 curl -fsSL https://raw.githubusercontent.com/myersm0/montre/main/install.sh | sh
 ```
 
-Or build from source:
-
-```bash
-cargo build --release
-```
 
 ## Quick start
-
 ```bash
-# Build a corpus from CoNLL-U files
+# Build a corpus from a directory of CoNLL-U files:
 montre build -i data/maupassant/ -o my-corpus/
-
-# Build a multi-component corpus with alignments
-montre build -m corpus.toml -o my-corpus/
-
-# Build with morphological feature decomposition
-montre build -i data/ -o my-corpus/ --decompose-feats
 
 # Query
 montre query my-corpus/ '[pos="ADJ"] [pos="NOUN"]'
 
-# Count matches
+# Count only (fast path)
 montre query my-corpus/ '[pos="ADJ"]+ [pos="NOUN"]' --count-only
 
-# Filter by document or component
+# Filter
 montre query my-corpus/ '[pos="ADJ"] [pos="NOUN"]' --document la-parure
-montre query my-corpus/ '[pos="ADJ"] [pos="NOUN"]' --component fr --document la-parure,boule-de-suif
+montre query my-corpus/ '[pos="ADJ"] [pos="NOUN"]' --component fr
 
-# Corpus info
+# Inspect
 montre info my-corpus/
-
-# List documents
 montre docs my-corpus/
-montre docs my-corpus/ --component maupassant-fr
 ```
-
-## What is Montre?
-
-Montre is a **local-first corpus query engine**. No server, no daemon, no service dependencies.
-
-A Montre corpus is a portable artifact: a single directory containing indexed text, annotations, and (optionally) alignments. You can open it from the CLI or from Julia and Python as a library.
 
 ## Query language
 
-Montre uses a CQL-based query language:
+Montre uses a CQL-based language, extended with labels, constraints, and alignment-aware operations.
 
+### Core patterns
 ```cql
 # Token queries
 [pos="NOUN"]
@@ -73,55 +59,69 @@ Montre uses a CQL-based query language:
 [pos="DET"] [pos="ADJ"]* [pos="NOUN"]
 
 # Quantifiers
-[pos="ADJ"]+                    # one or more
-[pos="ADJ"]*                    # zero or more
-[pos="ADJ"]?                    # optional
-[pos="ADJ"]{2,4}                # 2 to 4
+[pos="ADJ"]+
+[pos="ADJ"]*
+[pos="ADJ"]?
+[pos="ADJ"]{2,4}
 
 # Alternation
 ([pos="ADJ"] | [pos="ADV"])+ [pos="NOUN"]
+```
 
-# Structural constraints
+### Structural constraints
+```cql
 [pos="DET"] [pos="NOUN"] within s
 [lemma="chat"] within doc
+```
 
-# Morphological features (requires --decompose-feats at build time)
+### Morphological features
+
+Requires using the flag `--decompose-feats` at build time.
+
+```cql
 [pos="NOUN" & feats.Number="Plur"]
 [feats.Gender="Masc" & feats.Tense="Past"]
-
-# Component filtering (multi-component corpora)
-[pos="NOUN"] within component:"maupassant-fr"
-[pos="NOUN"] within component:fr,en
-
-# Document filtering
-[pos="ADJ"] [pos="NOUN"] within doc:"la-parure"
-[pos="ADJ"] [pos="NOUN"] within doc:"la-parure","boule-de-suif"
-
-# Labeled captures
-a:[pos="ADJ"] b:[pos="NOUN"]
-a:[pos="ADJ"]+ [pos="NOUN"]
-
-# Global constraints
-a:[pos="NOUN"] []* b:[pos="NOUN"] :: a.lemma = b.lemma
-a:[pos="ADJ"] b:[pos="NOUN"] :: a.pos != b.pos
-a:[] []{0,20} b:[] :: distance(a,b) >= 5
-a:[pos="ADJ"] b:[pos="NOUN"] :: a.lemma != b.lemma & distance(a,b) >= 3
-
-# Alignment projection
-[lemma="maison"] within component:fr =labse=>
 ```
+
+### Component and document filtering
+```cql
+[pos="NOUN"] within component:fr
+[pos="ADJ"] [pos="NOUN"] within doc:"la-parure","boule-de-suif"
+```
+
+### Labeled captures and global constraints
+```cql
+a:[pos="NOUN"] []* b:[pos="NOUN"] :: a.lemma = b.lemma
+a:[pos="ADJ"] b:[pos="NOUN"] :: a.lemma != b.lemma
+a:[] []{0,20} b:[] :: distance(a,b) >= 5
+```
+
+Constraints are evaluated over full matches using labeled spans.
 
 ## Parallel corpus support
 
-Montre has first-class support for multi-component corpora with alignments:
+Montre was designed from the ground up specifically for parallel corpora.
 
-- Multiple components (languages, editions, translations) in one corpus
+Montre treats a parallel corpus as a single object with multiple ***components*** and explicit alignment relations, rather than as separate corpora joined at query time.
+
+### Key features
+- Multiple components (languages, editions, translations)
 - Named alignments at any span level (sentence, paragraph, stanza)
-- Multiple competing alignments from different models (LaBSE, vecalign, manual)
-- Alignment projection: query one language, project hits to another
+- Multiple competing alignment sets (LaBSE, vecalign, manual)
+- Alignment projection between components
 
-Define a multi-component corpus with a TOML manifest:
+### Example
+```cql
+# Query French, project to English
+[lemma="maison"] within component:fr =labse=>
+```
 
+This enables:
+- tracing translations across languages
+- detecting omissions or expansions
+- comparing editions or variants
+
+### Build a multi-component corpus
 ```toml
 [corpus]
 name = "isosceles"
@@ -143,9 +143,15 @@ source_layer = "sentence"
 target_layer = "sentence"
 ```
 
+```bash
+montre build -m corpus.toml -o my-corpus/
+```
+
 ## Performance
 
-On a 1.5M token corpus (Maupassant French/English), Apple M-series:
+Montre is competitive with established corpus engines while prioritizing structural flexibility and embeddability.
+
+On a 1.5M token corpus (Maupassant French/English, Apple M4 Max):
 
 | Query | Matches | Time |
 |---|---|---|
@@ -155,36 +161,29 @@ On a 1.5M token corpus (Maupassant French/English), Apple M-series:
 | `([pos="ADJ"] \| [pos="ADV"])+ [pos="NOUN"]` | 33,444 | 27ms |
 | `([pos="ADJ"] \| [pos="DET"])+ [pos="NOUN"]` | 198,735 | 71ms |
 
-Quantifiers use a run-based execution model that scales with matching tokens, not corpus size. The `--count-only` fast path avoids Hit allocation entirely for simple queries (22ns for `[pos="NOUN"]`). Queries with global constraints (`::`) cannot use the count fast path — hits must be materialized for constraint evaluation.
-
-Corpus loading uses memory-mapped indexes for the forward and span stores. On the 1.5M token Maupassant corpus, `Corpus::open` completes in ~20ms with a peak RSS of 94MB (compared to 285ms and 1.75GB before mmap). On a combined 11.5M token corpus (Maupassant + ELTeC-fra, 25 annotation layers), open time is ~116ms.
-
-For a two-component ELTeC corpus (~20M tokens, 25 layers), build-time peak RSS is ~8GB.
+### Key properties:
+- Quantifiers use a run-based execution model (scales with matches, not corpus size)
+- `--count-only` avoids hit allocation entirely (nanosecond-scale for simple queries)
+- Memory-mapped indexes reduce load time and memory footprint by an order of magnitude
 
 ## Bindings
+Montre exposes a C FFI for embedding in other languages.
 
-Montre ships a C FFI (`libmontre_ffi`) for embedding in other languages.
-
-### Julia
-
-**[Montre.jl](https://github.com/myersm0/Montre.jl)** provides a native Julia interface:
-
+### Julia (almost complete)
+**[Montre.jl](https://github.com/myersm0/Montre.jl)**
 ```julia
 using Montre
 
 corpus = open_corpus("./my-corpus")
 hits = query(corpus, "[pos=\"ADJ\"] [pos=\"NOUN\"]")
+
 for line in concordance(corpus, hits)
     println(line)
 end
 ```
 
-Features include concordancing, alignment projection, component-scoped queries, bulk token extraction, and a Tables.jl interface for interoperability with DataFrames and other tabular data packages.
-
-### Python
-
-Python bindings via PyO3 are stubbed but not yet feature-complete.
-
+### Python (early)
+Bindings via PyO3 are in progress.
 ```python
 import montre
 
@@ -193,33 +192,13 @@ for hit in corpus.query('[pos="DET"] [pos="NOUN"]'):
     print(hit.start, hit.end)
 ```
 
-## Architecture
-
-```
-montre-core     Primitives: Span, Token, Position, Value
-montre-index    Inverted index, forward index, span index, corpus loading
-montre-query    CQL parser, query planner, executor
-montre-build    Corpus construction from CoNLL-U, multi-component builder, streaming forward writer
-montre-cli      Command-line interface
-montre-ffi      C FFI for language bindings (57 exported functions)
-montre-py       Python bindings (PyO3, stub)
-```
-
-See [API.md](API.md) for the full Rust and C FFI reference.
-
-## Status
-
-**v0.5.0**
-
-Working: token queries, sequences, quantifiers, alternation, regex, negation, conjunction, `within` constraints, multi-component corpora, sentence-level alignment, alignment projection, morphological feature decomposition, document-name filtering, labeled captures, global constraints, C FFI, Julia bindings, memory-mapped forward and span indexes.
-
-New in v0.5: global constraints (`:: a.lemma = b.lemma`, `:: a.pos != b.pos`, `:: distance(a,b) >= 5`). Constraints are post-match predicates over labeled captures, evaluated as a distinct executor stage (`GlobalConstraintFilter`). Supports equality, inequality, and directional distance comparisons. Duplicate label names rejected at parse time. Unknown label references caught at plan time (`QueryError::UnknownLabel`). Attribute access on multi-token captures uses first-token semantics. The `--count-only` fast path is not available for constrained queries (hits must be materialized for constraint evaluation).
-
-New in v0.4: memory-mapped corpus indexes for the forward and span stores (93-96% faster corpus opening, 18× lower query-time memory). Forward index uses bitmap-sparse dictionary-coded layers with variable-width term IDs and a reader-side fast path for fully-present layers. Streaming forward builder reduces build-time peak memory by 4× for large multi-component corpora. Index format version 3 (requires corpus rebuild from v0.3). Document-name filtering (`within doc:"name"`), plural component/document filters, labeled captures with Option C semantics.
-
-New in v0.3: multithreaded build pipeline and document-parallel query execution via rayon. Parallel corpus deserialization.
-
-Next: statistics commands (`count`, `group`, collocation), additional input formats, Python bindings, REPL, TUI.
+## Roadmap
+Coming soon:
+- Statistics: count, group, collocation
+- Python bindings (feature-complete, pip install)
+- REPL (persistent corpus session)
+- TUI for interactive exploration
+- Support for additional input formats (VRT, Stanza JSON, TEI)
 
 ## License
 
