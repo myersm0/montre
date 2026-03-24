@@ -245,3 +245,46 @@ pub unsafe extern "C" fn montre_corpus_inverted_values(
 	*out_len = count as u64;
 	array
 }
+
+/// Returns the document index for a given name, or -1 if not found.
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_document_index_by_name(
+	corpus: *const Corpus,
+	name: *const c_char,
+) -> i64 {
+	if corpus.is_null() {
+		return -1;
+	}
+	let c = &*corpus;
+	let Some(name_str) = borrow_cstr(name) else {
+		return -1;
+	};
+	match c.document_index_by_name(name_str) {
+		Some(idx) => idx as i64,
+		None => -1,
+	}
+}
+
+/// Returns the number of positions matching a layer/value pair
+/// via inverted index bitmap cardinality. Returns -1 if not found.
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_inverted_count(
+	corpus: *const Corpus,
+	layer: *const c_char,
+	value: *const c_char,
+) -> i64 {
+	if corpus.is_null() {
+		return -1;
+	}
+	let c = &*corpus;
+	let Some(layer_str) = borrow_cstr(layer) else {
+		return -1;
+	};
+	let Some(value_str) = borrow_cstr(value) else {
+		return -1;
+	};
+	match c.inverted.get(layer_str, value_str) {
+		Some(bitmap) => bitmap.len() as i64,
+		None => -1,
+	}
+}

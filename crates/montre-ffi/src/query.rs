@@ -6,7 +6,7 @@ use montre_query::executor;
 
 use crate::HitList;
 use crate::error::{set_error, clear_error};
-use crate::strings::borrow_cstr;
+use crate::strings::{borrow_cstr, to_cstring};
 
 #[no_mangle]
 pub unsafe extern "C" fn montre_query(
@@ -424,4 +424,73 @@ fn binary_search_span_index(spans: &[montre_core::Span], position: u64) -> u32 {
 	}
 
 	0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn montre_hit_capture_count(hits: *const HitList, index: u64) -> u32 {
+	if hits.is_null() {
+		return 0;
+	}
+	let hitlist = &*hits;
+	match hitlist.hits.get(index as usize) {
+		Some(hit) => hit.captures.len() as u32,
+		None => 0,
+	}
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn montre_hit_capture_name(
+	hits: *const HitList,
+	hit_index: u64,
+	capture_index: u32,
+) -> *mut c_char {
+	if hits.is_null() {
+		return ptr::null_mut();
+	}
+	let hitlist = &*hits;
+	let Some(hit) = hitlist.hits.get(hit_index as usize) else {
+		return ptr::null_mut();
+	};
+	match hit.captures.get(capture_index as usize) {
+		Some((name, _)) => to_cstring(name),
+		None => ptr::null_mut(),
+	}
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn montre_hit_capture_start(
+	hits: *const HitList,
+	hit_index: u64,
+	capture_index: u32,
+) -> u64 {
+	if hits.is_null() {
+		return 0;
+	}
+	let hitlist = &*hits;
+	let Some(hit) = hitlist.hits.get(hit_index as usize) else {
+		return 0;
+	};
+	match hit.captures.get(capture_index as usize) {
+		Some((_, span)) => span.start,
+		None => 0,
+	}
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn montre_hit_capture_end(
+	hits: *const HitList,
+	hit_index: u64,
+	capture_index: u32,
+) -> u64 {
+	if hits.is_null() {
+		return 0;
+	}
+	let hitlist = &*hits;
+	let Some(hit) = hitlist.hits.get(hit_index as usize) else {
+		return 0;
+	};
+	match hit.captures.get(capture_index as usize) {
+		Some((_, span)) => span.end,
+		None => 0,
+	}
 }
