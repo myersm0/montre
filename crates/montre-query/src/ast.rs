@@ -32,6 +32,10 @@ pub enum Query {
 		inner: Box<Query>,
 		alignment: String,
 	},
+	Constrained {
+		inner: Box<Query>,
+		constraints: Vec<GlobalConstraint>,
+	},
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -79,6 +83,34 @@ pub enum ConstraintOp {
 pub enum ConstraintValue {
 	Literal(String),
 	Regex(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum GlobalConstraint {
+	Eq { left: LabelAttr, right: LabelAttr },
+	Ne { left: LabelAttr, right: LabelAttr },
+	Distance {
+		left: String,
+		right: String,
+		op: CmpOp,
+		value: u32,
+	},
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LabelAttr {
+	pub label: String,
+	pub attr: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CmpOp {
+	Ge,
+	Gt,
+	Le,
+	Lt,
+	Eq,
+	Ne,
 }
 
 impl Query {

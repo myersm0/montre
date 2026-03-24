@@ -19,6 +19,9 @@ pub enum QueryError {
 	#[error("Unknown layer: {0}")]
 	UnknownLayer(String),
 
+	#[error("Unknown label: {0}")]
+	UnknownLabel(String),
+
 	#[error("Execution error: {0}")]
 	Execution(String),
 }

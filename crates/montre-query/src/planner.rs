@@ -1,5 +1,7 @@
-use crate::ast::{ConstraintOp, ConstraintValue, Query, TokenPattern};
-use crate::Result;
+use std::collections::HashSet;
+
+use crate::ast::{ConstraintOp, ConstraintValue, GlobalConstraint, Query, TokenPattern};
+use crate::{QueryError, Result};
 
 #[derive(Debug, Clone)]
 pub enum PlanNode {
@@ -36,6 +38,10 @@ pub enum PlanNode {
 	},
 	SequenceScan {
 		steps: Vec<SequenceStep>,
+	},
+	GlobalConstraintFilter {
+		inner: Box<PlanNode>,
+		constraints: Vec<GlobalConstraint>,
 	},
 }
 
@@ -181,7 +187,71 @@ fn plan_node(query: &Query) -> Result<PlanNode> {
 				alignment: alignment.clone(),
 			})
 		}
+
+		Query::Constrained { inner, constraints } => {
+			validate_constraint_labels(inner, constraints)?;
+			let inner_plan = plan_node(inner)?;
+			Ok(PlanNode::GlobalConstraintFilter {
+				inner: Box::new(inner_plan),
+				constraints: constraints.clone(),
+			})
+		}
 	}
+}
+
+fn collect_declared_labels(query: &Query, out: &mut HashSet<String>) {
+	match query {
+		Query::Capture { name, inner } => {
+			out.insert(name.clone());
+			collect_declared_labels(inner, out);
+		}
+		Query::Sequence(parts) => {
+			for part in parts {
+				collect_declared_labels(part, out);
+			}
+		}
+		Query::Repetition { inner, .. } => collect_declared_labels(inner, out),
+		Query::Or(alts) => {
+			for alt in alts {
+				collect_declared_labels(alt, out);
+			}
+		}
+		Query::Within { inner, .. }
+		| Query::Containing { inner, .. }
+		| Query::WithinComponent { inner, .. }
+		| Query::WithinDocument { inner, .. }
+		| Query::Project { inner, .. }
+		| Query::Constrained { inner, .. } => collect_declared_labels(inner, out),
+		Query::Token(_) => {}
+	}
+}
+
+fn referenced_labels(constraints: &[GlobalConstraint]) -> HashSet<String> {
+	let mut out = HashSet::new();
+	for c in constraints {
+		match c {
+			GlobalConstraint::Eq { left, right } | GlobalConstraint::Ne { left, right } => {
+				out.insert(left.label.clone());
+				out.insert(right.label.clone());
+			}
+			GlobalConstraint::Distance { left, right, .. } => {
+				out.insert(left.clone());
+				out.insert(right.clone());
+			}
+		}
+	}
+	out
+}
+
+fn validate_constraint_labels(inner: &Query, constraints: &[GlobalConstraint]) -> Result<()> {
+	let mut declared = HashSet::new();
+	collect_declared_labels(inner, &mut declared);
+	for label in referenced_labels(constraints) {
+		if !declared.contains(&label) {
+			return Err(QueryError::UnknownLabel(label));
+		}
+	}
+	Ok(())
 }
 
 fn plan_token(pattern: &TokenPattern) -> Result<PlanNode> {

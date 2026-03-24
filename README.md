@@ -101,6 +101,12 @@ Montre uses a CQL-based query language:
 a:[pos="ADJ"] b:[pos="NOUN"]
 a:[pos="ADJ"]+ [pos="NOUN"]
 
+# Global constraints
+a:[pos="NOUN"] []* b:[pos="NOUN"] :: a.lemma = b.lemma
+a:[pos="ADJ"] b:[pos="NOUN"] :: a.pos != b.pos
+a:[] []{0,20} b:[] :: distance(a,b) >= 5
+a:[pos="ADJ"] b:[pos="NOUN"] :: a.lemma != b.lemma & distance(a,b) >= 3
+
 # Alignment projection
 [lemma="maison"] within component:fr =labse=>
 ```
@@ -149,7 +155,7 @@ On a 1.5M token corpus (Maupassant French/English), Apple M-series:
 | `([pos="ADJ"] \| [pos="ADV"])+ [pos="NOUN"]` | 33,444 | 27ms |
 | `([pos="ADJ"] \| [pos="DET"])+ [pos="NOUN"]` | 198,735 | 71ms |
 
-Quantifiers use a run-based execution model that scales with matching tokens, not corpus size. The `--count-only` fast path avoids Hit allocation entirely for simple queries (22ns for `[pos="NOUN"]`).
+Quantifiers use a run-based execution model that scales with matching tokens, not corpus size. The `--count-only` fast path avoids Hit allocation entirely for simple queries (22ns for `[pos="NOUN"]`). Queries with global constraints (`::`) cannot use the count fast path — hits must be materialized for constraint evaluation.
 
 Corpus loading uses memory-mapped indexes for the forward and span stores. On the 1.5M token Maupassant corpus, `Corpus::open` completes in ~20ms with a peak RSS of 94MB (compared to 285ms and 1.75GB before mmap). On a combined 11.5M token corpus (Maupassant + ELTeC-fra, 25 annotation layers), open time is ~116ms.
 
@@ -203,15 +209,17 @@ See [API.md](API.md) for the full Rust and C FFI reference.
 
 ## Status
 
-**v0.4.0**
+**v0.5.0**
 
-Working: token queries, sequences, quantifiers, alternation, regex, negation, conjunction, `within` constraints, multi-component corpora, sentence-level alignment, alignment projection, morphological feature decomposition, document-name filtering, labeled captures, C FFI, Julia bindings, memory-mapped forward and span indexes.
+Working: token queries, sequences, quantifiers, alternation, regex, negation, conjunction, `within` constraints, multi-component corpora, sentence-level alignment, alignment projection, morphological feature decomposition, document-name filtering, labeled captures, global constraints, C FFI, Julia bindings, memory-mapped forward and span indexes.
+
+New in v0.5: global constraints (`:: a.lemma = b.lemma`, `:: a.pos != b.pos`, `:: distance(a,b) >= 5`). Constraints are post-match predicates over labeled captures, evaluated as a distinct executor stage (`GlobalConstraintFilter`). Supports equality, inequality, and directional distance comparisons. Duplicate label names rejected at parse time. Unknown label references caught at plan time (`QueryError::UnknownLabel`). Attribute access on multi-token captures uses first-token semantics. The `--count-only` fast path is not available for constrained queries (hits must be materialized for constraint evaluation).
 
 New in v0.4: memory-mapped corpus indexes for the forward and span stores (93-96% faster corpus opening, 18× lower query-time memory). Forward index uses bitmap-sparse dictionary-coded layers with variable-width term IDs and a reader-side fast path for fully-present layers. Streaming forward builder reduces build-time peak memory by 4× for large multi-component corpora. Index format version 3 (requires corpus rebuild from v0.3). Document-name filtering (`within doc:"name"`), plural component/document filters, labeled captures with Option C semantics.
 
 New in v0.3: multithreaded build pipeline and document-parallel query execution via rayon. Parallel corpus deserialization.
 
-Next: global constraints (`:: a.lemma = b.lemma`), statistics commands (`count`, `group`, collocation), additional input formats, Python bindings, REPL, TUI.
+Next: statistics commands (`count`, `group`, collocation), additional input formats, Python bindings, REPL, TUI.
 
 ## License
 
