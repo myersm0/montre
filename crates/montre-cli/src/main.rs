@@ -6,7 +6,7 @@ use tracing_subscriber::EnvFilter;
 
 use montre_build::builder::CorpusBuilder;
 use montre_build::MultiCorpusBuilder;
-use montre_index::ForwardIndex;
+use montre_index::{Corpus, ForwardIndex, InvertedIndex, SpanIndex};
 
 #[derive(Parser)]
 #[command(name = "montre")]
@@ -62,15 +62,56 @@ enum Commands {
 		document: Vec<String>,
 	},
 
+	/// Count matches for a CQL query
+	Count {
+		corpus: PathBuf,
+
+		query: String,
+
+		#[arg(long, value_delimiter = ',', help = "Restrict to named component(s)")]
+		component: Vec<String>,
+
+		#[arg(long, value_delimiter = ',', help = "Restrict to named document(s)")]
+		document: Vec<String>,
+
+		#[arg(long, help = "Group counts by document")]
+		by_document: bool,
+
+		#[arg(long, help = "Group counts by component")]
+		by_component: bool,
+	},
+
 	Info {
 		corpus: PathBuf,
 	},
 
+	/// List documents in the corpus
 	Docs {
 		corpus: PathBuf,
 
 		#[arg(long, help = "Filter by component")]
 		component: Option<String>,
+	},
+
+	/// List annotation layers in the corpus
+	Layers {
+		corpus: PathBuf,
+	},
+
+	/// List vocabulary for a layer, sorted by frequency
+	Vocab {
+		corpus: PathBuf,
+
+		layer: String,
+
+		#[arg(long, default_value = "100", help = "Number of entries to show (default 100)")]
+		top: usize,
+
+		#[arg(long, help = "Show all entries (overrides --top)")]
+		all: bool,
+
+		#[arg(long, value_delimiter = ',', help = "Restrict to named component(s)")]
+		component: Vec<String>,
 	},
 }
 
@@ -114,8 +155,24 @@ fn main() -> Result<()> {
 			component,
 			document,
 		} => cmd_query(corpus, query, limit, count_only, component, document),
+		Commands::Count {
+			corpus,
+			query,
+			component,
+			document,
+			by_document,
+			by_component,
+		} => cmd_count(corpus, query, component, document, by_document, by_component),
 		Commands::Info { corpus } => cmd_info(corpus),
 		Commands::Docs { corpus, component } => cmd_docs(corpus, component),
+		Commands::Layers { corpus } => cmd_layers(corpus),
+		Commands::Vocab {
+			corpus,
+			layer,
+			top,
+			all,
+			component,
+		} => cmd_vocab(corpus, layer, top, all, component),
 	}
 }
 
@@ -193,6 +250,63 @@ fn cmd_build(
 	Ok(())
 }
 
+fn component_name_for_document(corpus: &Corpus, doc_index: usize) -> &str {
+	corpus
+		.component_for_document(doc_index)
+		.map(|c| c.name.as_str())
+		.unwrap_or_else(|| corpus.name())
+}
+
+fn build_full_query(
+	query: &str,
+	components: &[String],
+	documents: &[String],
+	corpus: &Corpus,
+) -> Result<String> {
+	let mut full_query = query.to_string();
+	if !components.is_empty() && !corpus.components().is_empty() {
+		let names: Vec<String> = components.iter().map(|c| format!("\"{}\"", c)).collect();
+		full_query = format!("{} within component:{}", full_query, names.join(","));
+	}
+	if !documents.is_empty() {
+		let resolved: Vec<String> = documents
+			.iter()
+			.map(|d| resolve_document_name(d, corpus.document_names()))
+			.collect::<Result<_>>()?;
+		warn_document_collision(&resolved, corpus, components.is_empty());
+		let names: Vec<String> = resolved.iter().map(|d| format!("\"{}\"", d)).collect();
+		full_query = format!("{} within doc:{}", full_query, names.join(","));
+	}
+	Ok(full_query)
+}
+
+fn warn_document_collision(
+	resolved_names: &[String],
+	corpus: &Corpus,
+	no_component_filter: bool,
+) {
+	if !no_component_filter || !corpus.is_multi_component() {
+		return;
+	}
+	for name in resolved_names {
+		let indices = corpus.document_indices_by_name(&[name.clone()]);
+		if indices.len() > 1 {
+			let comp_names: Vec<&str> = indices
+				.iter()
+				.filter_map(|&idx| {
+					corpus.component_for_document(idx).map(|c| c.name.as_str())
+				})
+				.collect();
+			eprintln!(
+				"warning: document name '{}' matches {} documents across components {}; use --component to disambiguate",
+				name,
+				indices.len(),
+				comp_names.join(", "),
+			);
+		}
+	}
+}
+
 fn cmd_query(
 	corpus_path: PathBuf,
 	query: String,
@@ -206,19 +320,7 @@ fn cmd_query(
 	let corpus = montre_index::open(&corpus_path)
 		.with_context(|| format!("Failed to open corpus: {}", corpus_path.display()))?;
 
-	let mut full_query = query.clone();
-	if !components.is_empty() {
-		let names: Vec<String> = components.iter().map(|c| format!("\"{}\"", c)).collect();
-		full_query = format!("{} within component:{}", full_query, names.join(","));
-	}
-	if !documents.is_empty() {
-		let resolved: Vec<String> = documents
-			.iter()
-			.map(|d| resolve_document_name(d, corpus.document_names()))
-			.collect::<Result<_>>()?;
-		let names: Vec<String> = resolved.iter().map(|d| format!("\"{}\"", d)).collect();
-		full_query = format!("{} within doc:{}", full_query, names.join(","));
-	}
+	let full_query = build_full_query(&query, &components, &documents, &corpus)?;
 
 	let parse_start = Instant::now();
 	let parsed = montre_query::parse(&full_query)
@@ -286,6 +388,127 @@ fn cmd_query(
 			matched.join(" "),
 			right.join(" ")
 		);
+	}
+
+	Ok(())
+}
+
+fn cmd_count(
+	corpus_path: PathBuf,
+	query: String,
+	components: Vec<String>,
+	documents: Vec<String>,
+	by_document: bool,
+	by_component: bool,
+) -> Result<()> {
+	let corpus = montre_index::open(&corpus_path)
+		.with_context(|| format!("Failed to open corpus: {}", corpus_path.display()))?;
+
+	if by_document {
+		return cmd_count_by_document(&corpus, &query, &components, &documents);
+	}
+	if by_component {
+		return cmd_count_by_component(&corpus, &query, &components, &documents);
+	}
+
+	let full_query = build_full_query(&query, &components, &documents, &corpus)?;
+	let parsed = montre_query::parse(&full_query)
+		.with_context(|| format!("Failed to parse query: {}", full_query))?;
+	let plan = montre_query::planner::plan(&parsed).with_context(|| "Failed to plan query")?;
+	let total = montre_query::executor::execute_count(&plan, &corpus)
+		.with_context(|| "Failed to execute query")?;
+	println!("{}", total);
+	Ok(())
+}
+
+fn cmd_count_by_document(
+	corpus: &Corpus,
+	query: &str,
+	components: &[String],
+	documents: &[String],
+) -> Result<()> {
+	let full_query = build_full_query(query, components, documents, corpus)?;
+	let parsed = montre_query::parse(&full_query)
+		.with_context(|| format!("Failed to parse query: {}", full_query))?;
+	let plan = montre_query::planner::plan(&parsed).with_context(|| "Failed to plan query")?;
+	let mut results = montre_query::executor::execute(&plan, corpus)
+		.with_context(|| "Failed to execute query")?;
+
+	results.populate_context(corpus);
+
+	let doc_names = corpus.document_names();
+	let mut counts: Vec<usize> = vec![0; doc_names.len()];
+	for hit in results.hits() {
+		let idx = hit.document_index as usize;
+		if idx < counts.len() {
+			counts[idx] += 1;
+		}
+	}
+
+	let doc_indices: Vec<usize> = if documents.is_empty() {
+		(0..doc_names.len()).collect()
+	} else {
+		let resolved: Vec<String> = documents
+			.iter()
+			.map(|d| resolve_document_name(d, doc_names))
+			.collect::<Result<_>>()?;
+		corpus.document_indices_by_name(&resolved)
+	};
+
+	for idx in doc_indices {
+		let comp_name = component_name_for_document(corpus, idx);
+		if !components.is_empty() && !components.iter().any(|c| c == comp_name) {
+			continue;
+		}
+		println!("{}\t{}\t{}", comp_name, &doc_names[idx], counts[idx]);
+	}
+
+	Ok(())
+}
+
+fn cmd_count_by_component(
+	corpus: &Corpus,
+	query: &str,
+	components: &[String],
+	documents: &[String],
+) -> Result<()> {
+	let comp_list: Vec<(&str, (usize, usize))> = if corpus.components().is_empty() {
+		vec![(corpus.name(), (0, corpus.document_names().len()))]
+	} else {
+		corpus
+			.components()
+			.iter()
+			.map(|c| (c.name.as_str(), c.document_range))
+			.collect()
+	};
+
+	for (comp_name, _range) in &comp_list {
+		if !components.is_empty() && !components.iter().any(|c| c == comp_name) {
+			continue;
+		}
+
+		let mut full = if corpus.components().is_empty() {
+			query.to_string()
+		} else {
+			format!("{} within component:\"{}\"", query, comp_name)
+		};
+		if !documents.is_empty() {
+			let resolved: Vec<String> = documents
+				.iter()
+				.map(|d| resolve_document_name(d, corpus.document_names()))
+				.collect::<Result<_>>()?;
+			let names: Vec<String> = resolved.iter().map(|d| format!("\"{}\"", d)).collect();
+			full = format!("{} within doc:{}", full, names.join(","));
+		}
+
+		let parsed = montre_query::parse(&full)
+			.with_context(|| format!("Failed to parse query: {}", full))?;
+		let plan =
+			montre_query::planner::plan(&parsed).with_context(|| "Failed to plan query")?;
+		let count = montre_query::executor::execute_count(&plan, corpus)
+			.with_context(|| "Failed to execute query")?;
+
+		println!("{}\t{}", comp_name, count);
 	}
 
 	Ok(())
@@ -383,8 +606,76 @@ fn cmd_docs(corpus_path: PathBuf, component: Option<String>) -> Result<()> {
 
 	for idx in range {
 		if let Some(name) = doc_names.get(idx) {
-			println!("{:>4}  {}", idx, name);
+			let comp_name = component_name_for_document(&corpus, idx);
+			println!("{}\t{}", comp_name, name);
 		}
+	}
+
+	Ok(())
+}
+
+fn cmd_layers(corpus_path: PathBuf) -> Result<()> {
+	let corpus = montre_index::open(&corpus_path)
+		.with_context(|| format!("Failed to open corpus: {}", corpus_path.display()))?;
+
+	for layer in corpus.layers() {
+		println!("{}", layer);
+	}
+
+	Ok(())
+}
+
+fn cmd_vocab(
+	corpus_path: PathBuf,
+	layer: String,
+	top: usize,
+	all: bool,
+	components: Vec<String>,
+) -> Result<()> {
+	let corpus = montre_index::open(&corpus_path)
+		.with_context(|| format!("Failed to open corpus: {}", corpus_path.display()))?;
+
+	let values = corpus
+		.inverted
+		.values(&layer)
+		.with_context(|| format!("Layer '{}' not found", layer))?;
+
+	let position_mask = if !components.is_empty() {
+		let mut mask = roaring::RoaringBitmap::new();
+		for comp_name in &components {
+			let comp = corpus.component(comp_name).with_context(|| {
+				format!("Component '{}' not found", comp_name)
+			})?;
+			let doc_spans = corpus.spans.spans("document").unwrap_or(&[]);
+			for doc_idx in comp.document_range.0..comp.document_range.1 {
+				if let Some(span) = doc_spans.get(doc_idx) {
+					mask.insert_range(span.start as u32..span.end as u32);
+				}
+			}
+		}
+		Some(mask)
+	} else {
+		None
+	};
+
+	let mut entries: Vec<(&str, u64)> = values
+		.iter()
+		.map(|value| {
+			let count = match (&position_mask, corpus.inverted.get(&layer, value)) {
+				(Some(mask), Some(bitmap)) => (bitmap & mask).len(),
+				(None, Some(bitmap)) => bitmap.len(),
+				_ => 0,
+			};
+			(*value, count)
+		})
+		.collect();
+
+	entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+
+	let limit = if all { entries.len() } else { top.min(entries.len()) };
+
+	for (value, count) in &entries[..limit] {
+		println!("{}\t{}", value, count);
 	}
 
 	Ok(())

@@ -1,5 +1,5 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use montre_index::Corpus;
+use montre_index::{Corpus, InvertedIndex};
 use montre_query::executor;
 use montre_query::planner::{self, QueryPlan};
 use std::hint::black_box;
@@ -146,6 +146,59 @@ fn bench_alignment_projection(c: &mut Criterion) {
 	group.finish();
 }
 
+fn bench_vocab(c: &mut Criterion) {
+	let corpus = open_corpus();
+	let layers = ["pos", "lemma", "word"];
+	let mut group = c.benchmark_group("vocab");
+	for layer in &layers {
+		group.bench_function(*layer, |b| {
+			b.iter(|| {
+				let values = corpus.inverted.values(black_box(layer)).unwrap();
+				let mut entries: Vec<(&str, u64)> = values
+					.iter()
+					.map(|value| {
+						let count = corpus
+							.inverted
+							.get(layer, value)
+							.map(|bm| bm.len())
+							.unwrap_or(0);
+						(*value, count)
+					})
+					.collect();
+				entries.sort_by(|a, b| b.1.cmp(&a.1));
+				entries
+			})
+		});
+	}
+	group.finish();
+}
+
+fn bench_count_by_document(c: &mut Criterion) {
+	let corpus = open_corpus();
+	let queries = &[
+		("pos_noun", r#"[pos="NOUN"]"#),
+		("adj_noun", r#"[pos="ADJ"] [pos="NOUN"]"#),
+	];
+	let doc_count = corpus.document_names().len();
+	let mut group = c.benchmark_group("count_by_document");
+	for &(label, cql) in queries {
+		let plan = parse_and_plan(cql);
+		group.bench_with_input(BenchmarkId::new("group", label), &plan, |b, plan| {
+			b.iter(|| {
+				let mut results =
+					executor::execute(black_box(plan), black_box(&corpus)).unwrap();
+				results.populate_context(&corpus);
+				let mut counts: Vec<usize> = vec![0; doc_count];
+				for hit in results.hits() {
+					counts[hit.document_index as usize] += 1;
+				}
+				counts
+			})
+		});
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_corpus_open,
@@ -154,5 +207,7 @@ criterion_group!(
 	bench_query_count_only,
 	bench_count_vs_execute,
 	bench_alignment_projection,
+	bench_vocab,
+	bench_count_by_document,
 );
 criterion_main!(benches);

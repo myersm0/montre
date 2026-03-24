@@ -29,8 +29,10 @@ montre build -i data/maupassant/ -o my-corpus/
 # Query
 montre query my-corpus/ '[pos="ADJ"] [pos="NOUN"]'
 
-# Count only (fast path)
-montre query my-corpus/ '[pos="ADJ"]+ [pos="NOUN"]' --count-only
+# Count
+montre count my-corpus/ '[pos="ADJ"] [pos="NOUN"]'
+montre count my-corpus/ '[pos="NOUN"]' --by-document
+montre count my-corpus/ '[pos="NOUN"]' --by-component
 
 # Filter
 montre query my-corpus/ '[pos="ADJ"] [pos="NOUN"]' --document la-parure
@@ -39,6 +41,9 @@ montre query my-corpus/ '[pos="ADJ"] [pos="NOUN"]' --component fr
 # Inspect
 montre info my-corpus/
 montre docs my-corpus/
+montre layers my-corpus/
+montre vocab my-corpus/ pos
+montre vocab my-corpus/ lemma --top 50 --component fr
 ```
 
 ## Query language
@@ -193,7 +198,7 @@ for hit in corpus.query('[pos="DET"] [pos="NOUN"]'):
 
 ## Roadmap
 Coming soon:
-- Statistics: count, group, collocation
+- Statistics: group, collocation
 - Python bindings (feature-complete, pip install)
 - REPL (persistent corpus session)
 - TUI for interactive exploration
