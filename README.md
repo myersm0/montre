@@ -199,6 +199,19 @@ Coming soon:
 - TUI for interactive exploration
 - Support for additional input formats (VRT, Stanza JSON, TEI)
 
+## Citing Montre
+
+A paper describing Montre is in preparation. In the meantime, if you use Montre in published research, please cite:
+```bibtex
+@software{myers-montre,
+  author       = {Myers, Michael J.},
+  title        = {Montre: A Modern Corpus Query Engine for Aligned Corpora},
+  year         = {2026},
+  url          = {https://github.com/myersm0/montre},
+  version      = {0.4.0}
+}
+```
+
 ## License
 
 Apache-2.0
