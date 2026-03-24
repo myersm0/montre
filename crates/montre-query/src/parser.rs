@@ -1,4 +1,7 @@
-use crate::ast::{Constraint, ConstraintOp, ConstraintValue, Query, TokenPattern};
+use crate::ast::{
+	CmpOp, Constraint, ConstraintOp, ConstraintValue, GlobalConstraint, LabelAttr,
+	Query, TokenPattern,
+};
 use crate::{QueryError, Result};
 
 /// Parser for CQL-like query language
@@ -25,7 +28,48 @@ pub fn parse(input: &str) -> Result<Query> {
 			),
 		});
 	}
+	check_duplicate_labels(&query)?;
 	Ok(query)
+}
+
+fn check_duplicate_labels(query: &Query) -> Result<()> {
+	let mut seen = Vec::new();
+	collect_labels(query, &mut seen)
+}
+
+fn collect_labels(query: &Query, seen: &mut Vec<String>) -> Result<()> {
+	match query {
+		Query::Capture { name, inner } => {
+			if seen.contains(name) {
+				return Err(QueryError::Parse {
+					position: 0,
+					message: format!("Duplicate label name '{}'", name),
+				});
+			}
+			seen.push(name.clone());
+			collect_labels(inner, seen)
+		}
+		Query::Sequence(parts) => {
+			for part in parts {
+				collect_labels(part, seen)?;
+			}
+			Ok(())
+		}
+		Query::Repetition { inner, .. } => collect_labels(inner, seen),
+		Query::Or(alts) => {
+			for alt in alts {
+				collect_labels(alt, seen)?;
+			}
+			Ok(())
+		}
+		Query::Within { inner, .. }
+		| Query::Containing { inner, .. }
+		| Query::WithinComponent { inner, .. }
+		| Query::WithinDocument { inner, .. }
+		| Query::Project { inner, .. }
+		| Query::Constrained { inner, .. } => collect_labels(inner, seen),
+		Query::Token(_) => Ok(()),
+	}
 }
 
 fn expand_span_alias(name: &str) -> String {
@@ -116,7 +160,8 @@ impl<'a> Parser<'a> {
 
 		self.skip_whitespace();
 		if !self.try_consume('|') {
-			return self.maybe_wrap_within(first);
+			let result = self.maybe_wrap_within(first)?;
+			return self.maybe_wrap_constrained(result);
 		}
 
 		let mut alternatives = vec![first];
@@ -129,7 +174,8 @@ impl<'a> Parser<'a> {
 		}
 
 		let query = Query::Or(alternatives);
-		self.maybe_wrap_within(query)
+		let result = self.maybe_wrap_within(query)?;
+		self.maybe_wrap_constrained(result)
 	}
 
 	fn maybe_wrap_within(&mut self, query: Query) -> Result<Query> {
@@ -232,6 +278,125 @@ impl<'a> Parser<'a> {
 		Ok(names)
 	}
 
+	fn maybe_wrap_constrained(&mut self, query: Query) -> Result<Query> {
+		self.skip_whitespace();
+		if !self.remaining().starts_with("::") {
+			return Ok(query);
+		}
+		self.pos += 2;
+		let constraints = self.parse_constraint_list()?;
+		Ok(Query::Constrained {
+			inner: Box::new(query),
+			constraints,
+		})
+	}
+
+	fn parse_constraint_list(&mut self) -> Result<Vec<GlobalConstraint>> {
+		let mut constraints = vec![self.parse_global_constraint()?];
+		loop {
+			self.skip_whitespace();
+			if !self.try_consume('&') {
+				break;
+			}
+			constraints.push(self.parse_global_constraint()?);
+		}
+		Ok(constraints)
+	}
+
+	fn parse_global_constraint(&mut self) -> Result<GlobalConstraint> {
+		self.skip_whitespace();
+		if self.try_consume_str("distance") {
+			return self.parse_distance_constraint();
+		}
+		self.parse_compare_constraint()
+	}
+
+	fn parse_distance_constraint(&mut self) -> Result<GlobalConstraint> {
+		self.consume('(')?;
+		self.skip_whitespace();
+		let left = self.parse_identifier()?;
+		self.skip_whitespace();
+		self.consume(',')?;
+		self.skip_whitespace();
+		let right = self.parse_identifier()?;
+		self.skip_whitespace();
+		self.consume(')')?;
+		self.skip_whitespace();
+		let op = self.parse_cmp_op()?;
+		self.skip_whitespace();
+		let value = self.parse_number()?;
+		Ok(GlobalConstraint::Distance { left, right, op, value })
+	}
+
+	fn parse_compare_constraint(&mut self) -> Result<GlobalConstraint> {
+		let left = self.parse_label_attr()?;
+		self.skip_whitespace();
+		let op = self.parse_cmp_op()?;
+		self.skip_whitespace();
+		let right = self.parse_label_attr()?;
+		match op {
+			CmpOp::Eq => Ok(GlobalConstraint::Eq { left, right }),
+			CmpOp::Ne => Ok(GlobalConstraint::Ne { left, right }),
+			_ => Err(QueryError::Parse {
+				position: self.pos,
+				message: "Attribute comparisons only support '=' and '!='".into(),
+			}),
+		}
+	}
+
+	fn parse_label_attr(&mut self) -> Result<LabelAttr> {
+		let label = self.parse_bare_identifier()?;
+		self.consume('.')?;
+		let attr = self.parse_identifier()?;
+		Ok(LabelAttr { label, attr })
+	}
+
+	fn parse_bare_identifier(&mut self) -> Result<String> {
+		let start = self.pos;
+		while let Some(c) = self.peek_char() {
+			if c.is_alphanumeric() || c == '_' {
+				self.pos += c.len_utf8();
+			} else {
+				break;
+			}
+		}
+		if self.pos == start {
+			return Err(QueryError::Parse {
+				position: self.pos,
+				message: "Expected identifier".into(),
+			});
+		}
+		Ok(self.input[start..self.pos].to_string())
+	}
+
+	fn parse_cmp_op(&mut self) -> Result<CmpOp> {
+		let r = self.remaining();
+		if r.starts_with(">=") {
+			self.pos += 2;
+			Ok(CmpOp::Ge)
+		} else if r.starts_with(">") {
+			self.pos += 1;
+			Ok(CmpOp::Gt)
+		} else if r.starts_with("<=") {
+			self.pos += 2;
+			Ok(CmpOp::Le)
+		} else if r.starts_with("<") {
+			self.pos += 1;
+			Ok(CmpOp::Lt)
+		} else if r.starts_with("!=") {
+			self.pos += 2;
+			Ok(CmpOp::Ne)
+		} else if r.starts_with("=") {
+			self.pos += 1;
+			Ok(CmpOp::Eq)
+		} else {
+			Err(QueryError::Parse {
+				position: self.pos,
+				message: "Expected comparison operator (=, !=, >=, >, <=, <)".into(),
+			})
+		}
+	}
+
 	fn parse_sequence(&mut self) -> Result<Query> {
 		let mut elements = Vec::new();
 
@@ -263,6 +428,7 @@ impl<'a> Parser<'a> {
 		match self.peek_char() {
 			None => true,
 			Some('|') | Some(')') => true,
+			Some(':') if self.remaining().starts_with("::") => true,
 			Some('w') => {
 				let r = self.remaining();
 				r.starts_with("within")
@@ -1024,5 +1190,81 @@ mod tests {
 			}
 			_ => panic!("Expected Capture"),
 		}
+	}
+
+	#[test]
+	fn parse_duplicate_label_fails() {
+		assert!(parse(r#"a:[pos="ADJ"] [] a:[pos="NOUN"]"#).is_err());
+	}
+
+	#[test]
+	fn parse_global_constraint_eq() {
+		let query = parse(r#"a:[pos="ADJ"] b:[pos="NOUN"] :: a.pos = b.pos"#).unwrap();
+		match query {
+			Query::Constrained { inner, constraints } => {
+				assert!(matches!(*inner, Query::Sequence(_)));
+				assert_eq!(constraints.len(), 1);
+				match &constraints[0] {
+					GlobalConstraint::Eq { left, right } => {
+						assert_eq!(left.label, "a");
+						assert_eq!(left.attr, "pos");
+						assert_eq!(right.label, "b");
+						assert_eq!(right.attr, "pos");
+					}
+					_ => panic!("Expected Eq"),
+				}
+			}
+			_ => panic!("Expected Constrained"),
+		}
+	}
+
+	#[test]
+	fn parse_global_constraint_distance() {
+		let query = parse(r#"a:[] []{0,5} b:[] :: distance(a,b) >= 3"#).unwrap();
+		match query {
+			Query::Constrained { constraints, .. } => {
+				assert_eq!(constraints.len(), 1);
+				match &constraints[0] {
+					GlobalConstraint::Distance { left, right, op, value } => {
+						assert_eq!(left, "a");
+						assert_eq!(right, "b");
+						assert_eq!(*op, CmpOp::Ge);
+						assert_eq!(*value, 3);
+					}
+					_ => panic!("Expected Distance"),
+				}
+			}
+			_ => panic!("Expected Constrained"),
+		}
+	}
+
+	#[test]
+	fn parse_global_constraint_multiple() {
+		let query = parse(r#"a:[word=".*"] b:[] :: a.word = b.word & a.pos != b.pos"#).unwrap();
+		match query {
+			Query::Constrained { constraints, .. } => {
+				assert_eq!(constraints.len(), 2);
+				assert!(matches!(&constraints[0], GlobalConstraint::Eq { .. }));
+				assert!(matches!(&constraints[1], GlobalConstraint::Ne { .. }));
+			}
+			_ => panic!("Expected Constrained"),
+		}
+	}
+
+	#[test]
+	fn parse_global_constraint_after_within() {
+		let query = parse(r#"a:[pos="NOUN"] b:[pos="NOUN"] within s :: a.lemma = b.lemma"#).unwrap();
+		match query {
+			Query::Constrained { inner, constraints } => {
+				assert!(matches!(*inner, Query::Within { .. }));
+				assert_eq!(constraints.len(), 1);
+			}
+			_ => panic!("Expected Constrained"),
+		}
+	}
+
+	#[test]
+	fn parse_global_constraint_bare_fails() {
+		assert!(parse(r#":: a.lemma = b.lemma"#).is_err());
 	}
 }

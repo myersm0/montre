@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use montre_core::{Span, UnitId};
-use montre_index::{ComponentMeta, Corpus, InvertedIndex, SpanIndex};
+use montre_index::{ComponentMeta, Corpus, ForwardIndex, InvertedIndex, SpanIndex};
 use rayon::prelude::*;
 
+use crate::ast::{CmpOp, GlobalConstraint, LabelAttr};
 use crate::planner::{PlanNode, QueryPlan, SequenceStep};
 use crate::Result;
 
@@ -436,6 +437,102 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 		}
 
 		PlanNode::SequenceScan { steps } => execute_sequence(steps, corpus),
+
+		PlanNode::GlobalConstraintFilter { inner, constraints } => {
+			let hits = execute_node(inner, corpus)?;
+			let attr_keys = collect_attr_keys(constraints);
+			let filtered = hits
+				.into_iter()
+				.filter(|hit| evaluate_constraints(hit, constraints, &attr_keys, corpus))
+				.collect();
+			Ok(filtered)
+		}
+	}
+}
+
+fn collect_attr_keys(constraints: &[GlobalConstraint]) -> Vec<(String, String)> {
+	let mut keys = Vec::new();
+	for c in constraints {
+		match c {
+			GlobalConstraint::Eq { left, right } | GlobalConstraint::Ne { left, right } => {
+				let l = (left.label.clone(), left.attr.clone());
+				let r = (right.label.clone(), right.attr.clone());
+				if !keys.contains(&l) {
+					keys.push(l);
+				}
+				if !keys.contains(&r) {
+					keys.push(r);
+				}
+			}
+			GlobalConstraint::Distance { .. } => {}
+		}
+	}
+	keys
+}
+
+fn resolve_attrs<'a>(
+	hit: &Hit,
+	keys: &[(String, String)],
+	corpus: &'a Corpus,
+) -> Vec<Option<&'a str>> {
+	keys.iter()
+		.map(|(label, attr)| {
+			let span = hit.captures.iter().find(|(n, _)| n == label)?.1;
+			corpus.forward.get_str(span.start, attr)
+		})
+		.collect()
+}
+
+fn evaluate_constraints(
+	hit: &Hit,
+	constraints: &[GlobalConstraint],
+	attr_keys: &[(String, String)],
+	corpus: &Corpus,
+) -> bool {
+	let resolved = resolve_attrs(hit, attr_keys, corpus);
+
+	constraints.iter().all(|c| match c {
+		GlobalConstraint::Distance { left, right, op, value } => {
+			eval_distance(hit, left, right)
+				.map(|d| compare_u64(d, *op, *value as u64))
+				.unwrap_or(false)
+		}
+		GlobalConstraint::Eq { left, right } => {
+			eval_attr_compare(&resolved, attr_keys, left, right) == Some(true)
+		}
+		GlobalConstraint::Ne { left, right } => {
+			eval_attr_compare(&resolved, attr_keys, left, right) == Some(false)
+		}
+	})
+}
+
+fn eval_distance(hit: &Hit, label_a: &str, label_b: &str) -> Option<u64> {
+	let span_a = hit.captures.iter().find(|(n, _)| n == label_a)?.1;
+	let span_b = hit.captures.iter().find(|(n, _)| n == label_b)?.1;
+	Some(span_b.start.saturating_sub(span_a.end))
+}
+
+fn eval_attr_compare(
+	resolved: &[Option<&str>],
+	keys: &[(String, String)],
+	left: &LabelAttr,
+	right: &LabelAttr,
+) -> Option<bool> {
+	let left_idx = keys.iter().position(|(l, a)| l == &left.label && a == &left.attr)?;
+	let right_idx = keys.iter().position(|(l, a)| l == &right.label && a == &right.attr)?;
+	let left_val = resolved[left_idx]?;
+	let right_val = resolved[right_idx]?;
+	Some(left_val == right_val)
+}
+
+fn compare_u64(value: u64, op: CmpOp, target: u64) -> bool {
+	match op {
+		CmpOp::Ge => value >= target,
+		CmpOp::Gt => value > target,
+		CmpOp::Le => value <= target,
+		CmpOp::Lt => value < target,
+		CmpOp::Eq => value == target,
+		CmpOp::Ne => value != target,
 	}
 }
 

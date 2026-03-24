@@ -910,3 +910,99 @@ fn capture_single_token_query() {
 	assert_eq!(results[2].0, (7, 8));
 	assert_eq!(results[2].1, vec![("a".into(), (7, 8))]);
 }
+
+// ===========================================================================
+// Global constraints
+// ===========================================================================
+
+#[test]
+fn constraint_distance_filters() {
+	let corpus = build_corpus(SAMPLE);
+	// ADJ immediately followed by NOUN: distance is 0
+	// distance >= 0 keeps all
+	let all = query_count(&corpus, r#"a:[pos="ADJ"] b:[pos="NOUN"] :: distance(a,b) >= 0"#);
+	assert_eq!(all, 2);
+	// distance >= 1 eliminates adjacent (distance 0)
+	let filtered = query_count(&corpus, r#"a:[pos="ADJ"] b:[pos="NOUN"] :: distance(a,b) >= 1"#);
+	assert_eq!(filtered, 0);
+}
+
+#[test]
+fn constraint_eq_filters() {
+	let corpus = build_corpus(SAMPLE);
+	// ADJ followed by NOUN: a.pos="ADJ", b.pos="NOUN" — never equal
+	let count = query_count(&corpus, r#"a:[pos="ADJ"] b:[pos="NOUN"] :: a.pos = b.pos"#);
+	assert_eq!(count, 0);
+}
+
+#[test]
+fn constraint_ne() {
+	let corpus = build_corpus(SAMPLE);
+	// ADJ followed by NOUN: a.pos != b.pos — always true
+	let count = query_count(&corpus, r#"a:[pos="ADJ"] b:[pos="NOUN"] :: a.pos != b.pos"#);
+	assert_eq!(count, 2);
+}
+
+#[test]
+fn constraint_multiple() {
+	let corpus = build_corpus(SAMPLE);
+	let count = query_count(
+		&corpus,
+		r#"a:[pos="ADJ"] b:[pos="NOUN"] :: a.pos != b.pos & distance(a,b) >= 0"#,
+	);
+	assert_eq!(count, 2);
+}
+
+#[test]
+fn constraint_quantified_label() {
+	let corpus = build_corpus(SAMPLE);
+	// a:[pos="ADJ"]+ b:[pos="NOUN"] produces 3 hits: (1,4), (2,4), (7,9)
+	// a.pos is always ADJ (first token), b.pos is always NOUN — always !=
+	let count = query_count(
+		&corpus,
+		r#"a:[pos="ADJ"]+ b:[pos="NOUN"] :: a.pos != b.pos"#,
+	);
+	assert_eq!(count, 3);
+}
+
+#[test]
+fn constraint_eq_matching() {
+	let corpus = build_corpus(SAMPLE);
+	// DET []* DET within sentence: both have lemma "the"
+	let count = query_count(
+		&corpus,
+		r#"a:[pos="DET"] []* b:[pos="DET"] within s :: a.lemma = b.lemma"#,
+	);
+	assert!(count > 0);
+	// same query with != should filter them out (both are "the")
+	let ne_count = query_count(
+		&corpus,
+		r#"a:[pos="DET"] []* b:[pos="DET"] within s :: a.lemma != b.lemma"#,
+	);
+	assert_eq!(ne_count, 0);
+}
+
+#[test]
+fn constraint_unknown_label_errors() {
+	let parsed = montre_query::parse(r#"a:[] b:[] :: x.lemma = b.lemma"#).unwrap();
+	let result = montre_query::planner::plan(&parsed);
+	assert!(result.is_err());
+}
+
+#[test]
+fn constraint_distance_directionality() {
+	let corpus = build_corpus(SAMPLE);
+	// a=quick(ADJ,pos 1), []=brown, b=fox(NOUN,pos 3)
+	// distance(a,b) = b.start - a.end = 3 - 2 = 1
+	let fwd = query_count(
+		&corpus,
+		r#"a:[pos="ADJ"] [] b:[pos="NOUN"] :: distance(a,b) >= 1"#,
+	);
+	assert_eq!(fwd, 1);
+	// distance(b,a) = a.start - b.end = 1 - 4 = 0 (saturating)
+	let rev = query_count(
+		&corpus,
+		r#"a:[pos="ADJ"] [] b:[pos="NOUN"] :: distance(b,a) >= 1"#,
+	);
+	assert_eq!(rev, 0);
+}
