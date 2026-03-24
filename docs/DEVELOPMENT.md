@@ -791,9 +791,33 @@ Combined with sequential component builds (each component fully built and droppe
 
 Expands the FFI surface from 35 to 57 exported functions. All existing function signatures and semantics are unchanged. The module structure maps to the API's logical groupings: corpus lifecycle, token access, query execution, span access, alignment, and build.
 
+### Phase 3f: CLI improvements ✓
+
+- [x] `montre count` subcommand (bare count, `--by-document`, `--by-component`)
+- [x] `montre vocab` subcommand (frequency-sorted vocabulary per layer, `--top`, `--all`, `--component`)
+- [x] `montre layers` subcommand (list annotation layers)
+- [x] `montre docs` updated to `component\tdocument` TSV format
+- [x] Consistent component column in all output (single-component corpora use corpus name)
+- [x] Document collision warning on stderr when `--document` matches across components
+- [x] `Difference` count fast path in `count_node` (`ScanAll - ScanLiteral`: 89ms → 23ns)
+- [x] CLI integration test suite (18 tests via `assert_cmd`)
+- [x] Criterion benchmarks for `vocab` and `count_by_document`
+
+**`count --by-document` implementation**
+
+The naive approach (one query per document) was noticeably slow on the 307-document Maupassant corpus. The implemented approach runs a single query, calls `populate_context`, and groups hits by `document_index` in a count array. This completes in ~7ms for `[pos="NOUN"]` on the full Maupassant corpus.
+
+**`Difference` count fast path**
+
+`count_node` previously had no dedicated path for `PlanNode::Difference`, causing `[pos!="PUNCT"]` count to fall through to full hit materialization (89ms). The fix handles the common `ScanAll - ScanLiteral` case with `corpus.token_count() - bitmap.len()`, reducing to 23ns.
+
+**Single-component CLI workaround**
+
+Single-component builds leave `CorpusMeta.components` empty, so `within component:"name"` in CQL returns zero results. The CLI avoids emitting component filters for single-component corpora. A proper engine fix (always populate `ComponentMeta`) is tracked as future work.
+
 ### Phase 4: Statistics & bindings
 
-- [ ] `count` command (CLI)
+- [x] `count` command (CLI)
 - [ ] `group` command (frequency by attribute)
 - [ ] Collocation extraction
 - [ ] Python bindings (PyO3)
@@ -817,11 +841,21 @@ Current numbers on Apple M4 Max, 1.5M token corpus (Maupassant French/English). 
 | `[lemma="maison"]` | ~800 | <1ms |
 | `[] [lemma="chat"]` | 120 | 9.5ms |
 
-`execute_count` fast path: `[pos="NOUN"]` count in 22ns (bitmap `.len()`).
+`execute_count` fast path: `[pos="NOUN"]` count in 22ns (bitmap `.len()`). `[pos!="PUNCT"]` count in 23ns (`ScanAll - ScanLiteral` fast path via `token_count - bitmap.len()`).
 
 Alignment projection adds negligible overhead with indexed edge lookup.
 
 Quantifier queries and `ScanAll`-in-first-position use document-parallel execution (see Phase 3b). The `[] [lemma="chat"]` improvement from 132ms to 9.5ms (14×) comes from both parallelism and range restriction — each document processes O(document_size) positions instead of O(corpus_size).
+
+### CLI operations
+
+| Operation | Time | Notes |
+|---|---|---|
+| `vocab pos` | 627ns | Bitmap cardinality + sort for ~17 POS tags |
+| `vocab lemma` | 1.3ms | ~60K entries |
+| `vocab word` | 2.2ms | ~80K entries |
+| `count --by-document` (`[pos="NOUN"]`) | 7.0ms | Single query + populate_context + grouping |
+| `count --by-document` (`[pos="ADJ"] [pos="NOUN"]`) | 14ms | Same approach |
 
 ### Build pipeline
 
