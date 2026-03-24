@@ -4,8 +4,7 @@
 
 A modern, embeddable corpus query engine with first-class support for aligned corpora.
 
-> **montre** *(/mɔ̃tʁ/):* to show; to reveal; to make visible (French)  
-> *From Latin* **monstrare** “to point out, indicate.”
+> **montre** *(/mɔ̃tʁ/):* “shows,” “reveals,” “makes visible” — from French _montrer_, “to show.” The Latin root is _monstrare_, “to point out, indicate.”
 
 No server, external services, or prerequisites.
 
