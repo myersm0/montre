@@ -237,6 +237,7 @@ IndexError::VersionMismatch { expected, found }
 QueryError::Parse { position, message }
 QueryError::Regex(regex::Error)
 QueryError::UnknownLayer(String)
+QueryError::UnknownLabel(String)
 QueryError::Execution(String)
 
 // montre_build::BuildError

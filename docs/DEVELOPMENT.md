@@ -388,14 +388,18 @@ a:[pos="ADJ"] [pos="NOUN"]
 a:[pos="ADJ"]+ [pos="NOUN"]        # captures full quantified span
 a:[pos="ADJ"] b:[pos="NOUN"]       # multiple labels
 
-# Global constraints express relationships
+# Global constraints express relationships (implemented)
 a:[word=".*"] []{0,5} b:[] :: a.word = b.word     # repetition
 a:[pos="NOUN"] []* b:[pos="NOUN"] :: a.lemma = b.lemma  # same lemma
+a:[pos="ADJ"] b:[pos="NOUN"] :: a.pos != b.pos    # inequality
 
-# Distance constraints
+# Distance constraints (implemented, directional)
 a:[lemma="house"] []{0,20} b:[lemma="home"] :: distance(a,b) >= 5
 
-# Named Query Results
+# Multiple constraints (implemented, flat conjunction with &)
+a:[pos="ADJ"] b:[pos="NOUN"] :: a.lemma != b.lemma & distance(a,b) >= 3
+
+# Named Query Results (deferred to REPL/bindings layer)
 A = [lemma="maison"];
 B = subset A where match.document_author = "Baudelaire";
 C = difference A B;
@@ -496,8 +500,14 @@ Performance on test corpus (Maupassant sub-corpus of stories from Isosceles corp
 - [x] Label syntax (`a:[pos="ADJ"]`)
 - [x] Capture tracking in executor (Option C: full quantified span)
 - [x] Reserved-word check for label names
-- [ ] Global constraints (`:: a.lemma = b.lemma`)
-- [ ] `distance(a, b)` function
+- [x] Duplicate label name rejection (post-parse AST walk)
+- [x] Global constraints (`:: a.lemma = b.lemma`)
+- [x] `distance(a, b)` function (directional: `b.start - a.end`)
+- [x] Equality and inequality (`a.lemma = b.lemma`, `a.pos != b.pos`)
+- [x] Multiple constraints with `&` conjunction
+- [x] `GlobalConstraintFilter` plan node (distinct executor stage)
+- [x] Label validation from AST at plan time (`QueryError::UnknownLabel`)
+- [x] Per-hit attribute resolution (precomputed `(label, attr)` pairs, resolved once)
 - [ ] Named Query Results (deferred to REPL/bindings layer)
 - [ ] Set operations (subset, difference, intersection) (deferred to REPL/bindings layer)
 - [ ] `expand` to sentence/document (deferred to REPL/bindings layer)
@@ -528,7 +538,7 @@ Two execution paths to avoid performance regression:
 
 The bifurcation avoids ~60% regression on ScanAll-first queries caused by `ActiveMatch`/`Vec` clone overhead. Shared `build_run_indices` helper eliminates code duplication for run index construction.
 
-**Step 5: Global constraints**
+**Step 5: Global constraints** ✓
 
 Global constraints appear after `::` and express relationships between labeled positions:
 
@@ -536,10 +546,10 @@ Global constraints appear after `::` and express relationships between labeled p
 a:[pos="NOUN"] []* b:[pos="NOUN"] :: a.lemma = b.lemma
 ```
 
-Parser extension:
+AST types:
 ```rust
 Query::Constrained {
-    pattern: Box<Query>,
+    inner: Box<Query>,
     constraints: Vec<GlobalConstraint>,
 }
 
@@ -551,28 +561,43 @@ enum GlobalConstraint {
 
 struct LabelAttr {
     label: String,
-    attr: String,  // "lemma", "word", "pos", etc.
+    attr: String,  // "lemma", "word", "pos", "feats.Number", etc.
 }
 ```
 
-**Step 6: Constraint evaluation**
+Parser: `::` has lowest precedence, parsed after `maybe_wrap_within` (structural filters and projection). Constraint list is a flat conjunction separated by `&`. Duplicate label names in a query are rejected by a post-parse AST walk (`check_duplicate_labels`). `parse_label_attr` uses `parse_bare_identifier` (no dots) for the label part and `parse_identifier` (with dots) for the attr part, so `a.feats.Number` correctly parses as label `a`, attr `feats.Number`.
 
-After finding candidate matches, filter by global constraints. This requires:
-1. For each candidate hit, look up attribute values at captured positions
-2. Evaluate constraint predicates
-3. Keep only hits where all constraints are satisfied
+Planner: `GlobalConstraintFilter` plan node wraps the inner plan. Label validation operates on the AST (not the plan) via `collect_declared_labels` and `referenced_labels`, producing `QueryError::UnknownLabel` for typos.
 
-This is a post-filter operation — execute the pattern first, then filter. For very selective constraints on large result sets, this could be slow. Future optimization: push constraints into execution when possible.
+**Step 6: Constraint evaluation** ✓
 
-**Step 7: Distance function**
+Implemented as a distinct executor stage (`GlobalConstraintFilter` branch in `execute_node`), not logic bolted onto `SequenceScan`. The plan tree shape:
 
-`distance(a, b)` returns token distance between labeled spans:
 ```
-distance = b.start - a.end  // gap between spans
-// or: b.start - a.start   // start-to-start distance
+GlobalConstraintFilter
+  └── FilterBySpan / FilterByComponent / FilterByDocument
+        └── SequenceScan (with capture tracking)
 ```
 
-Document the chosen semantics clearly.
+Evaluation is capture-centric with resolve-once-per-hit semantics:
+1. `collect_attr_keys` precomputes all unique `(label, attr)` pairs referenced by the constraint set (once per query).
+2. `resolve_attrs` resolves all pairs for a given hit into a `Vec<Option<&str>>` (once per hit).
+3. Each constraint indexes into the resolved array rather than doing its own forward lookup.
+4. Hits are retained only if all constraints pass (flat conjunction).
+
+If a referenced layer does not exist in the corpus, the forward lookup returns `None` and the constraint evaluates to `false`. This is consistent with how `ScanLiteral` for a nonexistent layer returns no results.
+
+The `count_node` fast path falls through to `execute_node` + `.len()` for `GlobalConstraintFilter` — constrained queries cannot avoid hit materialization.
+
+**Step 7: Distance function** ✓
+
+`distance(a, b)` is **directional**. It measures the token gap from `a` to `b`:
+- Returns `b.start.saturating_sub(a.end)` — the number of tokens between the end of `a` and the start of `b`.
+- If `a` and `b` are adjacent, distance is 0.
+- If `b` begins before `a` ends, result is 0 (saturating subtraction).
+- `distance(a, b)` is **not** the same as `distance(b, a)`.
+
+This is the natural interpretation for left-to-right text order in sequence patterns.
 
 **Step 8: Named Query Results (deferred)**
 
@@ -590,13 +615,17 @@ This requires:
 
 Recommend deferring this to Phase 2c or later. It's useful but not core to the query language.
 
-**Testing priorities**
+**Testing priorities** (all implemented)
 
-1. `a:[pos="ADJ"] [pos="NOUN"]` — basic label, capture in hit
-2. `a:[pos="ADJ"]+ [pos="NOUN"]` — label on quantified expression
-3. `a:[word=".*"] b:[word=".*"] :: a.word = b.word` — simple equality constraint
-4. `a:[pos="NOUN"] []{0,5} b:[pos="NOUN"] :: a.lemma = b.lemma` — same-lemma repetition
-5. `a:[] b:[] :: distance(a,b) >= 3` — distance constraint
+1. `a:[pos="ADJ"] [pos="NOUN"]` — basic label, capture in hit ✓
+2. `a:[pos="ADJ"]+ [pos="NOUN"]` — label on quantified expression ✓
+3. `a:[pos="ADJ"] b:[pos="NOUN"] :: a.pos = b.pos` — equality constraint (filters all: ADJ ≠ NOUN) ✓
+4. `a:[pos="ADJ"] b:[pos="NOUN"] :: a.pos != b.pos` — inequality constraint ✓
+5. `a:[pos="ADJ"] []{0,5} b:[pos="NOUN"] :: distance(a,b) >= 1` — distance constraint ✓
+6. `a:[pos="ADJ"]+ b:[pos="NOUN"] :: a.pos != b.pos` — quantified label with constraint ✓
+7. `a:[pos="ADJ"] [] b:[pos="NOUN"] :: distance(a,b) >= 1` / `:: distance(b,a) >= 1` — distance directionality ✓
+8. `a:[] :: x.lemma = b.lemma` — unknown label produces planner error ✓
+9. `a:[pos="ADJ"] [] a:[pos="NOUN"]` — duplicate label rejected at parse time ✓
 
 ### Phase 2c: Hit model enhancement ✓
 
@@ -635,7 +664,7 @@ Recommend deferring this to Phase 2c or later. It's useful but not core to the q
 - [x] Projection diagnostics (unmapped/no-alignment counters)
 - [x] Shared projection helpers (`build_edge_map`, `find_doc_and_sent`, `resolve_target_span`)
 - [x] Julia bindings ([Montre.jl](https://github.com/myersm0/Montre.jl))
-- [x] 140+ tests (was ~50), including executor integration, alignment projection, alternation edge cases
+- [x] 150+ tests (was ~50), including executor integration, alignment projection, alternation edge cases, global constraint evaluation
 - [x] CI and release workflows
 - [x] Shared test corpus (`testdata/parallel/`)
 
@@ -874,7 +903,7 @@ cargo test -p montre-query    # single crate
 cargo test -p montre-query --test executor_integration   # integration tests
 ```
 
-The test suite has 140+ tests across all crates. The integration test suite (`crates/montre-query/tests/executor_integration.rs`) covers end-to-end query execution including sequences, quantifiers, alternation edge cases, within constraints, multi-document queries, alignment projection, feats decomposition, and the Results API.
+The test suite has 150+ tests across all crates. The integration test suite (`crates/montre-query/tests/executor_integration.rs`) covers end-to-end query execution including sequences, quantifiers, alternation edge cases, within constraints, multi-document queries, alignment projection, feats decomposition, labeled captures, global constraint evaluation, and the Results API.
 
 A shared test corpus at `testdata/parallel/` provides a small multi-component French/English corpus with sentence alignments, suitable for reuse in Julia and Python binding test suites. See `testdata/parallel/POSITIONS.md` for the position reference.
 
