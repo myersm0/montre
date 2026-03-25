@@ -86,11 +86,17 @@ enum Commands {
 	},
 
 	/// List documents in the corpus
+	#[command(alias = "documents")]
 	Docs {
 		corpus: PathBuf,
 
 		#[arg(long, help = "Filter by component")]
 		component: Option<String>,
+	},
+
+	/// List components in the corpus
+	Components {
+		corpus: PathBuf,
 	},
 
 	/// List annotation layers in the corpus
@@ -99,6 +105,7 @@ enum Commands {
 	},
 
 	/// List distinct values for a layer
+	#[command(alias = "vocabulary")]
 	Vocab {
 		corpus: PathBuf,
 
@@ -162,6 +169,7 @@ fn main() -> Result<()> {
 		} => cmd_count(corpus, query, component, document, by_document, by_component),
 		Commands::Info { corpus } => cmd_info(corpus),
 		Commands::Docs { corpus, component } => cmd_docs(corpus, component),
+		Commands::Components { corpus } => cmd_components(corpus),
 		Commands::Layers { corpus } => cmd_layers(corpus),
 		Commands::Vocab {
 			corpus,
@@ -604,6 +612,21 @@ fn cmd_docs(corpus_path: PathBuf, component: Option<String>) -> Result<()> {
 		if let Some(name) = doc_names.get(idx) {
 			let comp_name = component_name_for_document(&corpus, idx);
 			println!("{}\t{}", comp_name, name);
+		}
+	}
+
+	Ok(())
+}
+
+fn cmd_components(corpus_path: PathBuf) -> Result<()> {
+	let corpus = montre_index::open(&corpus_path)
+		.with_context(|| format!("Failed to open corpus: {}", corpus_path.display()))?;
+
+	if corpus.components().is_empty() {
+		println!("{}\t{}", corpus.name(), "");
+	} else {
+		for comp in corpus.components() {
+			println!("{}\t{}", comp.name, comp.language);
 		}
 	}
 

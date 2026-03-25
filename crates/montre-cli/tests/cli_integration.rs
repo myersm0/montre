@@ -234,6 +234,37 @@ fn count_by_document_with_component_filter() {
 	assert!(stdout.contains("en\tthe_house.conllu\t4"));
 }
 
+// ── components ──
+
+#[test]
+fn components_multi() {
+	let c = corpora();
+	let output = montre()
+		.args(["components", c.multi_path.to_str().unwrap()])
+		.assert()
+		.success();
+
+	let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+	let lines: Vec<&str> = stdout.lines().collect();
+	assert_eq!(lines.len(), 2);
+	assert!(stdout.contains("fr\tfr"));
+	assert!(stdout.contains("en\ten"));
+}
+
+#[test]
+fn components_single() {
+	let c = corpora();
+	let output = montre()
+		.args(["components", c.single_path.to_str().unwrap()])
+		.assert()
+		.success();
+
+	let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+	let lines: Vec<&str> = stdout.lines().collect();
+	assert_eq!(lines.len(), 1);
+	assert!(stdout.contains("french-only"));
+}
+
 // ── layers ──
 
 #[test]
@@ -405,6 +436,19 @@ fn docs_component_filter() {
 	for line in &lines {
 		assert!(line.starts_with("fr\t"));
 	}
+}
+
+#[test]
+fn documents_alias_works() {
+	let c = corpora();
+	let output = montre()
+		.args(["documents", c.multi_path.to_str().unwrap()])
+		.assert()
+		.success();
+
+	let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+	let lines: Vec<&str> = stdout.lines().collect();
+	assert_eq!(lines.len(), 4);
 }
 
 // ── query --count-only still works ──
