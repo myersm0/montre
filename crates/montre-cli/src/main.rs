@@ -98,20 +98,17 @@ enum Commands {
 		corpus: PathBuf,
 	},
 
-	/// List vocabulary for a layer, sorted by frequency
+	/// List distinct values for a layer
 	Vocab {
 		corpus: PathBuf,
 
 		layer: String,
 
-		#[arg(long, default_value = "100", help = "Number of entries to show (default 100)")]
-		top: usize,
-
-		#[arg(long, help = "Show all entries (overrides --top)")]
-		all: bool,
-
 		#[arg(long, value_delimiter = ',', help = "Restrict to named component(s)")]
 		component: Vec<String>,
+
+		#[arg(long, value_delimiter = ',', help = "Restrict to named document(s)")]
+		document: Vec<String>,
 	},
 }
 
@@ -169,10 +166,9 @@ fn main() -> Result<()> {
 		Commands::Vocab {
 			corpus,
 			layer,
-			top,
-			all,
 			component,
-		} => cmd_vocab(corpus, layer, top, all, component),
+			document,
+		} => cmd_vocab(corpus, layer, component, document),
 	}
 }
 
@@ -628,9 +624,8 @@ fn cmd_layers(corpus_path: PathBuf) -> Result<()> {
 fn cmd_vocab(
 	corpus_path: PathBuf,
 	layer: String,
-	top: usize,
-	all: bool,
 	components: Vec<String>,
+	documents: Vec<String>,
 ) -> Result<()> {
 	let corpus = montre_index::open(&corpus_path)
 		.with_context(|| format!("Failed to open corpus: {}", corpus_path.display()))?;
@@ -640,43 +635,77 @@ fn cmd_vocab(
 		.values(&layer)
 		.with_context(|| format!("Layer '{}' not found", layer))?;
 
-	let position_mask = if !components.is_empty() {
-		let mut mask = roaring::RoaringBitmap::new();
-		for comp_name in &components {
+	let position_mask = build_position_mask(&corpus, &components, &documents)?;
+
+	let mut vals: Vec<&str> = if let Some(ref mask) = position_mask {
+		values
+			.iter()
+			.filter(|value| {
+				corpus
+					.inverted
+					.get(&layer, value)
+					.map(|bitmap| !(bitmap & mask).is_empty())
+					.unwrap_or(false)
+			})
+			.copied()
+			.collect()
+	} else {
+		values
+	};
+	vals.sort_unstable();
+	for value in vals {
+		println!("{}", value);
+	}
+
+	Ok(())
+}
+
+fn build_position_mask(
+	corpus: &Corpus,
+	components: &[String],
+	documents: &[String],
+) -> Result<Option<roaring::RoaringBitmap>> {
+	let doc_spans = corpus.spans.spans("document").unwrap_or(&[]);
+	let doc_names = corpus.document_names();
+
+	let mut doc_indices: Option<Vec<usize>> = None;
+
+	if !components.is_empty() {
+		let mut indices = Vec::new();
+		for comp_name in components {
 			let comp = corpus.component(comp_name).with_context(|| {
 				format!("Component '{}' not found", comp_name)
 			})?;
-			let doc_spans = corpus.spans.spans("document").unwrap_or(&[]);
-			for doc_idx in comp.document_range.0..comp.document_range.1 {
+			indices.extend(comp.document_range.0..comp.document_range.1);
+		}
+		doc_indices = Some(indices);
+	}
+
+	if !documents.is_empty() {
+		let resolved: Vec<String> = documents
+			.iter()
+			.map(|d| resolve_document_name(d, doc_names))
+			.collect::<Result<_>>()?;
+		let matched = corpus.document_indices_by_name(&resolved);
+		doc_indices = Some(match doc_indices {
+			Some(existing) => existing
+				.into_iter()
+				.filter(|idx| matched.contains(idx))
+				.collect(),
+			None => matched,
+		});
+	}
+
+	match doc_indices {
+		Some(indices) => {
+			let mut mask = roaring::RoaringBitmap::new();
+			for doc_idx in indices {
 				if let Some(span) = doc_spans.get(doc_idx) {
 					mask.insert_range(span.start as u32..span.end as u32);
 				}
 			}
+			Ok(Some(mask))
 		}
-		Some(mask)
-	} else {
-		None
-	};
-
-	let mut entries: Vec<(&str, u64)> = values
-		.iter()
-		.map(|value| {
-			let count = match (&position_mask, corpus.inverted.get(&layer, value)) {
-				(Some(mask), Some(bitmap)) => (bitmap & mask).len(),
-				(None, Some(bitmap)) => bitmap.len(),
-				_ => 0,
-			};
-			(*value, count)
-		})
-		.collect();
-
-	entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-
-	let limit = if all { entries.len() } else { top.min(entries.len()) };
-
-	for (value, count) in &entries[..limit] {
-		println!("{}\t{}", value, count);
+		None => Ok(None),
 	}
-
-	Ok(())
 }

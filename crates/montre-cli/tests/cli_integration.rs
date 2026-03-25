@@ -254,7 +254,7 @@ fn layers_lists_all() {
 // ── vocab ──
 
 #[test]
-fn vocab_pos_layer() {
+fn vocab_bare_lists_values() {
 	let c = corpora();
 	let output = montre()
 		.args(["vocab", c.multi_path.to_str().unwrap(), "pos"])
@@ -262,20 +262,18 @@ fn vocab_pos_layer() {
 		.success();
 
 	let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
-	assert!(stdout.contains("NOUN\t"));
-	assert!(stdout.contains("DET\t"));
-	assert!(stdout.contains("VERB\t"));
-	assert!(stdout.contains("ADJ\t"));
-
 	let lines: Vec<&str> = stdout.lines().collect();
+	assert!(lines.contains(&"NOUN"));
+	assert!(lines.contains(&"DET"));
+	assert!(lines.contains(&"VERB"));
+	assert!(lines.contains(&"ADJ"));
 	for line in &lines {
-		let cols: Vec<&str> = line.split('\t').collect();
-		assert_eq!(cols.len(), 2, "expected value\\tcount: {}", line);
+		assert!(!line.contains('\t'), "bare vocab should not have counts: {}", line);
 	}
 }
 
 #[test]
-fn vocab_sorted_descending() {
+fn vocab_sorted_alphabetically() {
 	let c = corpora();
 	let output = montre()
 		.args(["vocab", c.multi_path.to_str().unwrap(), "pos"])
@@ -283,49 +281,10 @@ fn vocab_sorted_descending() {
 		.success();
 
 	let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
-	let counts: Vec<u64> = stdout
-		.lines()
-		.filter_map(|line| line.split('\t').nth(1))
-		.filter_map(|c| c.parse().ok())
-		.collect();
-	for window in counts.windows(2) {
-		assert!(window[0] >= window[1], "not sorted descending: {:?}", counts);
-	}
-}
-
-#[test]
-fn vocab_with_top() {
-	let c = corpora();
-	let output = montre()
-		.args(["vocab", c.multi_path.to_str().unwrap(), "pos", "--top", "3"])
-		.assert()
-		.success();
-
-	let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
 	let lines: Vec<&str> = stdout.lines().collect();
-	assert_eq!(lines.len(), 3);
-}
-
-#[test]
-fn vocab_all_flag() {
-	let c = corpora();
-	let all_output = montre()
-		.args(["vocab", c.multi_path.to_str().unwrap(), "pos", "--all"])
-		.assert()
-		.success();
-
-	let all_stdout = String::from_utf8(all_output.get_output().stdout.clone()).unwrap();
-	let all_count = all_stdout.lines().count();
-
-	let top_output = montre()
-		.args(["vocab", c.multi_path.to_str().unwrap(), "pos", "--top", "2"])
-		.assert()
-		.success();
-
-	let top_stdout = String::from_utf8(top_output.get_output().stdout.clone()).unwrap();
-	let top_count = top_stdout.lines().count();
-
-	assert!(all_count > top_count);
+	let mut sorted = lines.clone();
+	sorted.sort();
+	assert_eq!(lines, sorted);
 }
 
 #[test]
@@ -335,10 +294,9 @@ fn vocab_component_filter() {
 		.args([
 			"vocab",
 			c.multi_path.to_str().unwrap(),
-			"pos",
+			"lemma",
 			"--component",
 			"fr",
-			"--all",
 		])
 		.assert()
 		.success();
@@ -347,10 +305,9 @@ fn vocab_component_filter() {
 		.args([
 			"vocab",
 			c.multi_path.to_str().unwrap(),
-			"pos",
+			"lemma",
 			"--component",
 			"en",
-			"--all",
 		])
 		.assert()
 		.success();
@@ -358,22 +315,33 @@ fn vocab_component_filter() {
 	let fr_stdout = String::from_utf8(fr_output.get_output().stdout.clone()).unwrap();
 	let en_stdout = String::from_utf8(en_output.get_output().stdout.clone()).unwrap();
 
-	let fr_noun: u64 = fr_stdout
-		.lines()
-		.find(|l| l.starts_with("NOUN\t"))
-		.and_then(|l| l.split('\t').nth(1))
-		.and_then(|c| c.parse().ok())
-		.unwrap();
+	let fr_lines: Vec<&str> = fr_stdout.lines().collect();
+	let en_lines: Vec<&str> = en_stdout.lines().collect();
 
-	let en_noun: u64 = en_stdout
-		.lines()
-		.find(|l| l.starts_with("NOUN\t"))
-		.and_then(|l| l.split('\t').nth(1))
-		.and_then(|c| c.parse().ok())
-		.unwrap();
+	assert!(fr_lines.contains(&"maison"));
+	assert!(!en_lines.contains(&"maison"));
+	assert!(en_lines.contains(&"house"));
+	assert!(!fr_lines.contains(&"house"));
+}
 
-	assert_eq!(fr_noun, 6);
-	assert_eq!(en_noun, 6);
+#[test]
+fn vocab_document_filter() {
+	let c = corpora();
+	let output = montre()
+		.args([
+			"vocab",
+			c.multi_path.to_str().unwrap(),
+			"lemma",
+			"--document",
+			"le_chat.conllu",
+		])
+		.assert()
+		.success();
+
+	let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+	let lines: Vec<&str> = stdout.lines().collect();
+	assert!(lines.contains(&"chat"));
+	assert!(!lines.contains(&"maison"));
 }
 
 #[test]
