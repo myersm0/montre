@@ -4,7 +4,7 @@ use std::ptr;
 use montre_index::{Corpus, InvertedIndex, SpanIndex};
 
 use crate::error::{set_error, clear_error};
-use crate::strings::{to_cstring, borrow_cstr};
+use crate::strings::{to_cstring, borrow_cstr, export_array, export_string_array};
 
 #[no_mangle]
 pub unsafe extern "C" fn montre_corpus_open(path: *const c_char) -> *mut Corpus {
@@ -208,42 +208,20 @@ pub unsafe extern "C" fn montre_corpus_inverted_values(
 	layer: *const c_char,
 	out_len: *mut u64,
 ) -> *mut *mut c_char {
-	if corpus.is_null() || out_len.is_null() {
-		if !out_len.is_null() {
-			*out_len = 0;
-		}
+	if corpus.is_null() {
+		if !out_len.is_null() { *out_len = 0; }
 		return ptr::null_mut();
 	}
 	let c = &*corpus;
 	let Some(layer_str) = borrow_cstr(layer) else {
-		*out_len = 0;
+		if !out_len.is_null() { *out_len = 0; }
 		return ptr::null_mut();
 	};
-
 	let Some(values) = c.inverted.values(layer_str) else {
-		*out_len = 0;
+		if !out_len.is_null() { *out_len = 0; }
 		return ptr::null_mut();
 	};
-
-	let count = values.len();
-	if count == 0 {
-		*out_len = 0;
-		return ptr::null_mut();
-	}
-
-	let layout = std::alloc::Layout::array::<*mut c_char>(count).unwrap();
-	let array = std::alloc::alloc(layout) as *mut *mut c_char;
-	if array.is_null() {
-		*out_len = 0;
-		return ptr::null_mut();
-	}
-
-	for (i, val) in values.iter().enumerate() {
-		*array.add(i) = to_cstring(val);
-	}
-
-	*out_len = count as u64;
-	array
+	export_string_array(&values, out_len)
 }
 
 /// Returns the document index for a given name, or -1 if not found.
@@ -287,4 +265,59 @@ pub unsafe extern "C" fn montre_corpus_inverted_count(
 		Some(bitmap) => bitmap.len() as i64,
 		None => -1,
 	}
+}
+
+/// Returns the component index for a given name, or -1 if not found.
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_component_index_by_name(
+	corpus: *const Corpus,
+	name: *const c_char,
+) -> i32 {
+	if corpus.is_null() {
+		return -1;
+	}
+	let c = &*corpus;
+	let Some(name_str) = borrow_cstr(name) else {
+		return -1;
+	};
+	match c.components().iter().position(|comp| comp.name == name_str) {
+		Some(idx) => idx as i32,
+		None => -1,
+	}
+}
+
+/// Bulk-extract all values and their bitmap cardinalities for a layer.
+/// Returns parallel arrays: out_values (string array) and out_counts (u64 array).
+/// Free values with montre_string_array_free, counts with montre_u64_array_free.
+/// Returns 1 on success, 0 if the layer does not exist.
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_inverted_counts(
+	corpus: *const Corpus,
+	layer: *const c_char,
+	out_values: *mut *mut *mut c_char,
+	out_counts: *mut *mut u64,
+	out_len: *mut u64,
+) -> i32 {
+	if corpus.is_null() || out_values.is_null() || out_counts.is_null() || out_len.is_null() {
+		if !out_len.is_null() { *out_len = 0; }
+		return 0;
+	}
+	let c = &*corpus;
+	let Some(layer_str) = borrow_cstr(layer) else {
+		*out_len = 0;
+		return 0;
+	};
+	let Some(values) = c.inverted.values(layer_str) else {
+		*out_len = 0;
+		return 0;
+	};
+
+	let counts: Vec<u64> = values.iter().map(|v| {
+		c.inverted.get(layer_str, v).map_or(0, |b| b.len() as u64)
+	}).collect();
+
+	*out_values = export_string_array(&values, out_len);
+	let mut count_len: u64 = 0;
+	*out_counts = export_array(&counts, &mut count_len);
+	1
 }
