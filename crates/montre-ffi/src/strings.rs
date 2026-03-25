@@ -1,5 +1,6 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+use std::ptr;
 
 pub(crate) fn to_cstring(s: &str) -> *mut c_char {
 	match CString::new(s) {
@@ -16,6 +17,46 @@ pub(crate) unsafe fn borrow_cstr<'a>(p: *const c_char) -> Option<&'a str> {
 		return None;
 	}
 	CStr::from_ptr(p).to_str().ok()
+}
+
+pub(crate) unsafe fn export_array<T: Copy>(data: &[T], out_len: *mut u64) -> *mut T {
+	if out_len.is_null() {
+		return ptr::null_mut();
+	}
+	if data.is_empty() {
+		*out_len = 0;
+		return ptr::null_mut();
+	}
+	let layout = std::alloc::Layout::array::<T>(data.len()).unwrap();
+	let array = std::alloc::alloc(layout) as *mut T;
+	if array.is_null() {
+		*out_len = 0;
+		return ptr::null_mut();
+	}
+	ptr::copy_nonoverlapping(data.as_ptr(), array, data.len());
+	*out_len = data.len() as u64;
+	array
+}
+
+pub(crate) unsafe fn export_string_array(data: &[&str], out_len: *mut u64) -> *mut *mut c_char {
+	if out_len.is_null() {
+		return ptr::null_mut();
+	}
+	if data.is_empty() {
+		*out_len = 0;
+		return ptr::null_mut();
+	}
+	let layout = std::alloc::Layout::array::<*mut c_char>(data.len()).unwrap();
+	let array = std::alloc::alloc(layout) as *mut *mut c_char;
+	if array.is_null() {
+		*out_len = 0;
+		return ptr::null_mut();
+	}
+	for (i, s) in data.iter().enumerate() {
+		*array.add(i) = to_cstring(s);
+	}
+	*out_len = data.len() as u64;
+	array
 }
 
 #[no_mangle]

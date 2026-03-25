@@ -118,3 +118,30 @@ pub unsafe extern "C" fn montre_corpus_span_containing(
 
 	-1
 }
+
+/// Count spans of the given layer whose start falls within [token_start, token_end).
+/// Uses binary search. Returns -1 if the layer does not exist.
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_span_count_in_range(
+	corpus: *const Corpus,
+	layer: *const c_char,
+	token_start: u64,
+	token_end: u64,
+) -> i64 {
+	if corpus.is_null() {
+		return -1;
+	}
+	let c = &*corpus;
+	let Some(layer_str) = borrow_cstr(layer) else {
+		return -1;
+	};
+	let Some(spans) = c.spans.spans(layer_str) else {
+		return -1;
+	};
+	if spans.is_empty() || token_start >= token_end {
+		return 0;
+	}
+	let first = spans.partition_point(|s| s.start < token_start);
+	let last = spans.partition_point(|s| s.start < token_end);
+	(last - first) as i64
+}
