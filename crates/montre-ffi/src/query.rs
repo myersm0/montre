@@ -2,11 +2,30 @@ use std::os::raw::c_char;
 use std::ptr;
 
 use montre_index::{Corpus, SpanIndex};
-use montre_query::executor;
+use montre_query::{Query, executor};
 
 use crate::HitList;
 use crate::error::{set_error, clear_error};
-use crate::strings::{borrow_cstr, to_cstring};
+use crate::strings::{borrow_cstr, export_array, to_cstring};
+
+fn wrap_in_component(parsed: Query, component: &str) -> Query {
+	let components = vec![component.to_string()];
+	match parsed {
+		Query::Constrained { inner, constraints } => {
+			Query::Constrained {
+				inner: Box::new(Query::WithinComponent {
+					inner,
+					components,
+				}),
+				constraints,
+			}
+		}
+		other => Query::WithinComponent {
+			inner: Box::new(other),
+			components,
+		},
+	}
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn montre_query(
@@ -113,9 +132,7 @@ pub unsafe extern "C" fn montre_query_in_component(
 		return ptr::null_mut();
 	};
 
-	let full_query = format!("{} within component:\"{}\"", cql_str, comp_str);
-
-	let parsed = match montre_query::parse(&full_query) {
+	let parsed = match montre_query::parse(cql_str) {
 		Ok(q) => q,
 		Err(e) => {
 			set_error(e.to_string());
@@ -123,7 +140,9 @@ pub unsafe extern "C" fn montre_query_in_component(
 		}
 	};
 
-	let plan = match montre_query::planner::plan(&parsed) {
+	let wrapped = wrap_in_component(parsed, comp_str);
+
+	let plan = match montre_query::planner::plan(&wrapped) {
 		Ok(p) => p,
 		Err(e) => {
 			set_error(e.to_string());
@@ -165,9 +184,7 @@ pub unsafe extern "C" fn montre_query_count_in_component(
 		return -1;
 	};
 
-	let full_query = format!("{} within component:\"{}\"", cql_str, comp_str);
-
-	let parsed = match montre_query::parse(&full_query) {
+	let parsed = match montre_query::parse(cql_str) {
 		Ok(q) => q,
 		Err(e) => {
 			set_error(e.to_string());
@@ -175,7 +192,9 @@ pub unsafe extern "C" fn montre_query_count_in_component(
 		}
 	};
 
-	let plan = match montre_query::planner::plan(&parsed) {
+	let wrapped = wrap_in_component(parsed, comp_str);
+
+	let plan = match montre_query::planner::plan(&wrapped) {
 		Ok(p) => p,
 		Err(e) => {
 			set_error(e.to_string());
@@ -264,28 +283,12 @@ pub unsafe extern "C" fn montre_hitlist_starts(
 	hits: *const HitList,
 	out_len: *mut u64,
 ) -> *mut u64 {
-	if hits.is_null() || out_len.is_null() {
+	if hits.is_null() {
 		if !out_len.is_null() { *out_len = 0; }
 		return ptr::null_mut();
 	}
-	let hitlist = &*hits;
-	let count = hitlist.hits.len();
-	if count == 0 {
-		*out_len = 0;
-		return ptr::null_mut();
-	}
-
-	let layout = std::alloc::Layout::array::<u64>(count).unwrap();
-	let array = std::alloc::alloc(layout) as *mut u64;
-	if array.is_null() {
-		*out_len = 0;
-		return ptr::null_mut();
-	}
-	for (i, hit) in hitlist.hits.iter().enumerate() {
-		*array.add(i) = hit.span.start;
-	}
-	*out_len = count as u64;
-	array
+	let data: Vec<u64> = (*hits).hits.iter().map(|h| h.span.start).collect();
+	export_array(&data, out_len)
 }
 
 /// Bulk-extract all hit end positions as a flat u64 array.
@@ -295,28 +298,12 @@ pub unsafe extern "C" fn montre_hitlist_ends(
 	hits: *const HitList,
 	out_len: *mut u64,
 ) -> *mut u64 {
-	if hits.is_null() || out_len.is_null() {
+	if hits.is_null() {
 		if !out_len.is_null() { *out_len = 0; }
 		return ptr::null_mut();
 	}
-	let hitlist = &*hits;
-	let count = hitlist.hits.len();
-	if count == 0 {
-		*out_len = 0;
-		return ptr::null_mut();
-	}
-
-	let layout = std::alloc::Layout::array::<u64>(count).unwrap();
-	let array = std::alloc::alloc(layout) as *mut u64;
-	if array.is_null() {
-		*out_len = 0;
-		return ptr::null_mut();
-	}
-	for (i, hit) in hitlist.hits.iter().enumerate() {
-		*array.add(i) = hit.span.end;
-	}
-	*out_len = count as u64;
-	array
+	let data: Vec<u64> = (*hits).hits.iter().map(|h| h.span.end).collect();
+	export_array(&data, out_len)
 }
 
 /// Bulk-extract all hit document indices as a flat u64 array.
@@ -327,28 +314,12 @@ pub unsafe extern "C" fn montre_hitlist_document_indices(
 	hits: *const HitList,
 	out_len: *mut u64,
 ) -> *mut u64 {
-	if hits.is_null() || out_len.is_null() {
+	if hits.is_null() {
 		if !out_len.is_null() { *out_len = 0; }
 		return ptr::null_mut();
 	}
-	let hitlist = &*hits;
-	let count = hitlist.hits.len();
-	if count == 0 {
-		*out_len = 0;
-		return ptr::null_mut();
-	}
-
-	let layout = std::alloc::Layout::array::<u64>(count).unwrap();
-	let array = std::alloc::alloc(layout) as *mut u64;
-	if array.is_null() {
-		*out_len = 0;
-		return ptr::null_mut();
-	}
-	for (i, hit) in hitlist.hits.iter().enumerate() {
-		*array.add(i) = hit.document_index as u64;
-	}
-	*out_len = count as u64;
-	array
+	let data: Vec<u64> = (*hits).hits.iter().map(|h| h.document_index as u64).collect();
+	export_array(&data, out_len)
 }
 
 /// Bulk-extract all hit sentence indices as a flat u64 array.
@@ -359,28 +330,12 @@ pub unsafe extern "C" fn montre_hitlist_sentence_indices(
 	hits: *const HitList,
 	out_len: *mut u64,
 ) -> *mut u64 {
-	if hits.is_null() || out_len.is_null() {
+	if hits.is_null() {
 		if !out_len.is_null() { *out_len = 0; }
 		return ptr::null_mut();
 	}
-	let hitlist = &*hits;
-	let count = hitlist.hits.len();
-	if count == 0 {
-		*out_len = 0;
-		return ptr::null_mut();
-	}
-
-	let layout = std::alloc::Layout::array::<u64>(count).unwrap();
-	let array = std::alloc::alloc(layout) as *mut u64;
-	if array.is_null() {
-		*out_len = 0;
-		return ptr::null_mut();
-	}
-	for (i, hit) in hitlist.hits.iter().enumerate() {
-		*array.add(i) = hit.sentence_index as u64;
-	}
-	*out_len = count as u64;
-	array
+	let data: Vec<u64> = (*hits).hits.iter().map(|h| h.sentence_index as u64).collect();
+	export_array(&data, out_len)
 }
 
 #[no_mangle]
