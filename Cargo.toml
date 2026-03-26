@@ -72,3 +72,6 @@ codegen-units = 1
 [profile.bench]
 debug = true
 
+[profile.release]
+panic = "abort"
+
