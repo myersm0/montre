@@ -90,10 +90,11 @@ span.overlaps(&s)       // true if any overlap
 ```rust
 use montre_index::ForwardIndex;
 
-// String layers (word, lemma, upos, xpos, feats, etc.) — preferred, zero-copy with mapped backend
+// String layers (word, lemma, upos, xpos, feats, deps, etc.) — preferred, zero-copy with mapped backend
 let word: Option<&str> = corpus.forward.get_str(position, "word");
 let upos: Option<&str> = corpus.forward.get_str(position, "upos");
 let xpos: Option<&str> = corpus.forward.get_str(position, "xpos");
+let deps: Option<&str> = corpus.forward.get_str(position, "deps");  // raw enhanced deps string
 
 // Integer layers (head) — sentence-local values, not converted to global positions
 let head: Option<i64> = corpus.forward.get_int(position, "head");
@@ -124,7 +125,7 @@ let layers: Vec<&str> = corpus.inverted.layers();
 
 **Note on `pos` alias**: In CQL queries, `pos` is rewritten to `upos` at parse time. When accessing the inverted index or forward index directly via the API, use `"upos"` (the physical layer name).
 
-**Forward-only layers**: The `head` layer is stored in the forward index only — it is not present in the inverted index. Sentence-local integers are not meaningful as query targets. Use `get_int` to access head values from bindings for dependency tree reconstruction.
+**Forward-only layers**: The `head` and `deps` layers are stored in the forward index only — they are not present in the inverted index. `head` contains sentence-local integers; `deps` contains raw enhanced dependency strings (e.g., `"2:obj|5.1:nsubj:pass"`). Both have high cardinality or non-string types that make inverted indexing impractical. Use `get_int` to access head values and `get_str` for deps strings. Tokens without enhanced deps return `None` (underscore values are not stored).
 
 ### Span index
 
@@ -151,6 +152,58 @@ corpus.sentence_id_count()            // usize
 ```
 
 Sentence IDs are stored in a memory-mapped flat file (`sentence_ids.bin`) parallel to the sentence span array. The fallback format for sentences without a `# sent_id` comment is `{document_name}:{0-based_sentence_index_within_document}`.
+
+### Multiword tokens
+
+```rust
+use montre_index::MWTEntry;
+
+// Lookup by position — returns the MWT covering this position, if any
+corpus.mwt_covering(position)              // Option<MWTEntry>
+
+// All MWTs overlapping a span
+corpus.mwts_in_range(start, end)           // Vec<MWTEntry>
+
+// MWTEntry fields
+pub struct MWTEntry {
+    pub start: u64,           // global token position (inclusive)
+    pub end: u64,             // global token position (exclusive)
+    pub form: String,         // surface form (e.g., "au", "dell'")
+    pub no_space_after: bool, // SpaceAfter=No on the MWT row
+}
+```
+
+MWTs are stored in `mwt.bin`, a flat memory-mapped binary format sorted by start position. Lookups use binary search. MWT entries do not occupy positions in the token stream — the constituent words are the indexed tokens.
+
+### Spacing
+
+```rust
+// Check whether a position has SpaceAfter=No
+corpus.has_no_space_after(position)    // bool
+```
+
+Spacing flags are stored as a roaring bitmap in `spacing.bin`. The bitmap contains positions where the CoNLL-U misc column includes `SpaceAfter=No`. For positions covered by an MWT, the MWT's own `no_space_after` flag is authoritative — the bitmap is not consulted.
+
+### Empty nodes
+
+```rust
+use montre_index::EmptyNodeStore;
+
+corpus.empty_nodes()                                    // Option<&EmptyNodeStore>
+corpus.empty_nodes().unwrap().in_sentence(sentence_idx) // &[EmptyNode]
+corpus.empty_nodes().unwrap().len()                     // usize
+```
+
+Empty nodes (decimal-ID rows like `6.1` in CoNLL-U) are stored in `empty_nodes.json`. They are not assigned positions in the token stream and do not appear in the forward index, inverted index, or query results. Fields: `sentence_index`, `node_id`, `form`, `lemma`, `upos`, `xpos`, `feats`, `deps`, `misc` (all optional strings except `sentence_index`, `node_id`, and `form`).
+
+### Surface text
+
+```rust
+// MWT-aware, SpaceAfter-aware text reconstruction
+corpus.surface_text(start, end)    // String
+```
+
+Reconstructs visible text for a token range by consulting MWTs and spacing flags. When a position is covered by an MWT, the MWT surface form is emitted and constituent word positions are skipped. Spacing between tokens is suppressed where `SpaceAfter=No` applies — either from the MWT's flag or the token-level spacing bitmap.
 
 ### Components and alignments
 
@@ -266,7 +319,7 @@ BuildError::Alignment(String)
 
 ## C FFI
 
-The `montre-ffi` crate exports 57 `extern "C"` functions across eight modules. All string arguments are `*const c_char` (null-terminated). All returned strings are owned by Rust; copy and free with `montre_string_free`.
+The `montre-ffi` crate exports 64 `extern "C"` functions across eight modules. All string arguments are `*const c_char` (null-terminated). All returned strings are owned by Rust; copy and free with `montre_string_free`.
 
 ### Error handling
 
@@ -399,6 +452,42 @@ char   **montre_corpus_sentence_ids(const void *corpus, uint64_t *out_len);
 
 `montre_corpus_sentence_id` returns an owned string (free with `montre_string_free`), or NULL if the index is out of bounds. `montre_corpus_sentence_ids` returns a string array (free with `montre_string_array_free`).
 
+### Multiword tokens and surface text
+
+```c
+// MWT form at a position, or NULL if no MWT covers it
+char *montre_corpus_mwt_form(const void *corpus, uint64_t position);
+
+// Full MWT info at a position. Returns 1 if found, 0 otherwise. Out-params are nullable.
+int32_t montre_corpus_mwt_at(
+    const void *corpus, uint64_t position,
+    uint64_t *out_start, uint64_t *out_end, char **out_form
+);
+
+// MWT-aware, SpaceAfter-aware text reconstruction for a token range.
+char *montre_corpus_surface_text(const void *corpus, uint64_t start, uint64_t end);
+
+// Check SpaceAfter=No flag. Returns 1 if set, 0 otherwise.
+int32_t montre_corpus_has_no_space_after(const void *corpus, uint64_t position);
+```
+
+`montre_corpus_span_text` and `montre_hitlist_texts` automatically use surface text reconstruction when the layer is `"word"`.
+
+### Empty nodes
+
+```c
+uint64_t montre_corpus_empty_node_count(const void *corpus);
+
+uint64_t montre_corpus_empty_node_count_in_sentence(const void *corpus, uint32_t sentence_index);
+
+// Access a field of the Nth empty node in a sentence. Field names: "node_id", "form",
+// "lemma", "upos", "xpos", "feats", "deps", "misc". Returns NULL for unknown fields
+// or absent optional fields. Free with montre_string_free.
+char *montre_corpus_empty_node_field(
+    const void *corpus, uint32_t sentence_index, uint32_t node_index, const char *field
+);
+```
+
 ### Build
 
 ```c
@@ -419,13 +508,16 @@ corpus/
 ├── forward.bin          # position → annotations per layer (flat mmap format: bitmap-sparse, dictionary-coded)
 ├── spans.bin            # sentence, document, and custom span layers (flat mmap format)
 ├── sentence_ids.bin     # CoNLL-U sent_id values parallel to sentence spans (flat mmap format)
+├── mwt.bin              # multiword token side table (flat mmap format, optional)
+├── spacing.bin          # SpaceAfter=No flags as roaring bitmap (optional)
+├── empty_nodes.json     # empty node records per sentence (optional)
 ├── lexicon.bin          # term dictionary per layer (bincode)
 └── alignments.bin       # alignment edges (optional, only for multi-component corpora)
 ```
 
-Index version is stored in `corpus.json` and checked on load. Current version: 4.
+Index version is stored in `corpus.json` and checked on load. Current version: 5.
 
-The `forward.bin`, `spans.bin`, and `sentence_ids.bin` files use custom flat binary formats designed for memory-mapped access. They are opened via `mmap` on `Corpus::open` with no deserialization — the OS pages data into RAM on demand. The `inverted.bin` and `lexicon.bin` files are still bincode-serialized and deserialized into heap structures on open.
+The `forward.bin`, `spans.bin`, `sentence_ids.bin`, and `mwt.bin` files use custom flat binary formats designed for memory-mapped access. They are opened via `mmap` on `Corpus::open` with no deserialization — the OS pages data into RAM on demand. The `inverted.bin` and `lexicon.bin` files are still bincode-serialized and deserialized into heap structures on open. The `spacing.bin` file contains a serialized roaring bitmap with a small header. The `empty_nodes.json` file is deserialized into memory on open.
 
 ## Build manifest
 

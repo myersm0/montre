@@ -85,11 +85,26 @@ Components remain independently queryable. You can query `maupassant-fr` as if t
 
 **Token**: A position in the corpus with annotations across multiple layers.
 
-**Layer**: A named annotation dimension (word, lemma, upos, xpos, feats, head, deprel). `pos` is a parse-time alias for `upos`. The `head` layer stores sentence-local dependency head indices as integers and is forward-only (not in the inverted index). With `decompose_feats` enabled, morphological features are additionally indexed as `feats.Number`, `feats.Gender`, etc.
+**Layer**: A named annotation dimension (word, lemma, upos, xpos, feats, head, deprel, deps). `pos` is a parse-time alias for `upos`. The `head` layer stores sentence-local dependency head indices as integers and is forward-only (not in the inverted index). The `deps` layer stores raw enhanced dependency strings from CoNLL-U column 9 and is also forward-only — its high cardinality makes inverted indexing impractical. Tokens where the deps column is `_` have no entry (returns `None`). With `decompose_feats` enabled, morphological features are additionally indexed as `feats.Number`, `feats.Gender`, etc.
 
 **Span**: A contiguous range of token positions `[start, end)`.
 
 **Span Layer**: A named collection of non-overlapping spans (sentence, document, paragraph, stanza, scene, etc.).
+
+**Multiword Token (MWT)**: A CoNLL-U range-ID row (e.g., `3-4`) representing a surface form that spans multiple syntactic words. MWTs are not assigned positions in the token stream — the constituent words are the indexed tokens. MWTs are stored in a side table (`mwt.bin`) and consulted during surface text reconstruction.
+
+```rust
+struct MWTEntry {
+    start: u64,           // global token position (inclusive)
+    end: u64,             // global token position (exclusive)
+    form: String,         // surface form (e.g., "au", "dell'")
+    no_space_after: bool, // SpaceAfter=No from the MWT row's misc column
+}
+```
+
+**SpaceAfter**: A per-token flag indicating that no space separates this token from the next in the original text. Extracted from the CoNLL-U misc column (`SpaceAfter=No`). Stored as a roaring bitmap of positions in `spacing.bin`. For positions covered by an MWT, the MWT's own `no_space_after` flag is authoritative.
+
+**Empty Node**: A CoNLL-U decimal-ID row (e.g., `6.1`) representing a node in the enhanced dependency graph with no surface realization. Empty nodes are not assigned positions and do not participate in querying. Stored in `empty_nodes.json` with all annotation fields preserved.
 
 **Component**: A labeled subcorpus within a multi-component corpus. Each document belongs to exactly one component.
 
@@ -167,6 +182,9 @@ my-corpus/
 ├── forward.bin          # position → annotations (flat mmap format)
 ├── spans.bin            # sentence, document spans (flat mmap format)
 ├── sentence_ids.bin     # CoNLL-U sent_id values (flat mmap format)
+├── mwt.bin              # multiword token side table (flat mmap format, optional)
+├── spacing.bin          # SpaceAfter=No flags (roaring bitmap, optional)
+├── empty_nodes.json     # empty node records (optional)
 └── lexicon.bin          # term dictionary (bincode)
 ```
 
@@ -179,7 +197,11 @@ isosceles/
 │   ├── maupassant-fr/
 │   │   ├── inverted.bin
 │   │   ├── forward.bin
-│   │   └── spans.bin
+│   │   ├── spans.bin
+│   │   ├── sentence_ids.bin
+│   │   ├── mwt.bin
+│   │   ├── spacing.bin
+│   │   └── empty_nodes.json
 │   ├── maupassant-en/
 │   │   └── ...
 │   └── poe-1845/
@@ -845,6 +867,58 @@ String pool: concatenated UTF-8 sentence ID strings
 
 Lookup is O(1): read two adjacent u32 offsets, slice the pool.
 
+### Phase 4b: UD compliance — items 4–6 (v0.6.0) ✓
+
+- [x] **MWT preservation**: CoNLL-U range-ID rows (e.g., `3-4`) parsed into `MWTEntry` with global positions. Stored in `mwt.bin` (flat mmap format: header + fixed-size entries sorted by start position + string pool). Binary search for `covering(position)` and `in_range(start, end)`. `no_space_after` flag stored per entry.
+- [x] **SpaceAfter preservation**: `SpaceAfter=No` extracted from CoNLL-U misc column for both ordinary tokens and MWT rows. Token-level flags stored as a roaring bitmap in `spacing.bin`. MWT-level flags stored in the MWT entry itself (Option A: spacing belongs to the emitted surface unit).
+- [x] **Empty node preservation**: CoNLL-U decimal-ID rows (e.g., `6.1`) parsed into `EmptyNode` with all annotation fields. Stored in `empty_nodes.json` (sorted by sentence index). Not assigned positions, not indexed, not queryable.
+- [x] **Enhanced deps preservation**: CoNLL-U column 9 stored as a `DictEncoded` forward-only layer (`deps`). Underscore values filtered at build time (return `None`, not `"_"`). Forward-only mechanism reused from `head`.
+- [x] **Surface text reconstruction**: `Corpus::surface_text(start, end)` consults MWT side table and spacing bitmap. MWT forms replace constituent words; `no_space_after` suppresses inter-token spaces. CLI KWIC display and FFI `span_text`/`hitlist_texts` updated to use surface text for the `"word"` layer.
+- [x] Index version bumped to 5.
+- [x] Default layer set expanded: word, lemma, upos, xpos, feats, head, deprel, deps (was: word, lemma, upos, xpos, feats, head, deprel).
+- [x] 7 new FFI functions: `montre_corpus_mwt_form`, `montre_corpus_mwt_at`, `montre_corpus_surface_text`, `montre_corpus_has_no_space_after`, `montre_corpus_empty_node_count`, `montre_corpus_empty_node_count_in_sentence`, `montre_corpus_empty_node_field` (64 total, was 57).
+- [x] 180+ tests (was 170+), including MWT surface text reconstruction, MWT+SpaceAfter combined, deps forward-only verification, empty node preservation and non-indexing, end-to-end build-query-display pipeline.
+
+**MWT storage format (`MMWT`)**
+
+Flat binary, memory-mapped at open time:
+
+```
+Header (16 bytes):
+    magic: "MMWT"
+    version: u32 = 1
+    bom: u32 = 0x01020304
+    count: u32
+
+Entries (count × 24 bytes each, sorted by start):
+    start: u64          global token position (inclusive)
+    end: u64            global token position (exclusive)
+    form_offset: u32    byte offset into string pool
+    form_len: u16       byte length of form
+    flags: u8           bit 0 = no_space_after
+    padding: u8
+
+String pool: concatenated UTF-8 form strings (8-byte aligned start)
+```
+
+Lookup is O(log n) via binary search on `start`. `covering(position)` finds the entry whose range contains the position. `in_range(start, end)` finds all entries overlapping the query span.
+
+**Spacing storage format (`MSPC`)**
+
+Header (8 bytes: magic `"MSPC"` + version u32) followed by a serialized roaring bitmap. The bitmap contains positions where `SpaceAfter=No` is set. Typical size is a few KB even for large corpora.
+
+**Empty node storage format**
+
+JSON array of objects, sorted by `(sentence_index, node_id)`. Fields with `_` values are omitted from the JSON. Chosen over a binary format because empty nodes are rare, structurally complex, and not on any hot access path.
+
+**Design decisions**
+
+*Spacing belongs to the emitted surface unit.* MWT spacing (`no_space_after` on `MWTEntry`) and token spacing (roaring bitmap) are separate sources. Surface text reconstruction uses the MWT flag when rendering an MWT, the bitmap when rendering an ordinary token. The bitmap is not consulted for positions covered by an MWT.
+
+*Deps underscore filtering.* Tokens where CoNLL-U column 9 is `_` do not get a `deps` entry in the forward index. `get_str(position, "deps")` returns `None`, consistent with how other optional layers behave.
+
+*Empty nodes as JSON.* Binary format considered and deferred — empty nodes are infrequent (many treebanks have zero), structurally complex (many string fields), and have no hot-path access pattern. JSON is debuggable and trivially extensible.
+
 ### Phase 4: Statistics & bindings
 
 - [x] `count` command (CLI)
@@ -967,7 +1041,7 @@ cargo test -p montre-query    # single crate
 cargo test -p montre-query --test executor_integration   # integration tests
 ```
 
-The test suite has 170+ tests across all crates. The integration test suite (`crates/montre-query/tests/executor_integration.rs`) covers end-to-end query execution including sequences, quantifiers, alternation edge cases, within constraints, multi-document queries, alignment projection, feats decomposition, labeled captures, global constraint evaluation, the Results API, head layer round-trip, UPOS/XPOS layer verification, `pos` alias resolution, and sentence ID preservation with fallback generation.
+The test suite has 180+ tests across all crates. The integration test suite (`crates/montre-query/tests/executor_integration.rs`) covers end-to-end query execution including sequences, quantifiers, alternation edge cases, within constraints, multi-document queries, alignment projection, feats decomposition, labeled captures, global constraint evaluation, the Results API, head layer round-trip, UPOS/XPOS layer verification, `pos` alias resolution, sentence ID preservation with fallback generation, MWT surface text reconstruction, SpaceAfter handling, deps forward-only verification, and empty node preservation.
 
 A shared test corpus at `testdata/parallel/` provides a small multi-component French/English corpus with sentence alignments, suitable for reuse in Julia and Python binding test suites. See `testdata/parallel/POSITIONS.md` for the position reference.
 

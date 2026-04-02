@@ -97,6 +97,16 @@ Requires using the flag `--decompose-feats` at build time.
 [feats.Gender="Masc" & feats.Tense="Past"]
 ```
 
+### CoNLL-U fidelity
+
+Montre preserves UD annotation data:
+
+- **Multiword tokens** (range-ID rows like `3-4`): stored in a side table and used for correct surface text reconstruction. Concordance output shows `au` instead of `à le`.
+- **SpaceAfter=No**: preserved from the misc column. Surface text joins tokens without spaces where appropriate (e.g., `dort.` not `dort .`).
+- **Head column**: stored as a sentence-local integer layer (`head`). Not queryable, but accessible via the API for dependency tree reconstruction.
+- **Enhanced deps** (column 9): stored as a forward-only layer (`deps`). Raw strings like `2:obj|4:nsubj` are preserved for round-trip fidelity.
+- **Empty nodes** (decimal-ID rows like `6.1`): stored in a JSON sidecar. Not indexed or queryable, but preserved for downstream tools.
+
 ### Component and document filtering
 ```cql
 [pos="NOUN"] within component:fr
