@@ -85,7 +85,7 @@ Components remain independently queryable. You can query `maupassant-fr` as if t
 
 **Token**: A position in the corpus with annotations across multiple layers.
 
-**Layer**: A named annotation dimension (word, lemma, pos, xpos, feats, deprel, head). With `decompose_feats` enabled, morphological features are additionally indexed as `feats.Number`, `feats.Gender`, etc.
+**Layer**: A named annotation dimension (word, lemma, upos, xpos, feats, head, deprel). `pos` is a parse-time alias for `upos`. The `head` layer stores sentence-local dependency head indices as integers and is forward-only (not in the inverted index). With `decompose_feats` enabled, morphological features are additionally indexed as `feats.Number`, `feats.Gender`, etc.
 
 **Span**: A contiguous range of token positions `[start, end)`.
 
@@ -166,6 +166,7 @@ my-corpus/
 ├── inverted.bin         # term → positions (bincode)
 ├── forward.bin          # position → annotations (flat mmap format)
 ├── spans.bin            # sentence, document spans (flat mmap format)
+├── sentence_ids.bin     # CoNLL-U sent_id values (flat mmap format)
 └── lexicon.bin          # term dictionary (bincode)
 ```
 
@@ -723,7 +724,7 @@ The `count_sequence` path uses the same document-parallel strategy, summing per-
 - [x] `Corpus` uses `SpanStore` and `ForwardStore`; forward and spans mmapped on open
 - [x] Builder writes flat formats for both spans and forward
 - [x] CLI and FFI migrated from `forward.get()` to `get_str`/`get_int`
-- [x] Index version bumped to 3
+- [x] Index version bumped to 3 (bumped again to 4 in Phase 4a)
 
 **Design decisions**
 
@@ -735,7 +736,7 @@ ELTeC profiling (10M+ tokens, 25-30 layers with decomposed morphological feature
 
 The solution: uniform on-disk format (roaring presence bitmap + packed dictionary-coded term IDs per layer), with variable-width encoding (u8/u16/u32) chosen per layer based on vocabulary size. The `head` layer, which stores integer dependency head indices, uses a separate `DenseNumeric` encoding — a flat u32 array with no bitmap or term table.
 
-At open time, the reader detects fully-present layers (bitmap cardinality equals token count) and marks them for direct indexing, bypassing bitmap rank entirely. This covers word, lemma, pos, deprel — the layers that dominate collocation, KWIC, and bulk extraction. Sparse feats layers go through contains+rank at ~50ns per lookup, which is acceptable given their lower access frequency.
+At open time, the reader detects fully-present layers (bitmap cardinality equals token count) and marks them for direct indexing, bypassing bitmap rank entirely. This covers word, lemma, upos, deprel — the layers that dominate collocation, KWIC, and bulk extraction. Sparse feats layers go through contains+rank at ~50ns per lookup, which is acceptable given their lower access frequency.
 
 Result: ~200MB forward index for 10M tokens across 25 layers, compared to 2.4GB dense. Corpus open time reduced by 93-96%.
 
@@ -814,6 +815,35 @@ The naive approach (one query per document) was noticeably slow on the 307-docum
 **Single-component CLI workaround**
 
 Single-component builds leave `CorpusMeta.components` empty, so `within component:"name"` in CQL returns zero results. The CLI avoids emitting component filters for single-component corpora. A proper engine fix (always populate `ComponentMeta`) is tracked as future work.
+
+### Phase 4a: UD correctness — items 1–3 (v0.6.0) ✓
+
+- [x] **Head layer**: `head` column stored as `DenseNumeric` layer in forward index. Values are raw sentence-local integers (0 = root). Not converted to global positions at build time.
+- [x] **Forward-only layer mechanism**: builder-level `HashSet<String>` of layer names excluded from inverted index and lexicon. `head` is forward-only by default. `add_token_int_annotation` method for integer values.
+- [x] **UPOS/XPOS split**: CoNLL-U column 4 → `upos` layer, column 5 → `xpos` layer. Both indexed in inverted and forward indexes. `pos` is a parse-time alias for `upos` (resolved in `parse_constraint` and `parse_label_attr`). CLI `vocab` command also resolves the alias.
+- [x] **Sentence ID preservation**: `# sent_id = ...` extracted from CoNLL-U comments. Stored in `sentence_ids.bin` (flat mmap format: header + u32 offset table + string pool). Fallback `{document_name}:{sentence_index_within_document}` when absent. Accessible via `corpus.sentence_id(index)` and FFI (`montre_corpus_sentence_id`, `montre_corpus_sentence_ids`).
+- [x] Index version bumped to 4. Version mismatch error directs users to rebuild.
+- [x] Default layer set expanded: word, lemma, upos, xpos, feats, head, deprel (was: word, lemma, pos, xpos, feats, deprel).
+- [x] 170+ tests (was 150+), including head round-trip, UPOS/XPOS layer verification, sentence ID pipeline tests with fallback and mixed presence.
+
+**Sentence ID storage format (`MSID`)**
+
+Flat binary, memory-mapped at open time with zero deserialization:
+
+```
+Header (16 bytes):
+    magic: "MSID"
+    version: u32 = 1
+    bom: u32 = 0x01020304
+    count: u32
+
+Offset table: (count + 1) × u32 byte offsets into string pool
+    padded to 8-byte alignment
+
+String pool: concatenated UTF-8 sentence ID strings
+```
+
+Lookup is O(1): read two adjacent u32 offsets, slice the pool.
 
 ### Phase 4: Statistics & bindings
 
@@ -937,7 +967,7 @@ cargo test -p montre-query    # single crate
 cargo test -p montre-query --test executor_integration   # integration tests
 ```
 
-The test suite has 150+ tests across all crates. The integration test suite (`crates/montre-query/tests/executor_integration.rs`) covers end-to-end query execution including sequences, quantifiers, alternation edge cases, within constraints, multi-document queries, alignment projection, feats decomposition, labeled captures, global constraint evaluation, and the Results API.
+The test suite has 170+ tests across all crates. The integration test suite (`crates/montre-query/tests/executor_integration.rs`) covers end-to-end query execution including sequences, quantifiers, alternation edge cases, within constraints, multi-document queries, alignment projection, feats decomposition, labeled captures, global constraint evaluation, the Results API, head layer round-trip, UPOS/XPOS layer verification, `pos` alias resolution, and sentence ID preservation with fallback generation.
 
 A shared test corpus at `testdata/parallel/` provides a small multi-component French/English corpus with sentence alignments, suitable for reuse in Julia and Python binding test suites. See `testdata/parallel/POSITIONS.md` for the position reference.
 

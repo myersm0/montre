@@ -78,6 +78,16 @@ Montre uses a CQL-based language, extended with labels, constraints, and alignme
 [lemma="chat"] within doc
 ```
 
+### UPOS and XPOS
+
+Montre stores the UPOS and XPOS columns from CoNLL-U as separate `upos` and `xpos` layers. The familiar `pos` name is an alias for `upos` and works everywhere:
+
+```cql
+[pos="NOUN"]           # equivalent to [upos="NOUN"]
+[xpos="NN"]            # Penn Treebank tag
+[upos="NOUN" & xpos="NNS"]   # both
+```
+
 ### Morphological features
 
 Requires using the flag `--decompose-feats` at build time.
@@ -213,7 +223,7 @@ A paper describing Montre is in preparation. In the meantime, if you use Montre 
   title        = {Montre: A Modern Corpus Query Engine for Aligned Corpora},
   year         = {2026},
   url          = {https://github.com/myersm0/montre},
-  version      = {0.4.0}
+  version      = {0.6.0}
 }
 ```
 

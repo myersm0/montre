@@ -90,11 +90,12 @@ span.overlaps(&s)       // true if any overlap
 ```rust
 use montre_index::ForwardIndex;
 
-// String layers (word, lemma, pos, feats, etc.) — preferred, zero-copy with mapped backend
+// String layers (word, lemma, upos, xpos, feats, etc.) — preferred, zero-copy with mapped backend
 let word: Option<&str> = corpus.forward.get_str(position, "word");
-let pos: Option<&str> = corpus.forward.get_str(position, "pos");
+let upos: Option<&str> = corpus.forward.get_str(position, "upos");
+let xpos: Option<&str> = corpus.forward.get_str(position, "xpos");
 
-// Integer layers (head)
+// Integer layers (head) — sentence-local values, not converted to global positions
 let head: Option<i64> = corpus.forward.get_int(position, "head");
 
 // Range of positions (returns owned Values)
@@ -115,11 +116,15 @@ use montre_index::InvertedIndex;
 let bitmap = corpus.inverted.get("pos", "NOUN");
 
 // All values for a layer
-let values: Option<Vec<&str>> = corpus.inverted.values("pos");
+let values: Option<Vec<&str>> = corpus.inverted.values("upos");
 
 // All indexed layer names
 let layers: Vec<&str> = corpus.inverted.layers();
 ```
+
+**Note on `pos` alias**: In CQL queries, `pos` is rewritten to `upos` at parse time. When accessing the inverted index or forward index directly via the API, use `"upos"` (the physical layer name).
+
+**Forward-only layers**: The `head` layer is stored in the forward index only — it is not present in the inverted index. Sentence-local integers are not meaningful as query targets. Use `get_int` to access head values from bindings for dependency tree reconstruction.
 
 ### Span index
 
@@ -136,6 +141,16 @@ let span: Option<&Span> = corpus.spans.containing("sentence", position);
 // Available span layers
 let layers: Vec<&str> = corpus.spans.layers();
 ```
+
+### Sentence IDs
+
+```rust
+// Sentence ID from CoNLL-U # sent_id comment, or fallback "{doc_name}:{N}"
+corpus.sentence_id(sentence_index)    // Option<&str>
+corpus.sentence_id_count()            // usize
+```
+
+Sentence IDs are stored in a memory-mapped flat file (`sentence_ids.bin`) parallel to the sentence span array. The fallback format for sentences without a `# sent_id` comment is `{document_name}:{0-based_sentence_index_within_document}`.
 
 ### Components and alignments
 
@@ -374,6 +389,16 @@ int64_t  montre_corpus_span_containing(const void *corpus, const char *layer, ui
 
 `montre_corpus_span_containing` returns the span index, or -1 if not found. The out-parameters are nullable — pass NULL if you only need the index.
 
+### Sentence IDs
+
+```c
+uint64_t montre_corpus_sentence_id_count(const void *corpus);
+char    *montre_corpus_sentence_id(const void *corpus, uint64_t sentence_index);
+char   **montre_corpus_sentence_ids(const void *corpus, uint64_t *out_len);
+```
+
+`montre_corpus_sentence_id` returns an owned string (free with `montre_string_free`), or NULL if the index is out of bounds. `montre_corpus_sentence_ids` returns a string array (free with `montre_string_array_free`).
+
 ### Build
 
 ```c
@@ -389,17 +414,18 @@ A built corpus is a directory:
 
 ```
 corpus/
-├── corpus.json     # metadata (name, version, layers, components, alignments)
-├── inverted.bin    # term → positions (bincode-serialized HashMap<String, HashMap<String, RoaringBitmap>>)
-├── forward.bin     # position → annotations per layer (flat mmap format: bitmap-sparse, dictionary-coded)
-├── spans.bin       # sentence, document, and custom span layers (flat mmap format)
-├── lexicon.bin     # term dictionary per layer (bincode)
-└── alignments.bin  # alignment edges (optional, only for multi-component corpora)
+├── corpus.json          # metadata (name, version, layers, components, alignments)
+├── inverted.bin         # term → positions (bincode-serialized HashMap<String, HashMap<String, RoaringBitmap>>)
+├── forward.bin          # position → annotations per layer (flat mmap format: bitmap-sparse, dictionary-coded)
+├── spans.bin            # sentence, document, and custom span layers (flat mmap format)
+├── sentence_ids.bin     # CoNLL-U sent_id values parallel to sentence spans (flat mmap format)
+├── lexicon.bin          # term dictionary per layer (bincode)
+└── alignments.bin       # alignment edges (optional, only for multi-component corpora)
 ```
 
-Index version is stored in `corpus.json` and checked on load. Current version: 3.
+Index version is stored in `corpus.json` and checked on load. Current version: 4.
 
-The `forward.bin` and `spans.bin` files use custom flat binary formats designed for memory-mapped access. They are opened via `mmap` on `Corpus::open` with no deserialization — the OS pages data into RAM on demand. The `inverted.bin` and `lexicon.bin` files are still bincode-serialized and deserialized into heap structures on open.
+The `forward.bin`, `spans.bin`, and `sentence_ids.bin` files use custom flat binary formats designed for memory-mapped access. They are opened via `mmap` on `Corpus::open` with no deserialization — the OS pages data into RAM on demand. The `inverted.bin` and `lexicon.bin` files are still bincode-serialized and deserialized into heap structures on open.
 
 ## Build manifest
 
