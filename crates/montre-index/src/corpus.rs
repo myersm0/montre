@@ -5,9 +5,13 @@ use montre_core::{Span, UnitId};
 use rayon;
 use serde::{Deserialize, Serialize};
 
+use crate::empty_nodes::EmptyNodeStore;
 use crate::forward_flat::{MappedForward, ForwardStore};
 use crate::inverted::InMemoryInverted;
 use crate::lexicon::InMemoryLexicon;
+use crate::mwt::MappedMWTs;
+use crate::sentence_ids::MappedSentenceIds;
+use crate::spacing::MappedSpacing;
 use crate::spans_flat::{MappedSpans, SpanStore};
 use crate::{IndexError, Result, SpanIndex};
 
@@ -98,6 +102,10 @@ pub struct Corpus {
 	pub spans: SpanStore,
 	pub lexicon: InMemoryLexicon,
 	pub alignments: AlignmentIndex,
+	sentence_ids: Option<MappedSentenceIds>,
+	mwts: Option<MappedMWTs>,
+	spacing: Option<MappedSpacing>,
+	empty_nodes: Option<EmptyNodeStore>,
 }
 
 fn load_indexes(
@@ -151,6 +159,30 @@ impl Corpus {
 			AlignmentIndex::new()
 		};
 
+		let sentence_ids = if path.join("sentence_ids.bin").exists() {
+			Some(MappedSentenceIds::open(path.join("sentence_ids.bin"))?)
+		} else {
+			None
+		};
+
+		let mwts = if path.join("mwt.bin").exists() {
+			Some(MappedMWTs::open(path.join("mwt.bin"))?)
+		} else {
+			None
+		};
+
+		let spacing = if path.join("spacing.bin").exists() {
+			Some(MappedSpacing::open(path.join("spacing.bin"))?)
+		} else {
+			None
+		};
+
+		let empty_nodes = if path.join("empty_nodes.json").exists() {
+			Some(EmptyNodeStore::open(path.join("empty_nodes.json"))?)
+		} else {
+			None
+		};
+
 		Ok(Self {
 			path: path.to_path_buf(),
 			meta,
@@ -159,6 +191,10 @@ impl Corpus {
 			spans,
 			lexicon,
 			alignments,
+			sentence_ids,
+			mwts,
+			spacing,
+			empty_nodes,
 		})
 	}
 
@@ -257,5 +293,62 @@ impl Corpus {
 			}
 		}
 		Some(result)
+	}
+
+	pub fn sentence_id(&self, sentence_index: usize) -> Option<&str> {
+		self.sentence_ids.as_ref()?.get(sentence_index)
+	}
+
+	pub fn sentence_id_count(&self) -> usize {
+		self.sentence_ids.as_ref().map_or(0, |s| s.len())
+	}
+
+	pub fn mwt_covering(&self, position: u64) -> Option<crate::mwt::MWTEntry> {
+		self.mwts.as_ref()?.covering(position)
+	}
+
+	pub fn mwts_in_range(&self, start: u64, end: u64) -> Vec<crate::mwt::MWTEntry> {
+		match self.mwts.as_ref() {
+			Some(m) => m.in_range(start, end),
+			None => Vec::new(),
+		}
+	}
+
+	pub fn has_no_space_after(&self, position: u64) -> bool {
+		self.spacing.as_ref().map_or(false, |s| s.has_no_space_after(position))
+	}
+
+	pub fn empty_nodes(&self) -> Option<&EmptyNodeStore> {
+		self.empty_nodes.as_ref()
+	}
+
+	pub fn surface_text(&self, start: u64, end: u64) -> String {
+		use crate::ForwardIndex;
+		let mwts = self.mwts_in_range(start, end);
+		let mut result = String::new();
+		let mut suppress_space = true;
+		let mut pos = start;
+		while pos < end {
+			if let Some(mwt) = mwts.iter().find(|m| m.start == pos) {
+				if !suppress_space {
+					result.push(' ');
+				}
+				result.push_str(&mwt.form);
+				suppress_space = mwt.no_space_after;
+				pos = mwt.end;
+			} else if mwts.iter().any(|m| pos > m.start && pos < m.end) {
+				pos += 1;
+			} else {
+				if !suppress_space {
+					result.push(' ');
+				}
+				if let Some(word) = self.forward.get_str(pos, "word") {
+					result.push_str(word);
+				}
+				suppress_space = self.has_no_space_after(pos);
+				pos += 1;
+			}
+		}
+		result
 	}
 }

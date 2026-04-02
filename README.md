@@ -78,6 +78,16 @@ Montre uses a CQL-based language, extended with labels, constraints, and alignme
 [lemma="chat"] within doc
 ```
 
+### UPOS and XPOS
+
+Montre stores the UPOS and XPOS columns from CoNLL-U as separate `upos` and `xpos` layers. The familiar `pos` name is an alias for `upos` and works everywhere:
+
+```cql
+[pos="NOUN"]           # equivalent to [upos="NOUN"]
+[xpos="NN"]            # Penn Treebank tag
+[upos="NOUN" & xpos="NNS"]   # both
+```
+
 ### Morphological features
 
 Requires using the flag `--decompose-feats` at build time.
@@ -86,6 +96,16 @@ Requires using the flag `--decompose-feats` at build time.
 [pos="NOUN" & feats.Number="Plur"]
 [feats.Gender="Masc" & feats.Tense="Past"]
 ```
+
+### CoNLL-U fidelity
+
+Montre preserves UD annotation data:
+
+- **Multiword tokens** (range-ID rows like `3-4`): stored in a side table and used for correct surface text reconstruction. Concordance output shows `au` instead of `à le`.
+- **SpaceAfter=No**: preserved from the misc column. Surface text joins tokens without spaces where appropriate (e.g., `dort.` not `dort .`).
+- **Head column**: stored as a sentence-local integer layer (`head`). Not queryable, but accessible via the API for dependency tree reconstruction.
+- **Enhanced deps** (column 9): stored as a forward-only layer (`deps`). Raw strings like `2:obj|4:nsubj` are preserved for round-trip fidelity.
+- **Empty nodes** (decimal-ID rows like `6.1`): stored in a JSON sidecar. Not indexed or queryable, but preserved for downstream tools.
 
 ### Component and document filtering
 ```cql
@@ -213,7 +233,7 @@ A paper describing Montre is in preparation. In the meantime, if you use Montre 
   title        = {Montre: A Modern Corpus Query Engine for Aligned Corpora},
   year         = {2026},
   url          = {https://github.com/myersm0/montre},
-  version      = {0.4.0}
+  version      = {0.6.0}
 }
 ```
 

@@ -1,20 +1,31 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 
 use montre_core::{layers, Span, Value};
 use montre_index::corpus::CorpusMeta;
+use montre_index::empty_nodes::EmptyNode;
 use montre_index::forward::InMemoryForward;
 use montre_index::inverted::InMemoryInverted;
 use montre_index::lexicon::InMemoryLexicon;
+use montre_index::mwt::MWTEntry;
 use montre_index::spans::InMemorySpans;
 use montre_index::SpanIndex;
 use rayon::prelude::*;
+use roaring::RoaringBitmap;
 use walkdir::WalkDir;
 
 use crate::format::conllu::ConllUReader;
 use crate::format::{CorpusReader, ParsedSentence};
 use crate::Result;
+
+fn default_forward_only_layers() -> HashSet<String> {
+	let mut set = HashSet::new();
+	set.insert(layers::HEAD.to_string());
+	set.insert(layers::DEPS.to_string());
+	set
+}
 
 pub struct IndexSink {
 	pub(crate) inverted: InMemoryInverted,
@@ -24,7 +35,12 @@ pub struct IndexSink {
 	pub(crate) layer_indices: Vec<(String, usize)>,
 	pub(crate) current_position: u64,
 	pub(crate) document_names: Vec<String>,
+	pub(crate) sentence_ids: Vec<String>,
+	pub(crate) forward_only_layers: HashSet<String>,
 	pub(crate) decompose_feats: bool,
+	pub(crate) mwt_entries: Vec<MWTEntry>,
+	pub(crate) spacing: RoaringBitmap,
+	pub(crate) empty_nodes: Vec<EmptyNode>,
 }
 
 impl IndexSink {
@@ -32,7 +48,7 @@ impl IndexSink {
 		let mut forward = InMemoryForward::new();
 		let mut layer_indices = Vec::new();
 
-		for &layer_name in &[layers::WORD, layers::LEMMA, layers::POS, layers::XPOS, layers::FEATS, layers::DEPREL] {
+		for &layer_name in &[layers::WORD, layers::LEMMA, layers::UPOS, layers::XPOS, layers::FEATS, layers::HEAD, layers::DEPREL, layers::DEPS] {
 			let idx = forward.add_layer(layer_name);
 			layer_indices.push((layer_name.to_string(), idx));
 		}
@@ -45,13 +61,18 @@ impl IndexSink {
 			layer_indices,
 			current_position: 0,
 			document_names: Vec::new(),
+			sentence_ids: Vec::new(),
+			forward_only_layers: default_forward_only_layers(),
 			decompose_feats: false,
+			mwt_entries: Vec::new(),
+			spacing: RoaringBitmap::new(),
+			empty_nodes: Vec::new(),
 		}
 	}
 
 	pub fn new_without_forward() -> Self {
 		let layer_indices: Vec<(String, usize)> =
-			[layers::WORD, layers::LEMMA, layers::POS, layers::XPOS, layers::FEATS, layers::DEPREL]
+			[layers::WORD, layers::LEMMA, layers::UPOS, layers::XPOS, layers::FEATS, layers::HEAD, layers::DEPREL, layers::DEPS]
 				.iter()
 				.enumerate()
 				.map(|(i, &name)| (name.to_string(), i))
@@ -65,7 +86,12 @@ impl IndexSink {
 			layer_indices,
 			current_position: 0,
 			document_names: Vec::new(),
+			sentence_ids: Vec::new(),
+			forward_only_layers: default_forward_only_layers(),
 			decompose_feats: false,
+			mwt_entries: Vec::new(),
+			spacing: RoaringBitmap::new(),
+			empty_nodes: Vec::new(),
 		}
 	}
 
@@ -76,6 +102,8 @@ impl IndexSink {
 
 	pub fn merge_from(&mut self, other: Self) {
 		let offset = self.current_position;
+		let sentence_offset = self.sentence_ids.len() as u32;
+
 		self.inverted.merge_from(other.inverted, offset as u32);
 		if let (Some(ref mut self_fwd), Some(other_fwd)) = (&mut self.forward, other.forward) {
 			self_fwd.merge_from(other_fwd, offset);
@@ -83,9 +111,28 @@ impl IndexSink {
 		self.spans.merge_from(other.spans, offset);
 		self.lexicon.merge_from(other.lexicon);
 		self.document_names.extend(other.document_names);
+		self.sentence_ids.extend(other.sentence_ids);
 		for (name, _) in &other.layer_indices {
 			self.ensure_layer(name);
 		}
+
+		for mut mwt in other.mwt_entries {
+			mwt.start += offset;
+			mwt.end += offset;
+			self.mwt_entries.push(mwt);
+		}
+
+		let mut shifted_spacing = RoaringBitmap::new();
+		for pos in other.spacing.iter() {
+			shifted_spacing.insert(pos + offset as u32);
+		}
+		self.spacing |= &shifted_spacing;
+
+		for mut en in other.empty_nodes {
+			en.sentence_index += sentence_offset;
+			self.empty_nodes.push(en);
+		}
+
 		self.current_position += other.current_position;
 	}
 
@@ -95,6 +142,7 @@ impl IndexSink {
 
 	pub fn add_document(&mut self, doc_name: &str, sentences: Vec<ParsedSentence>) {
 		let doc_start = self.current_position;
+		let mut sent_index_within_doc: u32 = 0;
 
 		for sentence in sentences {
 			let sent_start = self.current_position;
@@ -108,8 +156,8 @@ impl IndexSink {
 					self.add_token_annotation(position, layers::LEMMA, lemma);
 				}
 
-				if let Some(ref pos) = token.pos {
-					self.add_token_annotation(position, layers::POS, pos);
+				if let Some(ref upos) = token.upos {
+					self.add_token_annotation(position, layers::UPOS, upos);
 				}
 
 				if let Some(ref xpos) = token.xpos {
@@ -123,16 +171,60 @@ impl IndexSink {
 					}
 				}
 
+				if let Some(head) = token.head {
+					self.add_token_int_annotation(position, layers::HEAD, head);
+				}
+
 				if let Some(ref deprel) = token.deprel {
 					self.add_token_annotation(position, layers::DEPREL, deprel);
+				}
+
+				if let Some(ref deps) = token.deps {
+					self.add_token_annotation(position, layers::DEPS, deps);
+				}
+
+				if token.space_after_no {
+					self.spacing.insert(position as u32);
 				}
 
 				self.current_position += 1;
 			}
 
+			for mwt in &sentence.mwts {
+				let global_start = sent_start + (mwt.first as u64 - 1);
+				let global_end = sent_start + mwt.last as u64;
+				self.mwt_entries.push(MWTEntry {
+					start: global_start,
+					end: global_end,
+					form: mwt.form.clone(),
+					no_space_after: mwt.no_space_after,
+				});
+			}
+
 			let sent_end = self.current_position;
 			if sent_end > sent_start {
+				let global_sentence_index = self.sentence_ids.len() as u32;
+
+				for en in &sentence.empty_nodes {
+					self.empty_nodes.push(EmptyNode {
+						sentence_index: global_sentence_index,
+						node_id: format!("{}.{}", en.major, en.minor),
+						form: en.form.clone(),
+						lemma: en.lemma.clone(),
+						upos: en.upos.clone(),
+						xpos: en.xpos.clone(),
+						feats: en.feats.clone(),
+						deps: en.deps.clone(),
+						misc: en.misc.clone(),
+					});
+				}
+
 				self.spans.add_span("sentence", Span::new(sent_start, sent_end));
+				let id = sentence.sent_id.unwrap_or_else(|| {
+					format!("{}:{}", doc_name, sent_index_within_doc)
+				});
+				self.sentence_ids.push(id);
+				sent_index_within_doc += 1;
 			}
 		}
 
@@ -165,15 +257,24 @@ impl IndexSink {
 	}
 
 	fn add_token_annotation(&mut self, position: u64, layer: &str, value: &str) {
-		self.inverted.insert(layer, value, [position]);
+		if !self.forward_only_layers.contains(layer) {
+			self.inverted.insert(layer, value, [position]);
+			self.lexicon.add_term(layer, value);
+		}
 
 		if let Some(ref mut fwd) = self.forward {
 			if let Some((_, layer_idx)) = self.layer_indices.iter().find(|(name, _)| name == layer) {
 				fwd.set(*layer_idx, position, Value::from(value));
 			}
 		}
+	}
 
-		self.lexicon.add_term(layer, value);
+	fn add_token_int_annotation(&mut self, position: u64, layer: &str, value: i64) {
+		if let Some(ref mut fwd) = self.forward {
+			if let Some((_, layer_idx)) = self.layer_indices.iter().find(|(name, _)| name == layer) {
+				fwd.set(*layer_idx, position, Value::Int(value));
+			}
+		}
 	}
 
 	pub fn write(mut self, path: &Path, meta: CorpusMeta) -> Result<()> {
@@ -200,6 +301,22 @@ impl IndexSink {
 		let lexicon_bytes = bincode::serialize(&self.lexicon)
 			.map_err(|e| crate::BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 		std::fs::write(path.join("lexicon.bin"), lexicon_bytes)?;
+
+		if !self.sentence_ids.is_empty() {
+			montre_index::write_sentence_ids(&self.sentence_ids, &path.join("sentence_ids.bin"))?;
+		}
+
+		if !self.mwt_entries.is_empty() {
+			montre_index::write_mwts(&self.mwt_entries, &path.join("mwt.bin"))?;
+		}
+
+		if !self.spacing.is_empty() {
+			montre_index::write_spacing(&self.spacing, &path.join("spacing.bin"))?;
+		}
+
+		if !self.empty_nodes.is_empty() {
+			montre_index::write_empty_nodes(&self.empty_nodes, &path.join("empty_nodes.json"))?;
+		}
 
 		tracing::info!(
 			"Wrote corpus: {} tokens, {} documents, {} bytes inverted",
@@ -390,7 +507,7 @@ mod tests {
 		let positions = builder.sink.inverted.get("word", "cat").unwrap();
 		assert!(positions.contains(1));
 
-		let positions = builder.sink.inverted.get("pos", "NOUN").unwrap();
+		let positions = builder.sink.inverted.get("upos", "NOUN").unwrap();
 		assert!(positions.contains(1));
 
 		assert_eq!(builder.document_count(), 1);

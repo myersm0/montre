@@ -164,11 +164,12 @@ impl From<&str> for LayerName {
 pub mod layers {
 	pub const WORD: &str = "word";
 	pub const LEMMA: &str = "lemma";
-	pub const POS: &str = "pos";
+	pub const UPOS: &str = "upos";
 	pub const XPOS: &str = "xpos";
 	pub const FEATS: &str = "feats";
 	pub const HEAD: &str = "head";
 	pub const DEPREL: &str = "deprel";
+	pub const DEPS: &str = "deps";
 }
 
 #[cfg(test)]

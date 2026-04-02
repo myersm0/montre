@@ -153,14 +153,14 @@ fn single_component_lifecycle() {
 
 		// layers should include the core set plus decomposed feats
 		let layer_count = montre_corpus_layer_count(corpus);
-		assert!(layer_count >= 6); // word, lemma, pos, xpos, feats, deprel + feats.*
+		assert!(layer_count >= 7); // word, lemma, upos, xpos, feats, head, deprel + feats.*
 		let mut layer_names = Vec::new();
 		for i in 0..layer_count {
 			layer_names.push(read_cstr(montre_corpus_layer_name(corpus, i)));
 		}
 		assert!(layer_names.contains(&"word".to_string()));
 		assert!(layer_names.contains(&"lemma".to_string()));
-		assert!(layer_names.contains(&"pos".to_string()));
+		assert!(layer_names.contains(&"upos".to_string()));
 
 		// documents
 		assert_eq!(montre_corpus_document_count(corpus), 1);
@@ -232,9 +232,9 @@ fn single_component_lifecycle() {
 		let text = read_cstr(montre_corpus_span_text(corpus, 0, 4, word.as_ptr()));
 		assert_eq!(text, "Le chat dort .");
 
-		// inverted values: pos layer
-		let pos = cstr("pos");
-		let arr = montre_corpus_inverted_values(corpus, pos.as_ptr(), &mut len);
+		// inverted values: upos layer
+		let upos = cstr("upos");
+		let arr = montre_corpus_inverted_values(corpus, upos.as_ptr(), &mut len);
 		let pos_values = read_string_array(arr, len);
 		assert!(pos_values.contains(&"NOUN".to_string()));
 		assert!(pos_values.contains(&"VERB".to_string()));

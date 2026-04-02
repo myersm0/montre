@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use montre_build::builder::CorpusBuilder;
 use montre_build::format::conllu::ConllUReader;
 use montre_build::format::CorpusReader;
-use montre_index::Corpus;
+use montre_index::{Corpus, ForwardIndex, InvertedIndex, SpanIndex};
 
 static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -1005,4 +1005,296 @@ fn constraint_distance_directionality() {
 		r#"a:[pos="ADJ"] [] b:[pos="NOUN"] :: distance(b,a) >= 1"#,
 	);
 	assert_eq!(rev, 0);
+}
+
+// ===========================================================================
+// Item 1: Head layer
+// ===========================================================================
+
+#[test]
+fn head_layer_stores_sentence_local_values() {
+	let corpus = build_corpus(SAMPLE);
+	// Sentence 1 (positions 0-9):
+	//   "The"(0) head=5, "quick"(1) head=5, "jumps"(4) head=0 (root)
+	assert_eq!(corpus.forward.get_int(0, "head"), Some(5));
+	assert_eq!(corpus.forward.get_int(1, "head"), Some(5));
+	assert_eq!(corpus.forward.get_int(4, "head"), Some(0));
+	// Sentence 2 (positions 10-15):
+	//   "Dogs"(10) head=5, "pets"(14) head=0 (root)
+	assert_eq!(corpus.forward.get_int(10, "head"), Some(5));
+	assert_eq!(corpus.forward.get_int(14, "head"), Some(0));
+	// Sentence 3 (positions 16-22):
+	//   "The"(16) head=2, "cat"(17) head=3, "sat"(18) head=0 (root)
+	assert_eq!(corpus.forward.get_int(16, "head"), Some(2));
+	assert_eq!(corpus.forward.get_int(17, "head"), Some(3));
+	assert_eq!(corpus.forward.get_int(18, "head"), Some(0));
+}
+
+#[test]
+fn head_layer_not_in_inverted_index() {
+	let corpus = build_corpus(SAMPLE);
+	assert!(corpus.inverted.values("head").is_none());
+}
+
+#[test]
+fn head_layer_in_corpus_layers() {
+	let corpus = build_corpus(SAMPLE);
+	assert!(corpus.layers().contains(&"head".to_string()));
+}
+
+#[test]
+fn head_get_str_returns_none_for_numeric_layer() {
+	let corpus = build_corpus(SAMPLE);
+	assert_eq!(corpus.forward.get_str(0, "head"), None);
+}
+
+// ===========================================================================
+// Item 2: UPOS/XPOS split
+// ===========================================================================
+
+#[test]
+fn upos_and_xpos_are_distinct_layers() {
+	let corpus = build_corpus(SAMPLE);
+	let layers = corpus.layers();
+	assert!(layers.contains(&"upos".to_string()));
+	assert!(layers.contains(&"xpos".to_string()));
+	assert!(!layers.contains(&"pos".to_string()));
+}
+
+#[test]
+fn upos_values_correct() {
+	let corpus = build_corpus(SAMPLE);
+	assert_eq!(corpus.forward.get_str(0, "upos"), Some("DET"));
+	assert_eq!(corpus.forward.get_str(3, "upos"), Some("NOUN"));
+	assert_eq!(corpus.forward.get_str(4, "upos"), Some("VERB"));
+}
+
+#[test]
+fn xpos_values_correct() {
+	let corpus = build_corpus(SAMPLE);
+	assert_eq!(corpus.forward.get_str(0, "xpos"), Some("DT"));
+	assert_eq!(corpus.forward.get_str(3, "xpos"), Some("NN"));
+	assert_eq!(corpus.forward.get_str(4, "xpos"), Some("VBZ"));
+	assert_eq!(corpus.forward.get_str(7, "xpos"), Some("JJ"));
+}
+
+#[test]
+fn pos_alias_resolves_to_upos() {
+	let corpus = build_corpus(SAMPLE);
+	let via_pos = query_spans(&corpus, r#"[pos="ADJ"]"#);
+	let via_upos = query_spans(&corpus, r#"[upos="ADJ"]"#);
+	assert_eq!(via_pos, via_upos);
+	assert!(!via_pos.is_empty());
+}
+
+#[test]
+fn pos_alias_in_global_constraint() {
+	let corpus = build_corpus(SAMPLE);
+	let via_pos = query_count(
+		&corpus,
+		r#"a:[pos="ADJ"] b:[pos="NOUN"] :: a.pos != b.pos"#,
+	);
+	let via_upos = query_count(
+		&corpus,
+		r#"a:[upos="ADJ"] b:[upos="NOUN"] :: a.upos != b.upos"#,
+	);
+	assert_eq!(via_pos, via_upos);
+}
+
+// ===========================================================================
+// Item 3: Sentence ID preservation
+// ===========================================================================
+
+#[test]
+fn sentence_ids_preserved_from_conllu() {
+	let corpus = build_corpus(SAMPLE);
+	assert_eq!(corpus.sentence_id_count(), 3);
+	assert_eq!(corpus.sentence_id(0), Some("1"));
+	assert_eq!(corpus.sentence_id(1), Some("2"));
+	assert_eq!(corpus.sentence_id(2), Some("3"));
+}
+
+#[test]
+fn sentence_ids_fallback_when_absent() {
+	let conllu = "\
+1\tHello\thello\tINTJ\tUH\t_\t0\troot\t_\t_
+
+1\tWorld\tworld\tNOUN\tNN\t_\t0\troot\t_\t_
+";
+	let corpus = build_corpus(conllu);
+	assert_eq!(corpus.sentence_id_count(), 2);
+	assert_eq!(corpus.sentence_id(0), Some("test.conllu:0"));
+	assert_eq!(corpus.sentence_id(1), Some("test.conllu:1"));
+}
+
+#[test]
+fn sentence_ids_mixed_presence() {
+	let conllu = "\
+# sent_id = my-custom-id
+1\tHello\thello\tINTJ\tUH\t_\t0\troot\t_\t_
+
+1\tWorld\tworld\tNOUN\tNN\t_\t0\troot\t_\t_
+
+# sent_id = another-id
+1\tFoo\tfoo\tNOUN\tNN\t_\t0\troot\t_\t_
+";
+	let corpus = build_corpus(conllu);
+	assert_eq!(corpus.sentence_id_count(), 3);
+	assert_eq!(corpus.sentence_id(0), Some("my-custom-id"));
+	assert_eq!(corpus.sentence_id(1), Some("test.conllu:1"));
+	assert_eq!(corpus.sentence_id(2), Some("another-id"));
+}
+
+#[test]
+fn sentence_ids_across_documents() {
+	let corpus = build_corpus_multi_doc(&[
+		("doc-a", "# sent_id = a-sent-1\n1\tHello\thello\tINTJ\tUH\t_\t0\troot\t_\t_\n"),
+		("doc-b", "1\tWorld\tworld\tNOUN\tNN\t_\t0\troot\t_\t_\n"),
+	]);
+	assert_eq!(corpus.sentence_id_count(), 2);
+	assert_eq!(corpus.sentence_id(0), Some("a-sent-1"));
+	assert_eq!(corpus.sentence_id(1), Some("doc-b:0"));
+}
+
+#[test]
+fn sentence_id_out_of_bounds() {
+	let corpus = build_corpus(SAMPLE);
+	assert_eq!(corpus.sentence_id(999), None);
+}
+
+#[test]
+fn sentence_id_count_matches_sentence_spans() {
+	let corpus = build_corpus(SAMPLE);
+	let span_count = corpus.spans.spans("sentence").map_or(0, |s| s.len());
+	assert_eq!(corpus.sentence_id_count(), span_count);
+}
+
+const FRENCH_MWT: &str = "\
+# sent_id = fr-1
+# text = Il va au marché.
+1\tIl\til\tPRON\t_\t_\t2\tnsubj\t2:nsubj\t_
+2\tva\taller\tVERB\t_\t_\t0\troot\t0:root\t_
+3-4\tau\t_\t_\t_\t_\t_\t_\t_\t_
+3\tà\tà\tADP\t_\t_\t5\tcase\t5:case\t_
+4\tle\tle\tDET\t_\t_\t5\tdet\t5:det\t_
+5\tmarché\tmarché\tNOUN\t_\t_\t2\tobl\t2:obl\t_
+6\t.\t.\tPUNCT\t_\t_\t2\tpunct\t_\tSpaceAfter=No
+";
+
+#[test]
+fn mwt_surface_text() {
+	let corpus = build_corpus(FRENCH_MWT);
+	let text = corpus.surface_text(0, 6);
+	assert_eq!(text, "Il va au marché .");
+}
+
+#[test]
+fn mwt_lookup() {
+	let corpus = build_corpus(FRENCH_MWT);
+	let mwt = corpus.mwt_covering(2);
+	assert!(mwt.is_some());
+	let mwt = mwt.unwrap();
+	assert_eq!(mwt.form, "au");
+	assert_eq!(mwt.start, 2);
+	assert_eq!(mwt.end, 4);
+
+	assert!(corpus.mwt_covering(0).is_none());
+	assert!(corpus.mwt_covering(4).is_none());
+}
+
+#[test]
+fn mwt_tokens_still_queryable() {
+	let corpus = build_corpus(FRENCH_MWT);
+	let spans = query_spans(&corpus, r#"[lemma="à"]"#);
+	assert_eq!(spans.len(), 1);
+	assert_eq!(spans[0], (2, 3));
+}
+
+const SPACE_AFTER_DATA: &str = "\
+# text = Il dort.
+1\tIl\til\tPRON\t_\t_\t2\tnsubj\t_\t_
+2\tdort\tdormir\tVERB\t_\t_\t0\troot\t_\tSpaceAfter=No
+3\t.\t.\tPUNCT\t_\t_\t2\tpunct\t_\t_
+";
+
+#[test]
+fn space_after_no_surface_text() {
+	let corpus = build_corpus(SPACE_AFTER_DATA);
+	let text = corpus.surface_text(0, 3);
+	assert_eq!(text, "Il dort.");
+}
+
+#[test]
+fn space_after_no_on_ordinary_token() {
+	let corpus = build_corpus(SPACE_AFTER_DATA);
+	assert!(corpus.has_no_space_after(1));
+	assert!(!corpus.has_no_space_after(0));
+	assert!(!corpus.has_no_space_after(2));
+}
+
+const MWT_SPACE_AFTER: &str = "\
+# text = dell'uomo
+1-2\tdell'\t_\t_\t_\t_\t_\t_\t_\tSpaceAfter=No
+1\tdi\tdi\tADP\t_\t_\t3\tcase\t_\t_
+2\til\til\tDET\t_\t_\t3\tdet\t_\t_
+3\tuomo\tuomo\tNOUN\t_\t_\t0\troot\t_\t_
+";
+
+#[test]
+fn mwt_space_after_no_surface_text() {
+	let corpus = build_corpus(MWT_SPACE_AFTER);
+	let text = corpus.surface_text(0, 3);
+	assert_eq!(text, "dell'uomo");
+}
+
+#[test]
+fn deps_layer_forward_only() {
+	let corpus = build_corpus(FRENCH_MWT);
+	assert_eq!(corpus.forward.get_str(0, "deps"), Some("2:nsubj"));
+	assert_eq!(corpus.forward.get_str(1, "deps"), Some("0:root"));
+	assert_eq!(corpus.forward.get_str(5, "deps"), None);
+
+	let inverted_values = corpus.inverted.values("deps");
+	assert!(inverted_values.is_none());
+}
+
+const EMPTY_NODE_DATA: &str = "\
+1\tThey\tthey\tPRON\t_\t_\t2\tnsubj\t2:nsubj\t_
+2\tbought\tbuy\tVERB\t_\t_\t0\troot\t0:root\t_
+2.1\tbought\tbuy\tVERB\t_\t_\t_\t_\t0:root|4:nsubj\t_
+3\tand\tand\tCCONJ\t_\t_\t4\tcc\t4:cc\t_
+4\tate\teat\tVERB\t_\t_\t2\tconj\t2:conj\t_
+5\tan\ta\tDET\t_\t_\t6\tdet\t6:det\t_
+6\tapple\tapple\tNOUN\t_\t_\t2\tobj\t2:obj|4:obj\t_
+7\t.\t.\tPUNCT\t_\t_\t2\tpunct\t_\t_
+";
+
+#[test]
+fn empty_nodes_preserved() {
+	let corpus = build_corpus(EMPTY_NODE_DATA);
+
+	assert_eq!(corpus.token_count(), 7);
+
+	let store = corpus.empty_nodes().expect("empty nodes should be loaded");
+	assert_eq!(store.len(), 1);
+	let nodes = store.in_sentence(0);
+	assert_eq!(nodes.len(), 1);
+	assert_eq!(nodes[0].node_id, "2.1");
+	assert_eq!(nodes[0].form, "bought");
+	assert_eq!(nodes[0].upos.as_deref(), Some("VERB"));
+	assert_eq!(nodes[0].deps.as_deref(), Some("0:root|4:nsubj"));
+}
+
+#[test]
+fn empty_nodes_not_indexed() {
+	let corpus = build_corpus(EMPTY_NODE_DATA);
+	let spans = query_spans(&corpus, r#"[word="bought"]"#);
+	assert_eq!(spans.len(), 1);
+	assert_eq!(spans[0], (1, 2));
+}
+
+#[test]
+fn deps_with_empty_node_references() {
+	let corpus = build_corpus(EMPTY_NODE_DATA);
+	assert_eq!(corpus.forward.get_str(5, "deps"), Some("2:obj|4:obj"));
 }

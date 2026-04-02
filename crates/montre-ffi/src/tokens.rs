@@ -49,6 +49,9 @@ pub unsafe extern "C" fn montre_corpus_span_text(
 	let Some(layer_str) = borrow_cstr(layer) else {
 		return ptr::null_mut();
 	};
+	if layer_str == "word" {
+		return to_cstring(&c.surface_text(start, end));
+	}
 	let words: Vec<String> = (start..end)
 		.filter_map(|p| forward_value_string(c, p, layer_str))
 		.collect();
@@ -138,10 +141,14 @@ pub unsafe extern "C" fn montre_hitlist_texts(
 	}
 
 	for (i, hit) in hitlist.hits.iter().enumerate() {
-		let words: Vec<String> = (hit.span.start..hit.span.end)
-			.filter_map(|p| forward_value_string(c, p, layer_str))
-			.collect();
-		*array.add(i) = to_cstring(&words.join(" "));
+		if layer_str == "word" {
+			*array.add(i) = to_cstring(&c.surface_text(hit.span.start, hit.span.end));
+		} else {
+			let words: Vec<String> = (hit.span.start..hit.span.end)
+				.filter_map(|p| forward_value_string(c, p, layer_str))
+				.collect();
+			*array.add(i) = to_cstring(&words.join(" "));
+		}
 	}
 
 	*out_len = count as u64;

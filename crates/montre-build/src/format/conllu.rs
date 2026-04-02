@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader, Read};
 
-use crate::format::{CorpusReader, ParsedSentence, ParsedToken};
+use crate::format::{CorpusReader, ParsedEmptyNode, ParsedMWT, ParsedSentence, ParsedToken};
 use crate::Result;
 use montre_core::Span;
 
@@ -55,9 +55,17 @@ impl<R: Read> ConllUReader<R> {
 	) -> Option<ParsedSentence> {
 		let start_position = self.current_position;
 		let mut tokens = Vec::new();
+		let mut mwts = Vec::new();
+		let mut empty_nodes = Vec::new();
+		let mut sent_id = None;
 
 		for (offset, line) in lines.iter().enumerate() {
 			if line.starts_with('#') {
+				if let Some(rest) = line.strip_prefix("# sent_id = ")
+					.or_else(|| line.strip_prefix("# sent_id="))
+				{
+					sent_id = Some(rest.trim().to_string());
+				}
 				continue;
 			}
 
@@ -73,18 +81,40 @@ impl<R: Read> ConllUReader<R> {
 			}
 
 			let id = fields[0];
-			if id.contains('-') || id.contains('.') {
+			if let Some((first, last)) = parse_range_id(id) {
+				mwts.push(ParsedMWT {
+					first,
+					last,
+					form: fields[1].to_string(),
+					no_space_after: misc_has_space_after_no(fields[9]),
+				});
+				continue;
+			}
+			if let Some((major, minor)) = parse_decimal_id(id) {
+				empty_nodes.push(ParsedEmptyNode {
+					major,
+					minor,
+					form: fields[1].to_string(),
+					lemma: non_empty(fields[2]),
+					upos: non_empty(fields[3]),
+					xpos: non_empty(fields[4]),
+					feats: non_empty(fields[5]),
+					deps: non_empty(fields[8]),
+					misc: non_empty(fields[9]),
+				});
 				continue;
 			}
 
 			let token = ParsedToken {
 				word: fields[1].to_string(),
 				lemma: non_empty(fields[2]),
-				pos: non_empty(fields[3]),
+				upos: non_empty(fields[3]),
 				xpos: non_empty(fields[4]),
 				feats: non_empty(fields[5]),
 				head: fields[6].parse().ok(),
 				deprel: non_empty(fields[7]),
+				deps: non_empty(fields[8]),
+				space_after_no: misc_has_space_after_no(fields[9]),
 			};
 
 			tokens.push(token);
@@ -98,6 +128,9 @@ impl<R: Read> ConllUReader<R> {
 		Some(ParsedSentence {
 			span: Span::new(start_position, self.current_position),
 			tokens,
+			sent_id,
+			mwts,
+			empty_nodes,
 		})
 	}
 }
@@ -108,6 +141,23 @@ fn non_empty(s: &str) -> Option<String> {
 	} else {
 		Some(s.to_string())
 	}
+}
+
+fn parse_range_id(id: &str) -> Option<(usize, usize)> {
+	let (first, last) = id.split_once('-')?;
+	Some((first.parse().ok()?, last.parse().ok()?))
+}
+
+fn parse_decimal_id(id: &str) -> Option<(u16, u16)> {
+	let (major, minor) = id.split_once('.')?;
+	Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+fn misc_has_space_after_no(misc: &str) -> bool {
+	if misc == "_" || misc.is_empty() {
+		return false;
+	}
+	misc.split('|').any(|kv| kv == "SpaceAfter=No")
 }
 
 impl<R: Read> ConllUReader<R> {
@@ -161,9 +211,17 @@ impl<R: Read> ConllUReader<R> {
 	) -> Result<ParsedSentence> {
 		let start_position = self.current_position;
 		let mut tokens = Vec::new();
+		let mut mwts = Vec::new();
+		let mut empty_nodes = Vec::new();
+		let mut sent_id = None;
 
 		for (offset, line) in lines.iter().enumerate() {
 			if line.starts_with('#') {
+				if let Some(rest) = line.strip_prefix("# sent_id = ")
+					.or_else(|| line.strip_prefix("# sent_id="))
+				{
+					sent_id = Some(rest.trim().to_string());
+				}
 				continue;
 			}
 
@@ -181,18 +239,40 @@ impl<R: Read> ConllUReader<R> {
 			}
 
 			let id = fields[0];
-			if id.contains('-') || id.contains('.') {
+			if let Some((first, last)) = parse_range_id(id) {
+				mwts.push(ParsedMWT {
+					first,
+					last,
+					form: fields[1].to_string(),
+					no_space_after: misc_has_space_after_no(fields[9]),
+				});
+				continue;
+			}
+			if let Some((major, minor)) = parse_decimal_id(id) {
+				empty_nodes.push(ParsedEmptyNode {
+					major,
+					minor,
+					form: fields[1].to_string(),
+					lemma: non_empty(fields[2]),
+					upos: non_empty(fields[3]),
+					xpos: non_empty(fields[4]),
+					feats: non_empty(fields[5]),
+					deps: non_empty(fields[8]),
+					misc: non_empty(fields[9]),
+				});
 				continue;
 			}
 
 			let token = ParsedToken {
 				word: fields[1].to_string(),
 				lemma: non_empty(fields[2]),
-				pos: non_empty(fields[3]),
+				upos: non_empty(fields[3]),
 				xpos: non_empty(fields[4]),
 				feats: non_empty(fields[5]),
 				head: fields[6].parse().ok(),
 				deprel: non_empty(fields[7]),
+				deps: non_empty(fields[8]),
+				space_after_no: misc_has_space_after_no(fields[9]),
 			};
 
 			tokens.push(token);
@@ -202,6 +282,9 @@ impl<R: Read> ConllUReader<R> {
 		Ok(ParsedSentence {
 			span: Span::new(start_position, self.current_position),
 			tokens,
+			sent_id,
+			mwts,
+			empty_nodes,
 		})
 	}
 }
@@ -357,7 +440,7 @@ mod tests {
 	}
 
 	#[test]
-	fn skips_multiword_tokens() {
+	fn parses_multiword_tokens() {
 		let input = "\
 1\tDon\tdo\tAUX\t_\t_\t0\troot\t_\t_
 2-3\tdon't\t_\t_\t_\t_\t_\t_\t_\t_
@@ -370,20 +453,26 @@ mod tests {
 		let sentences = reader.read_sentences().unwrap();
 
 		assert_eq!(sentences.len(), 1);
-		// Multi-word token line (2-3) should be skipped; tokens 1,2,3,4 should be kept
 		assert_eq!(sentences[0].tokens.len(), 4);
 		assert_eq!(sentences[0].tokens[0].word, "Don");
 		assert_eq!(sentences[0].tokens[1].word, "do");
 		assert_eq!(sentences[0].tokens[2].word, "not");
 		assert_eq!(sentences[0].tokens[3].word, "worry");
+
+		assert_eq!(sentences[0].mwts.len(), 1);
+		let mwt = &sentences[0].mwts[0];
+		assert_eq!(mwt.first, 2);
+		assert_eq!(mwt.last, 3);
+		assert_eq!(mwt.form, "don't");
+		assert!(!mwt.no_space_after);
 	}
 
 	#[test]
-	fn skips_empty_node_tokens() {
+	fn parses_empty_nodes() {
 		let input = "\
 1\tThey\tthey\tPRON\t_\t_\t2\tnsubj\t_\t_
 2\tran\trun\tVERB\t_\t_\t0\troot\t_\t_
-2.1\tand\tand\tCCONJ\t_\t_\t_\t_\t_\t_
+2.1\tand\tand\tCCONJ\t_\t_\t_\t_\t2:conj\t_
 3\tjumped\tjump\tVERB\t_\t_\t2\tconj\t_\t_
 ";
 		let cursor = Cursor::new(input);
@@ -392,6 +481,14 @@ mod tests {
 
 		assert_eq!(sentences[0].tokens.len(), 3);
 		assert_eq!(sentences[0].tokens[2].word, "jumped");
+
+		assert_eq!(sentences[0].empty_nodes.len(), 1);
+		let en = &sentences[0].empty_nodes[0];
+		assert_eq!(en.major, 2);
+		assert_eq!(en.minor, 1);
+		assert_eq!(en.form, "and");
+		assert_eq!(en.upos.as_deref(), Some("CCONJ"));
+		assert_eq!(en.deps.as_deref(), Some("2:conj"));
 	}
 
 	#[test]
@@ -412,7 +509,125 @@ mod tests {
 		let token = &sentences[0].tokens[0];
 		assert_eq!(token.word, "Hello");
 		assert!(token.lemma.is_none());
-		assert!(token.pos.is_none());
+		assert!(token.upos.is_none());
 		assert!(token.xpos.is_none());
+	}
+
+	#[test]
+	fn extracts_sent_id() {
+		let cursor = Cursor::new(SAMPLE_CONLLU);
+		let mut reader = ConllUReader::new(cursor);
+		let sentences = reader.read_sentences().unwrap();
+
+		assert_eq!(sentences[0].sent_id, Some("1".to_string()));
+		assert_eq!(sentences[1].sent_id, Some("2".to_string()));
+	}
+
+	#[test]
+	fn missing_sent_id_is_none() {
+		let input = "1\tHello\thello\tINTJ\tUH\t_\t0\troot\t_\t_\n";
+		let cursor = Cursor::new(input);
+		let mut reader = ConllUReader::new(cursor);
+		let sentences = reader.read_sentences().unwrap();
+
+		assert_eq!(sentences[0].sent_id, None);
+	}
+
+	#[test]
+	fn extracts_sent_id_no_space() {
+		let input = "# sent_id=no-space-variant\n1\tHi\thi\tINTJ\tUH\t_\t0\troot\t_\t_\n";
+		let cursor = Cursor::new(input);
+		let mut reader = ConllUReader::new(cursor);
+		let sentences = reader.read_sentences().unwrap();
+
+		assert_eq!(sentences[0].sent_id, Some("no-space-variant".to_string()));
+	}
+
+	#[test]
+	fn strict_mode_extracts_sent_id() {
+		let cursor = Cursor::new(SAMPLE_CONLLU);
+		let mut reader = ConllUReader::new(cursor).with_source_name("test.conllu");
+		let sentences = reader.read_sentences_strict().unwrap();
+
+		assert_eq!(sentences[0].sent_id, Some("1".to_string()));
+		assert_eq!(sentences[1].sent_id, Some("2".to_string()));
+	}
+
+	#[test]
+	fn head_parsed_as_integer() {
+		let cursor = Cursor::new(SAMPLE_CONLLU);
+		let mut reader = ConllUReader::new(cursor);
+		let sentences = reader.read_sentences().unwrap();
+
+		assert_eq!(sentences[0].tokens[0].head, Some(2)); // "The" → head 2
+		assert_eq!(sentences[0].tokens[2].head, Some(0)); // "sat" → root
+	}
+
+	#[test]
+	fn extracts_space_after_no() {
+		let input = "\
+1\tIl\til\tPRON\t_\t_\t2\tnsubj\t_\tSpaceAfter=No
+2\t,\t,\tPUNCT\t_\t_\t0\troot\t_\t_
+";
+		let cursor = Cursor::new(input);
+		let mut reader = ConllUReader::new(cursor);
+		let sentences = reader.read_sentences().unwrap();
+
+		assert!(sentences[0].tokens[0].space_after_no);
+		assert!(!sentences[0].tokens[1].space_after_no);
+	}
+
+	#[test]
+	fn space_after_no_among_other_misc() {
+		let input = "1\tword\tword\tNOUN\t_\t_\t0\troot\t_\tGloss=thing|SpaceAfter=No\n";
+		let cursor = Cursor::new(input);
+		let mut reader = ConllUReader::new(cursor);
+		let sentences = reader.read_sentences().unwrap();
+
+		assert!(sentences[0].tokens[0].space_after_no);
+	}
+
+	#[test]
+	fn mwt_space_after_no() {
+		let input = "\
+1-2\tJ'\t_\t_\t_\t_\t_\t_\t_\tSpaceAfter=No
+1\tje\tje\tPRON\t_\t_\t3\tnsubj\t_\t_
+2\tai\tavoir\tAUX\t_\t_\t0\troot\t_\t_
+3\tfaim\tfaim\tNOUN\t_\t_\t0\troot\t_\t_
+";
+		let cursor = Cursor::new(input);
+		let mut reader = ConllUReader::new(cursor);
+		let sentences = reader.read_sentences().unwrap();
+
+		assert_eq!(sentences[0].tokens.len(), 3);
+		assert_eq!(sentences[0].mwts.len(), 1);
+		assert_eq!(sentences[0].mwts[0].form, "J'");
+		assert!(sentences[0].mwts[0].no_space_after);
+	}
+
+	#[test]
+	fn extracts_deps_column() {
+		let input = "\
+1\tThey\tthey\tPRON\t_\t_\t2\tnsubj\t2:nsubj\t_
+2\tran\trun\tVERB\t_\t_\t0\troot\t0:root\t_
+3\t.\t.\tPUNCT\t_\t_\t2\tpunct\t_\t_
+";
+		let cursor = Cursor::new(input);
+		let mut reader = ConllUReader::new(cursor);
+		let sentences = reader.read_sentences().unwrap();
+
+		assert_eq!(sentences[0].tokens[0].deps.as_deref(), Some("2:nsubj"));
+		assert_eq!(sentences[0].tokens[1].deps.as_deref(), Some("0:root"));
+		assert!(sentences[0].tokens[2].deps.is_none());
+	}
+
+	#[test]
+	fn underscore_deps_becomes_none() {
+		let input = "1\tHello\thello\tINTJ\tUH\t_\t0\troot\t_\t_\n";
+		let cursor = Cursor::new(input);
+		let mut reader = ConllUReader::new(cursor);
+		let sentences = reader.read_sentences().unwrap();
+
+		assert!(sentences[0].tokens[0].deps.is_none());
 	}
 }

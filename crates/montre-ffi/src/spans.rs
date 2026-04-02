@@ -3,7 +3,7 @@ use std::ptr;
 
 use montre_index::{Corpus, SpanIndex};
 
-use crate::strings::{to_cstring, borrow_cstr};
+use crate::strings::{to_cstring, borrow_cstr, export_string_array};
 
 #[no_mangle]
 pub unsafe extern "C" fn montre_corpus_span_layer_count(corpus: *const Corpus) -> u32 {
@@ -144,4 +144,51 @@ pub unsafe extern "C" fn montre_corpus_span_count_in_range(
 	let first = spans.partition_point(|s| s.start < token_start);
 	let last = spans.partition_point(|s| s.start < token_end);
 	(last - first) as i64
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_sentence_id_count(corpus: *const Corpus) -> u64 {
+	if corpus.is_null() {
+		return 0;
+	}
+	let c = &*corpus;
+	c.sentence_id_count() as u64
+}
+
+/// Returns the sentence ID string for a given sentence index.
+/// Caller frees with montre_string_free. Returns NULL if index is out of bounds.
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_sentence_id(
+	corpus: *const Corpus,
+	sentence_index: u64,
+) -> *mut c_char {
+	if corpus.is_null() {
+		return ptr::null_mut();
+	}
+	let c = &*corpus;
+	match c.sentence_id(sentence_index as usize) {
+		Some(id) => to_cstring(id),
+		None => ptr::null_mut(),
+	}
+}
+
+/// Bulk-extract all sentence IDs as a string array.
+/// Free with montre_string_array_free(array, len).
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_sentence_ids(
+	corpus: *const Corpus,
+	out_len: *mut u64,
+) -> *mut *mut c_char {
+	if corpus.is_null() || out_len.is_null() {
+		if !out_len.is_null() { *out_len = 0; }
+		return ptr::null_mut();
+	}
+	let c = &*corpus;
+	let count = c.sentence_id_count();
+	if count == 0 {
+		*out_len = 0;
+		return ptr::null_mut();
+	}
+	let ids: Vec<&str> = (0..count).filter_map(|i| c.sentence_id(i)).collect();
+	export_string_array(&ids, out_len)
 }
