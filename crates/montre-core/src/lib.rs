@@ -14,7 +14,7 @@ pub struct Span {
 
 impl Span {
 	pub fn new(start: Position, end: Position) -> Self {
-		debug_assert!(start <= end);
+		assert!(start <= end);
 		Self { start, end }
 	}
 
