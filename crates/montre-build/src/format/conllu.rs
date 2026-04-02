@@ -429,4 +429,54 @@ mod tests {
 		assert!(token.upos.is_none());
 		assert!(token.xpos.is_none());
 	}
+
+	#[test]
+	fn extracts_sent_id() {
+		let cursor = Cursor::new(SAMPLE_CONLLU);
+		let mut reader = ConllUReader::new(cursor);
+		let sentences = reader.read_sentences().unwrap();
+
+		assert_eq!(sentences[0].sent_id, Some("1".to_string()));
+		assert_eq!(sentences[1].sent_id, Some("2".to_string()));
+	}
+
+	#[test]
+	fn missing_sent_id_is_none() {
+		let input = "1\tHello\thello\tINTJ\tUH\t_\t0\troot\t_\t_\n";
+		let cursor = Cursor::new(input);
+		let mut reader = ConllUReader::new(cursor);
+		let sentences = reader.read_sentences().unwrap();
+
+		assert_eq!(sentences[0].sent_id, None);
+	}
+
+	#[test]
+	fn extracts_sent_id_no_space() {
+		let input = "# sent_id=no-space-variant\n1\tHi\thi\tINTJ\tUH\t_\t0\troot\t_\t_\n";
+		let cursor = Cursor::new(input);
+		let mut reader = ConllUReader::new(cursor);
+		let sentences = reader.read_sentences().unwrap();
+
+		assert_eq!(sentences[0].sent_id, Some("no-space-variant".to_string()));
+	}
+
+	#[test]
+	fn strict_mode_extracts_sent_id() {
+		let cursor = Cursor::new(SAMPLE_CONLLU);
+		let mut reader = ConllUReader::new(cursor).with_source_name("test.conllu");
+		let sentences = reader.read_sentences_strict().unwrap();
+
+		assert_eq!(sentences[0].sent_id, Some("1".to_string()));
+		assert_eq!(sentences[1].sent_id, Some("2".to_string()));
+	}
+
+	#[test]
+	fn head_parsed_as_integer() {
+		let cursor = Cursor::new(SAMPLE_CONLLU);
+		let mut reader = ConllUReader::new(cursor);
+		let sentences = reader.read_sentences().unwrap();
+
+		assert_eq!(sentences[0].tokens[0].head, Some(2)); // "The" → head 2
+		assert_eq!(sentences[0].tokens[2].head, Some(0)); // "sat" → root
+	}
 }

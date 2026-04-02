@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use montre_build::builder::CorpusBuilder;
 use montre_build::format::conllu::ConllUReader;
 use montre_build::format::CorpusReader;
-use montre_index::Corpus;
+use montre_index::{Corpus, ForwardIndex, InvertedIndex, SpanIndex};
 
 static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -1005,4 +1005,166 @@ fn constraint_distance_directionality() {
 		r#"a:[pos="ADJ"] [] b:[pos="NOUN"] :: distance(b,a) >= 1"#,
 	);
 	assert_eq!(rev, 0);
+}
+
+// ===========================================================================
+// Item 1: Head layer
+// ===========================================================================
+
+#[test]
+fn head_layer_stores_sentence_local_values() {
+	let corpus = build_corpus(SAMPLE);
+	// Sentence 1 (positions 0-9):
+	//   "The"(0) head=5, "quick"(1) head=5, "jumps"(4) head=0 (root)
+	assert_eq!(corpus.forward.get_int(0, "head"), Some(5));
+	assert_eq!(corpus.forward.get_int(1, "head"), Some(5));
+	assert_eq!(corpus.forward.get_int(4, "head"), Some(0));
+	// Sentence 2 (positions 10-15):
+	//   "Dogs"(10) head=5, "pets"(14) head=0 (root)
+	assert_eq!(corpus.forward.get_int(10, "head"), Some(5));
+	assert_eq!(corpus.forward.get_int(14, "head"), Some(0));
+	// Sentence 3 (positions 16-22):
+	//   "The"(16) head=2, "cat"(17) head=3, "sat"(18) head=0 (root)
+	assert_eq!(corpus.forward.get_int(16, "head"), Some(2));
+	assert_eq!(corpus.forward.get_int(17, "head"), Some(3));
+	assert_eq!(corpus.forward.get_int(18, "head"), Some(0));
+}
+
+#[test]
+fn head_layer_not_in_inverted_index() {
+	let corpus = build_corpus(SAMPLE);
+	assert!(corpus.inverted.values("head").is_none());
+}
+
+#[test]
+fn head_layer_in_corpus_layers() {
+	let corpus = build_corpus(SAMPLE);
+	assert!(corpus.layers().contains(&"head".to_string()));
+}
+
+#[test]
+fn head_get_str_returns_none_for_numeric_layer() {
+	let corpus = build_corpus(SAMPLE);
+	assert_eq!(corpus.forward.get_str(0, "head"), None);
+}
+
+// ===========================================================================
+// Item 2: UPOS/XPOS split
+// ===========================================================================
+
+#[test]
+fn upos_and_xpos_are_distinct_layers() {
+	let corpus = build_corpus(SAMPLE);
+	let layers = corpus.layers();
+	assert!(layers.contains(&"upos".to_string()));
+	assert!(layers.contains(&"xpos".to_string()));
+	assert!(!layers.contains(&"pos".to_string()));
+}
+
+#[test]
+fn upos_values_correct() {
+	let corpus = build_corpus(SAMPLE);
+	assert_eq!(corpus.forward.get_str(0, "upos"), Some("DET"));
+	assert_eq!(corpus.forward.get_str(3, "upos"), Some("NOUN"));
+	assert_eq!(corpus.forward.get_str(4, "upos"), Some("VERB"));
+}
+
+#[test]
+fn xpos_values_correct() {
+	let corpus = build_corpus(SAMPLE);
+	assert_eq!(corpus.forward.get_str(0, "xpos"), Some("DT"));
+	assert_eq!(corpus.forward.get_str(3, "xpos"), Some("NN"));
+	assert_eq!(corpus.forward.get_str(4, "xpos"), Some("VBZ"));
+	assert_eq!(corpus.forward.get_str(7, "xpos"), Some("JJ"));
+}
+
+#[test]
+fn pos_alias_resolves_to_upos() {
+	let corpus = build_corpus(SAMPLE);
+	let via_pos = query_spans(&corpus, r#"[pos="ADJ"]"#);
+	let via_upos = query_spans(&corpus, r#"[upos="ADJ"]"#);
+	assert_eq!(via_pos, via_upos);
+	assert!(!via_pos.is_empty());
+}
+
+#[test]
+fn pos_alias_in_global_constraint() {
+	let corpus = build_corpus(SAMPLE);
+	let via_pos = query_count(
+		&corpus,
+		r#"a:[pos="ADJ"] b:[pos="NOUN"] :: a.pos != b.pos"#,
+	);
+	let via_upos = query_count(
+		&corpus,
+		r#"a:[upos="ADJ"] b:[upos="NOUN"] :: a.upos != b.upos"#,
+	);
+	assert_eq!(via_pos, via_upos);
+}
+
+// ===========================================================================
+// Item 3: Sentence ID preservation
+// ===========================================================================
+
+#[test]
+fn sentence_ids_preserved_from_conllu() {
+	let corpus = build_corpus(SAMPLE);
+	assert_eq!(corpus.sentence_id_count(), 3);
+	assert_eq!(corpus.sentence_id(0), Some("1"));
+	assert_eq!(corpus.sentence_id(1), Some("2"));
+	assert_eq!(corpus.sentence_id(2), Some("3"));
+}
+
+#[test]
+fn sentence_ids_fallback_when_absent() {
+	let conllu = "\
+1\tHello\thello\tINTJ\tUH\t_\t0\troot\t_\t_
+
+1\tWorld\tworld\tNOUN\tNN\t_\t0\troot\t_\t_
+";
+	let corpus = build_corpus(conllu);
+	assert_eq!(corpus.sentence_id_count(), 2);
+	assert_eq!(corpus.sentence_id(0), Some("test.conllu:0"));
+	assert_eq!(corpus.sentence_id(1), Some("test.conllu:1"));
+}
+
+#[test]
+fn sentence_ids_mixed_presence() {
+	let conllu = "\
+# sent_id = my-custom-id
+1\tHello\thello\tINTJ\tUH\t_\t0\troot\t_\t_
+
+1\tWorld\tworld\tNOUN\tNN\t_\t0\troot\t_\t_
+
+# sent_id = another-id
+1\tFoo\tfoo\tNOUN\tNN\t_\t0\troot\t_\t_
+";
+	let corpus = build_corpus(conllu);
+	assert_eq!(corpus.sentence_id_count(), 3);
+	assert_eq!(corpus.sentence_id(0), Some("my-custom-id"));
+	assert_eq!(corpus.sentence_id(1), Some("test.conllu:1"));
+	assert_eq!(corpus.sentence_id(2), Some("another-id"));
+}
+
+#[test]
+fn sentence_ids_across_documents() {
+	let corpus = build_corpus_multi_doc(&[
+		("doc-a", "# sent_id = a-sent-1\n1\tHello\thello\tINTJ\tUH\t_\t0\troot\t_\t_\n"),
+		("doc-b", "1\tWorld\tworld\tNOUN\tNN\t_\t0\troot\t_\t_\n"),
+	]);
+	assert_eq!(corpus.sentence_id_count(), 2);
+	assert_eq!(corpus.sentence_id(0), Some("a-sent-1"));
+	assert_eq!(corpus.sentence_id(1), Some("doc-b:0"));
+}
+
+#[test]
+fn sentence_id_out_of_bounds() {
+	let corpus = build_corpus(SAMPLE);
+	assert_eq!(corpus.sentence_id(999), None);
+}
+
+#[test]
+fn sentence_id_count_matches_sentence_spans() {
+	let corpus = build_corpus(SAMPLE);
+	let span_count = corpus.spans.spans("sentence").map_or(0, |s| s.len());
+	assert_eq!(corpus.sentence_id_count(), span_count);
 }
