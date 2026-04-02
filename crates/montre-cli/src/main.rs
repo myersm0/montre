@@ -6,7 +6,7 @@ use tracing_subscriber::EnvFilter;
 
 use montre_build::builder::CorpusBuilder;
 use montre_build::MultiCorpusBuilder;
-use montre_index::{Corpus, ForwardIndex, InvertedIndex, SpanIndex};
+use montre_index::{Corpus, InvertedIndex, SpanIndex};
 
 #[derive(Parser)]
 #[command(name = "montre")]
@@ -370,17 +370,9 @@ fn cmd_query(
 		let ctx_start = hit.span.start.saturating_sub(5);
 		let ctx_end = (hit.span.end + 5).min(token_count);
 
-		let left: Vec<String> = (ctx_start..hit.span.start)
-			.filter_map(|p| corpus.forward.get_str(p, "word").map(str::to_string))
-			.collect();
-
-		let matched: Vec<String> = (hit.span.start..hit.span.end)
-			.filter_map(|p| corpus.forward.get_str(p, "word").map(str::to_string))
-			.collect();
-
-		let right: Vec<String> = (hit.span.end..ctx_end)
-			.filter_map(|p| corpus.forward.get_str(p, "word").map(str::to_string))
-			.collect();
+		let left = corpus.surface_text(ctx_start, hit.span.start);
+		let matched = corpus.surface_text(hit.span.start, hit.span.end);
+		let right = corpus.surface_text(hit.span.end, ctx_end);
 
 		let doc_name = corpus.document_at(hit.span.start).unwrap_or("?");
 
@@ -388,9 +380,9 @@ fn cmd_query(
 			"{:>12} {:>8}: {} >>> {} <<< {}",
 			doc_name,
 			hit.span.start,
-			left.join(" "),
-			matched.join(" "),
-			right.join(" ")
+			left,
+			matched,
+			right
 		);
 	}
 

@@ -16,6 +16,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 walkdir = { workspace = true }
 rayon = { workspace = true }
+roaring = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3.14"

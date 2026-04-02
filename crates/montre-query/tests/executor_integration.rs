@@ -1168,3 +1168,133 @@ fn sentence_id_count_matches_sentence_spans() {
 	let span_count = corpus.spans.spans("sentence").map_or(0, |s| s.len());
 	assert_eq!(corpus.sentence_id_count(), span_count);
 }
+
+const FRENCH_MWT: &str = "\
+# sent_id = fr-1
+# text = Il va au marché.
+1\tIl\til\tPRON\t_\t_\t2\tnsubj\t2:nsubj\t_
+2\tva\taller\tVERB\t_\t_\t0\troot\t0:root\t_
+3-4\tau\t_\t_\t_\t_\t_\t_\t_\t_
+3\tà\tà\tADP\t_\t_\t5\tcase\t5:case\t_
+4\tle\tle\tDET\t_\t_\t5\tdet\t5:det\t_
+5\tmarché\tmarché\tNOUN\t_\t_\t2\tobl\t2:obl\t_
+6\t.\t.\tPUNCT\t_\t_\t2\tpunct\t_\tSpaceAfter=No
+";
+
+#[test]
+fn mwt_surface_text() {
+	let corpus = build_corpus(FRENCH_MWT);
+	let text = corpus.surface_text(0, 6);
+	assert_eq!(text, "Il va au marché .");
+}
+
+#[test]
+fn mwt_lookup() {
+	let corpus = build_corpus(FRENCH_MWT);
+	let mwt = corpus.mwt_covering(2);
+	assert!(mwt.is_some());
+	let mwt = mwt.unwrap();
+	assert_eq!(mwt.form, "au");
+	assert_eq!(mwt.start, 2);
+	assert_eq!(mwt.end, 4);
+
+	assert!(corpus.mwt_covering(0).is_none());
+	assert!(corpus.mwt_covering(4).is_none());
+}
+
+#[test]
+fn mwt_tokens_still_queryable() {
+	let corpus = build_corpus(FRENCH_MWT);
+	let spans = query_spans(&corpus, r#"[lemma="à"]"#);
+	assert_eq!(spans.len(), 1);
+	assert_eq!(spans[0], (2, 3));
+}
+
+const SPACE_AFTER_DATA: &str = "\
+# text = Il dort.
+1\tIl\til\tPRON\t_\t_\t2\tnsubj\t_\t_
+2\tdort\tdormir\tVERB\t_\t_\t0\troot\t_\tSpaceAfter=No
+3\t.\t.\tPUNCT\t_\t_\t2\tpunct\t_\t_
+";
+
+#[test]
+fn space_after_no_surface_text() {
+	let corpus = build_corpus(SPACE_AFTER_DATA);
+	let text = corpus.surface_text(0, 3);
+	assert_eq!(text, "Il dort.");
+}
+
+#[test]
+fn space_after_no_on_ordinary_token() {
+	let corpus = build_corpus(SPACE_AFTER_DATA);
+	assert!(corpus.has_no_space_after(1));
+	assert!(!corpus.has_no_space_after(0));
+	assert!(!corpus.has_no_space_after(2));
+}
+
+const MWT_SPACE_AFTER: &str = "\
+# text = dell'uomo
+1-2\tdell'\t_\t_\t_\t_\t_\t_\t_\tSpaceAfter=No
+1\tdi\tdi\tADP\t_\t_\t3\tcase\t_\t_
+2\til\til\tDET\t_\t_\t3\tdet\t_\t_
+3\tuomo\tuomo\tNOUN\t_\t_\t0\troot\t_\t_
+";
+
+#[test]
+fn mwt_space_after_no_surface_text() {
+	let corpus = build_corpus(MWT_SPACE_AFTER);
+	let text = corpus.surface_text(0, 3);
+	assert_eq!(text, "dell'uomo");
+}
+
+#[test]
+fn deps_layer_forward_only() {
+	let corpus = build_corpus(FRENCH_MWT);
+	assert_eq!(corpus.forward.get_str(0, "deps"), Some("2:nsubj"));
+	assert_eq!(corpus.forward.get_str(1, "deps"), Some("0:root"));
+	assert_eq!(corpus.forward.get_str(5, "deps"), None);
+
+	let inverted_values = corpus.inverted.values("deps");
+	assert!(inverted_values.is_none());
+}
+
+const EMPTY_NODE_DATA: &str = "\
+1\tThey\tthey\tPRON\t_\t_\t2\tnsubj\t2:nsubj\t_
+2\tbought\tbuy\tVERB\t_\t_\t0\troot\t0:root\t_
+2.1\tbought\tbuy\tVERB\t_\t_\t_\t_\t0:root|4:nsubj\t_
+3\tand\tand\tCCONJ\t_\t_\t4\tcc\t4:cc\t_
+4\tate\teat\tVERB\t_\t_\t2\tconj\t2:conj\t_
+5\tan\ta\tDET\t_\t_\t6\tdet\t6:det\t_
+6\tapple\tapple\tNOUN\t_\t_\t2\tobj\t2:obj|4:obj\t_
+7\t.\t.\tPUNCT\t_\t_\t2\tpunct\t_\t_
+";
+
+#[test]
+fn empty_nodes_preserved() {
+	let corpus = build_corpus(EMPTY_NODE_DATA);
+
+	assert_eq!(corpus.token_count(), 7);
+
+	let store = corpus.empty_nodes().expect("empty nodes should be loaded");
+	assert_eq!(store.len(), 1);
+	let nodes = store.in_sentence(0);
+	assert_eq!(nodes.len(), 1);
+	assert_eq!(nodes[0].node_id, "2.1");
+	assert_eq!(nodes[0].form, "bought");
+	assert_eq!(nodes[0].upos.as_deref(), Some("VERB"));
+	assert_eq!(nodes[0].deps.as_deref(), Some("0:root|4:nsubj"));
+}
+
+#[test]
+fn empty_nodes_not_indexed() {
+	let corpus = build_corpus(EMPTY_NODE_DATA);
+	let spans = query_spans(&corpus, r#"[word="bought"]"#);
+	assert_eq!(spans.len(), 1);
+	assert_eq!(spans[0], (1, 2));
+}
+
+#[test]
+fn deps_with_empty_node_references() {
+	let corpus = build_corpus(EMPTY_NODE_DATA);
+	assert_eq!(corpus.forward.get_str(5, "deps"), Some("2:obj|4:obj"));
+}

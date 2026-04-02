@@ -169,6 +169,7 @@ pub mod layers {
 	pub const FEATS: &str = "feats";
 	pub const HEAD: &str = "head";
 	pub const DEPREL: &str = "deprel";
+	pub const DEPS: &str = "deps";
 }
 
 #[cfg(test)]

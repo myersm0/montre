@@ -321,3 +321,127 @@ pub unsafe extern "C" fn montre_corpus_inverted_counts(
 	*out_counts = export_array(&counts, &mut count_len);
 	1
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_mwt_form(
+	corpus: *const Corpus,
+	position: u64,
+) -> *mut c_char {
+	if corpus.is_null() {
+		return ptr::null_mut();
+	}
+	let c = &*corpus;
+	match c.mwt_covering(position) {
+		Some(mwt) => to_cstring(&mwt.form),
+		None => ptr::null_mut(),
+	}
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_mwt_at(
+	corpus: *const Corpus,
+	position: u64,
+	out_start: *mut u64,
+	out_end: *mut u64,
+	out_form: *mut *mut c_char,
+) -> i32 {
+	if corpus.is_null() {
+		return 0;
+	}
+	let c = &*corpus;
+	match c.mwt_covering(position) {
+		Some(mwt) => {
+			if !out_start.is_null() { *out_start = mwt.start; }
+			if !out_end.is_null() { *out_end = mwt.end; }
+			if !out_form.is_null() { *out_form = to_cstring(&mwt.form); }
+			1
+		}
+		None => 0,
+	}
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_surface_text(
+	corpus: *const Corpus,
+	start: u64,
+	end: u64,
+) -> *mut c_char {
+	if corpus.is_null() {
+		return ptr::null_mut();
+	}
+	let c = &*corpus;
+	to_cstring(&c.surface_text(start, end))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_has_no_space_after(
+	corpus: *const Corpus,
+	position: u64,
+) -> i32 {
+	if corpus.is_null() {
+		return 0;
+	}
+	let c = &*corpus;
+	if c.has_no_space_after(position) { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_empty_node_count(
+	corpus: *const Corpus,
+) -> u64 {
+	if corpus.is_null() {
+		return 0;
+	}
+	let c = &*corpus;
+	c.empty_nodes().map_or(0, |s| s.len() as u64)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_empty_node_count_in_sentence(
+	corpus: *const Corpus,
+	sentence_index: u32,
+) -> u64 {
+	if corpus.is_null() {
+		return 0;
+	}
+	let c = &*corpus;
+	c.empty_nodes().map_or(0, |s| s.in_sentence(sentence_index).len() as u64)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_empty_node_field(
+	corpus: *const Corpus,
+	sentence_index: u32,
+	node_index: u32,
+	field: *const c_char,
+) -> *mut c_char {
+	if corpus.is_null() {
+		return ptr::null_mut();
+	}
+	let c = &*corpus;
+	let Some(store) = c.empty_nodes() else {
+		return ptr::null_mut();
+	};
+	let nodes = store.in_sentence(sentence_index);
+	let Some(node) = nodes.get(node_index as usize) else {
+		return ptr::null_mut();
+	};
+	let Some(field_str) = borrow_cstr(field) else {
+		return ptr::null_mut();
+	};
+	let value = match field_str {
+		"node_id" => Some(node.node_id.as_str()),
+		"form" => Some(node.form.as_str()),
+		"lemma" => node.lemma.as_deref(),
+		"upos" => node.upos.as_deref(),
+		"xpos" => node.xpos.as_deref(),
+		"feats" => node.feats.as_deref(),
+		"deps" => node.deps.as_deref(),
+		"misc" => node.misc.as_deref(),
+		_ => None,
+	};
+	match value {
+		Some(s) => to_cstring(s),
+		None => ptr::null_mut(),
+	}
+}
