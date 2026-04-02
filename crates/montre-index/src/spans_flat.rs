@@ -336,3 +336,64 @@ mod tests {
 		assert_eq!(end, 0x090a0b0c0d0e0f10);
 	}
 }
+
+#[cfg(test)]
+mod proptests {
+	use super::*;
+	use proptest::prelude::*;
+	use proptest::collection::vec as pvec;
+
+	fn sorted_spans_strategy() -> impl Strategy<Value = Vec<Span>> {
+		pvec(1u64..100, 0..20).prop_map(|lengths| {
+			let mut spans = Vec::new();
+			let mut pos = 0;
+			for len in lengths {
+				spans.push(Span::new(pos, pos + len));
+				pos += len;
+			}
+			spans
+		})
+	}
+
+	proptest! {
+		#[test]
+		fn roundtrip_preserves_spans(spans in sorted_spans_strategy()) {
+			let mut index = InMemorySpans::new();
+			for span in &spans {
+				index.add_span("sentence", *span);
+			}
+			index.finalize();
+
+			let dir = tempfile::tempdir().unwrap();
+			let path = dir.path().join("spans.bin");
+			write_flat_spans(&index, &path).unwrap();
+			let mapped = MappedSpans::open(&path).unwrap();
+
+			let original = index.spans("sentence").unwrap_or(&[]);
+			let recovered = mapped.spans("sentence").unwrap_or(&[]);
+			prop_assert_eq!(original, recovered);
+		}
+
+		#[test]
+		fn containing_agrees_with_in_memory(
+			spans in sorted_spans_strategy(),
+			probe in 0u64..2000,
+		) {
+			let mut index = InMemorySpans::new();
+			for span in &spans {
+				index.add_span("sentence", *span);
+			}
+			index.finalize();
+
+			let dir = tempfile::tempdir().unwrap();
+			let path = dir.path().join("spans.bin");
+			write_flat_spans(&index, &path).unwrap();
+			let mapped = MappedSpans::open(&path).unwrap();
+
+			prop_assert_eq!(
+				index.containing("sentence", probe),
+				mapped.containing("sentence", probe),
+			);
+		}
+	}
+}

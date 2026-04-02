@@ -166,3 +166,28 @@ mod tests {
 		assert_eq!(mapped.get(1), Some("日本語:1"));
 	}
 }
+
+#[cfg(test)]
+mod proptests {
+	use super::*;
+	use proptest::prelude::*;
+	use proptest::collection::vec as pvec;
+
+	proptest! {
+		#[test]
+		fn roundtrip_preserves_ids(ids in pvec("[a-z0-9:_-]{1,40}", 0..50)) {
+			let dir = tempfile::tempdir().unwrap();
+			let path = dir.path().join("sentence_ids.bin");
+
+			let owned: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+			write_sentence_ids(&owned, &path).unwrap();
+			let mapped = MappedSentenceIds::open(&path).unwrap();
+
+			prop_assert_eq!(mapped.len(), ids.len());
+			for (i, id) in ids.iter().enumerate() {
+				prop_assert_eq!(mapped.get(i), Some(id.as_str()));
+			}
+			prop_assert_eq!(mapped.get(ids.len()), None);
+		}
+	}
+}
