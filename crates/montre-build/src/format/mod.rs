@@ -8,12 +8,13 @@ pub use conllu::ParseStats;
 pub struct ParsedSentence {
 	pub tokens: Vec<ParsedToken>,
 	pub span: Span,
+	pub sent_id: Option<String>,
 }
 
 pub struct ParsedToken {
 	pub word: String,
 	pub lemma: Option<String>,
-	pub pos: Option<String>,
+	pub upos: Option<String>,
 	pub xpos: Option<String>,
 	pub feats: Option<String>,
 	pub head: Option<i64>,

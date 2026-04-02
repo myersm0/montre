@@ -55,9 +55,15 @@ impl<R: Read> ConllUReader<R> {
 	) -> Option<ParsedSentence> {
 		let start_position = self.current_position;
 		let mut tokens = Vec::new();
+		let mut sent_id = None;
 
 		for (offset, line) in lines.iter().enumerate() {
 			if line.starts_with('#') {
+				if let Some(rest) = line.strip_prefix("# sent_id = ")
+					.or_else(|| line.strip_prefix("# sent_id="))
+				{
+					sent_id = Some(rest.trim().to_string());
+				}
 				continue;
 			}
 
@@ -80,7 +86,7 @@ impl<R: Read> ConllUReader<R> {
 			let token = ParsedToken {
 				word: fields[1].to_string(),
 				lemma: non_empty(fields[2]),
-				pos: non_empty(fields[3]),
+				upos: non_empty(fields[3]),
 				xpos: non_empty(fields[4]),
 				feats: non_empty(fields[5]),
 				head: fields[6].parse().ok(),
@@ -98,6 +104,7 @@ impl<R: Read> ConllUReader<R> {
 		Some(ParsedSentence {
 			span: Span::new(start_position, self.current_position),
 			tokens,
+			sent_id,
 		})
 	}
 }
@@ -161,9 +168,15 @@ impl<R: Read> ConllUReader<R> {
 	) -> Result<ParsedSentence> {
 		let start_position = self.current_position;
 		let mut tokens = Vec::new();
+		let mut sent_id = None;
 
 		for (offset, line) in lines.iter().enumerate() {
 			if line.starts_with('#') {
+				if let Some(rest) = line.strip_prefix("# sent_id = ")
+					.or_else(|| line.strip_prefix("# sent_id="))
+				{
+					sent_id = Some(rest.trim().to_string());
+				}
 				continue;
 			}
 
@@ -188,7 +201,7 @@ impl<R: Read> ConllUReader<R> {
 			let token = ParsedToken {
 				word: fields[1].to_string(),
 				lemma: non_empty(fields[2]),
-				pos: non_empty(fields[3]),
+				upos: non_empty(fields[3]),
 				xpos: non_empty(fields[4]),
 				feats: non_empty(fields[5]),
 				head: fields[6].parse().ok(),
@@ -202,6 +215,7 @@ impl<R: Read> ConllUReader<R> {
 		Ok(ParsedSentence {
 			span: Span::new(start_position, self.current_position),
 			tokens,
+			sent_id,
 		})
 	}
 }
@@ -412,7 +426,7 @@ mod tests {
 		let token = &sentences[0].tokens[0];
 		assert_eq!(token.word, "Hello");
 		assert!(token.lemma.is_none());
-		assert!(token.pos.is_none());
+		assert!(token.upos.is_none());
 		assert!(token.xpos.is_none());
 	}
 }

@@ -33,13 +33,13 @@ pub enum IndexError {
 	#[error("Layer not found: {0}")]
 	LayerNotFound(String),
 
-	#[error("Index version mismatch: expected {expected}, found {found}")]
+	#[error("Index version mismatch: expected {expected}, found {found}. Rebuild with `montre build`.")]
 	VersionMismatch { expected: u32, found: u32 },
 }
 
 pub type Result<T> = std::result::Result<T, IndexError>;
 
-pub const index_version: u32 = 3;
+pub const index_version: u32 = 4;
 
 pub fn open(path: impl AsRef<Path>) -> Result<Corpus> {
 	Corpus::open(path)

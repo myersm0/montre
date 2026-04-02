@@ -644,6 +644,13 @@ fn cmd_layers(corpus_path: PathBuf) -> Result<()> {
 	Ok(())
 }
 
+fn resolve_cli_layer_name(name: &str) -> &str {
+	match name {
+		"pos" => "upos",
+		other => other,
+	}
+}
+
 fn cmd_vocab(
 	corpus_path: PathBuf,
 	layer: String,
@@ -653,9 +660,11 @@ fn cmd_vocab(
 	let corpus = montre_index::open(&corpus_path)
 		.with_context(|| format!("Failed to open corpus: {}", corpus_path.display()))?;
 
+	let layer = resolve_cli_layer_name(&layer);
+
 	let values = corpus
 		.inverted
-		.values(&layer)
+		.values(layer)
 		.with_context(|| format!("Layer '{}' not found", layer))?;
 
 	let position_mask = build_position_mask(&corpus, &components, &documents)?;
@@ -666,7 +675,7 @@ fn cmd_vocab(
 			.filter(|value| {
 				corpus
 					.inverted
-					.get(&layer, value)
+					.get(layer, value)
 					.map(|bitmap| !(bitmap & mask).is_empty())
 					.unwrap_or(false)
 			})

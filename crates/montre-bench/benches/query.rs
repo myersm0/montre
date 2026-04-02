@@ -148,7 +148,7 @@ fn bench_alignment_projection(c: &mut Criterion) {
 
 fn bench_vocab(c: &mut Criterion) {
 	let corpus = open_corpus();
-	let layers = ["pos", "lemma", "word"];
+	let layers = ["upos", "lemma", "word"];
 	let mut group = c.benchmark_group("vocab");
 	for layer in &layers {
 		group.bench_function(*layer, |b| {

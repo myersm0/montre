@@ -98,6 +98,7 @@ pub struct Corpus {
 	pub spans: SpanStore,
 	pub lexicon: InMemoryLexicon,
 	pub alignments: AlignmentIndex,
+	pub sentence_ids: Vec<String>,
 }
 
 fn load_indexes(
@@ -151,6 +152,14 @@ impl Corpus {
 			AlignmentIndex::new()
 		};
 
+		let sentence_ids: Vec<String> = if path.join("sentence_ids.bin").exists() {
+			let bytes = std::fs::read(path.join("sentence_ids.bin"))?;
+			bincode::deserialize(&bytes)
+				.map_err(|e| IndexError::Format(format!("Failed to deserialize sentence IDs: {}", e)))?
+		} else {
+			Vec::new()
+		};
+
 		Ok(Self {
 			path: path.to_path_buf(),
 			meta,
@@ -159,6 +168,7 @@ impl Corpus {
 			spans,
 			lexicon,
 			alignments,
+			sentence_ids,
 		})
 	}
 
@@ -257,5 +267,13 @@ impl Corpus {
 			}
 		}
 		Some(result)
+	}
+
+	pub fn sentence_id(&self, sentence_index: usize) -> Option<&str> {
+		self.sentence_ids.get(sentence_index).map(|s| s.as_str())
+	}
+
+	pub fn sentence_id_count(&self) -> usize {
+		self.sentence_ids.len()
 	}
 }

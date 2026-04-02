@@ -279,7 +279,7 @@ fn layers_lists_all() {
 	let lines: Vec<&str> = stdout.lines().collect();
 	assert!(lines.contains(&"word"));
 	assert!(lines.contains(&"lemma"));
-	assert!(lines.contains(&"pos"));
+	assert!(lines.contains(&"upos"));
 }
 
 // ── vocab ──

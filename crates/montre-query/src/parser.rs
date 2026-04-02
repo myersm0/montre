@@ -83,6 +83,13 @@ fn expand_span_alias(name: &str) -> String {
 	}
 }
 
+fn resolve_layer_alias(name: String) -> String {
+	match name.as_str() {
+		"pos" => "upos".to_string(),
+		_ => name,
+	}
+}
+
 struct Parser<'a> {
 	input: &'a str,
 	pos: usize,
@@ -347,7 +354,7 @@ impl<'a> Parser<'a> {
 	fn parse_label_attr(&mut self) -> Result<LabelAttr> {
 		let label = self.parse_bare_identifier()?;
 		self.consume('.')?;
-		let attr = self.parse_identifier()?;
+		let attr = resolve_layer_alias(self.parse_identifier()?);
 		Ok(LabelAttr { label, attr })
 	}
 
@@ -631,7 +638,7 @@ impl<'a> Parser<'a> {
 
 	fn parse_constraint(&mut self) -> Result<Constraint> {
 		self.skip_whitespace();
-		let layer = self.parse_identifier()?;
+		let layer = resolve_layer_alias(self.parse_identifier()?);
 		self.skip_whitespace();
 
 		let op = if self.remaining().starts_with("!=") {
@@ -763,7 +770,7 @@ mod tests {
 		match query {
 			Query::Token(pattern) => {
 				assert_eq!(pattern.constraints.len(), 1);
-				assert_eq!(pattern.constraints[0].layer, "pos");
+				assert_eq!(pattern.constraints[0].layer, "upos");
 			}
 			_ => panic!("Expected Token query"),
 		}
@@ -960,7 +967,7 @@ mod tests {
 			Query::Token(pattern) => {
 				assert_eq!(pattern.constraints.len(), 2);
 				assert_eq!(pattern.constraints[0].layer, "word");
-				assert_eq!(pattern.constraints[1].layer, "pos");
+				assert_eq!(pattern.constraints[1].layer, "upos");
 			}
 			_ => panic!("Expected Token query"),
 		}
@@ -1207,9 +1214,9 @@ mod tests {
 				match &constraints[0] {
 					GlobalConstraint::Eq { left, right } => {
 						assert_eq!(left.label, "a");
-						assert_eq!(left.attr, "pos");
+						assert_eq!(left.attr, "upos");
 						assert_eq!(right.label, "b");
-						assert_eq!(right.attr, "pos");
+						assert_eq!(right.attr, "upos");
 					}
 					_ => panic!("Expected Eq"),
 				}
