@@ -37,6 +37,20 @@ impl Span {
 	}
 }
 
+pub fn span_containing(spans: &[Span], position: Position) -> Option<usize> {
+	spans
+		.binary_search_by(|span| {
+			if span.end <= position {
+				std::cmp::Ordering::Less
+			} else if span.start > position {
+				std::cmp::Ordering::Greater
+			} else {
+				std::cmp::Ordering::Equal
+			}
+		})
+		.ok()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Value {
 	Str(CompactString),

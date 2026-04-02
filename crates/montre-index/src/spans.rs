@@ -1,4 +1,4 @@
-use montre_core::{Position, Span};
+use montre_core::{Position, Span, span_containing};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -6,21 +6,6 @@ pub trait SpanIndex {
 	fn spans(&self, layer: &str) -> Option<&[Span]>;
 	fn containing(&self, layer: &str, position: Position) -> Option<&Span>;
 	fn layers(&self) -> Vec<&str>;
-}
-
-pub fn find_containing(spans: &[Span], position: Position) -> Option<&Span> {
-	spans
-		.binary_search_by(|span| {
-			if span.end <= position {
-				std::cmp::Ordering::Less
-			} else if span.start > position {
-				std::cmp::Ordering::Greater
-			} else {
-				std::cmp::Ordering::Equal
-			}
-		})
-		.ok()
-		.map(|idx| &spans[idx])
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,7 +55,8 @@ impl SpanIndex for InMemorySpans {
 	}
 
 	fn containing(&self, layer: &str, position: Position) -> Option<&Span> {
-		find_containing(self.data.get(layer)?, position)
+		let spans = self.data.get(layer)?;
+		span_containing(spans, position).map(|idx| &spans[idx])
 	}
 
 	fn layers(&self) -> Vec<&str> {

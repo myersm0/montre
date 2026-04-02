@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use montre_core::{Span, UnitId};
+use montre_core::{Span, UnitId, span_containing};
 use rayon;
 use serde::{Deserialize, Serialize};
 
@@ -72,26 +72,6 @@ impl AlignmentIndex {
 	pub fn names(&self) -> impl Iterator<Item = &str> {
 		self.alignments.keys().map(|s| s.as_str())
 	}
-}
-
-fn binary_search_doc(spans: &[Span], position: u64) -> Option<usize> {
-	let mut lo = 0;
-	let mut hi = spans.len();
-
-	while lo < hi {
-		let mid = lo + (hi - lo) / 2;
-		let span = &spans[mid];
-
-		if position < span.start {
-			hi = mid;
-		} else if position >= span.end {
-			lo = mid + 1;
-		} else {
-			return Some(mid);
-		}
-	}
-
-	None
 }
 
 pub struct Corpus {
@@ -224,7 +204,7 @@ impl Corpus {
 
 	pub fn document_at(&self, position: u64) -> Option<&str> {
 		let doc_spans = self.spans.spans("document")?;
-		let idx = binary_search_doc(doc_spans, position)?;
+		let idx = span_containing(doc_spans, position)?;
 		self.meta.document_names.get(idx).map(|s| s.as_str())
 	}
 

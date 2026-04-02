@@ -110,7 +110,8 @@ impl SpanIndex for MappedSpans {
 	}
 
 	fn containing(&self, layer: &str, position: Position) -> Option<&Span> {
-		crate::spans::find_containing(self.spans(layer)?, position)
+		let spans = self.spans(layer)?;
+		montre_core::span_containing(spans, position).map(|idx| &spans[idx])
 	}
 
 	fn layers(&self) -> Vec<&str> {
