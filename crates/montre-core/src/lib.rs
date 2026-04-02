@@ -142,25 +142,6 @@ pub mod alignment_flags {
 	pub const FILTERED: u8 = 0b1000;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct LayerName(pub CompactString);
-
-impl LayerName {
-	pub fn new(name: impl Into<CompactString>) -> Self {
-		Self(name.into())
-	}
-
-	pub fn as_str(&self) -> &str {
-		&self.0
-	}
-}
-
-impl From<&str> for LayerName {
-	fn from(s: &str) -> Self {
-		Self::new(s)
-	}
-}
-
 pub mod layers {
 	pub const WORD: &str = "word";
 	pub const LEMMA: &str = "lemma";
