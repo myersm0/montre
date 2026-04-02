@@ -11,7 +11,7 @@ use crate::inverted::InMemoryInverted;
 use crate::lexicon::InMemoryLexicon;
 use crate::mwt::MappedMWTs;
 use crate::sentence_ids::MappedSentenceIds;
-use crate::spacing::MappedSpacing;
+use crate::spacing::SpacingIndex;
 use crate::spans_flat::{MappedSpans, SpanStore};
 use crate::{IndexError, Result, SpanIndex};
 
@@ -84,7 +84,7 @@ pub struct Corpus {
 	pub alignments: AlignmentIndex,
 	sentence_ids: Option<MappedSentenceIds>,
 	mwts: Option<MappedMWTs>,
-	spacing: Option<MappedSpacing>,
+	spacing: Option<SpacingIndex>,
 	empty_nodes: Option<EmptyNodeStore>,
 }
 
@@ -152,7 +152,7 @@ impl Corpus {
 		};
 
 		let spacing = if path.join("spacing.bin").exists() {
-			Some(MappedSpacing::open(path.join("spacing.bin"))?)
+			Some(SpacingIndex::open(path.join("spacing.bin"))?)
 		} else {
 			None
 		};
