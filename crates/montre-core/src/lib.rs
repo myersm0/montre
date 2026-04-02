@@ -1,11 +1,7 @@
 use compact_str::CompactString;
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
 
 pub type Position = u64;
-
-/// Implicit max of 65,535 layers (in practice this should never exceed a few dozen)
-pub type LayerId = u16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(C)]
@@ -62,40 +58,6 @@ impl From<String> for Value {
 impl From<i64> for Value {
 	fn from(n: i64) -> Self {
 		Value::Int(n)
-	}
-}
-
-pub type Annotations = SmallVec<[(LayerId, Value); 4]>;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Token {
-	pub position: Position,
-	pub annotations: Annotations,
-}
-
-impl Token {
-	pub fn new(position: Position) -> Self {
-		Self {
-			position,
-			annotations: SmallVec::new(),
-		}
-	}
-
-	pub fn with_annotation(mut self, layer: LayerId, value: impl Into<Value>) -> Self {
-		debug_assert!(
-			!self.annotations.iter().any(|(l, _)| *l == layer),
-			"duplicate layer ID {layer} on token at position {}",
-			self.position,
-		);
-		self.annotations.push((layer, value.into()));
-		self
-	}
-
-	pub fn get(&self, layer: LayerId) -> Option<&Value> {
-		self.annotations
-			.iter()
-			.find(|(l, _)| *l == layer)
-			.map(|(_, v)| v)
 	}
 }
 
@@ -183,17 +145,6 @@ mod tests {
 		assert!(a.overlaps(&b));
 		assert!(!a.overlaps(&c));
 		assert!(a.overlaps(&d));
-	}
-
-	#[test]
-	fn token_annotations() {
-		let token = Token::new(42)
-			.with_annotation(0, "house")
-			.with_annotation(1, "NOUN");
-
-		assert_eq!(token.get(0), Some(&Value::from("house")));
-		assert_eq!(token.get(1), Some(&Value::from("NOUN")));
-		assert_eq!(token.get(2), None);
 	}
 }
 
