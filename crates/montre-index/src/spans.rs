@@ -8,6 +8,21 @@ pub trait SpanIndex {
 	fn layers(&self) -> Vec<&str>;
 }
 
+pub fn find_containing(spans: &[Span], position: Position) -> Option<&Span> {
+	spans
+		.binary_search_by(|span| {
+			if span.end <= position {
+				std::cmp::Ordering::Less
+			} else if span.start > position {
+				std::cmp::Ordering::Greater
+			} else {
+				std::cmp::Ordering::Equal
+			}
+		})
+		.ok()
+		.map(|idx| &spans[idx])
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InMemorySpans {
 	data: HashMap<String, Vec<Span>>,
@@ -55,19 +70,7 @@ impl SpanIndex for InMemorySpans {
 	}
 
 	fn containing(&self, layer: &str, position: Position) -> Option<&Span> {
-		let spans = self.data.get(layer)?;
-		spans
-			.binary_search_by(|span| {
-				if span.end <= position {
-					std::cmp::Ordering::Less
-				} else if span.start > position {
-					std::cmp::Ordering::Greater
-				} else {
-					std::cmp::Ordering::Equal
-				}
-			})
-			.ok()
-			.map(|idx| &spans[idx])
+		find_containing(self.data.get(layer)?, position)
 	}
 
 	fn layers(&self) -> Vec<&str> {

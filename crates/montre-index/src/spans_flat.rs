@@ -110,19 +110,7 @@ impl SpanIndex for MappedSpans {
 	}
 
 	fn containing(&self, layer: &str, position: Position) -> Option<&Span> {
-		let spans = self.spans(layer)?;
-		spans
-			.binary_search_by(|span| {
-				if span.end <= position {
-					std::cmp::Ordering::Less
-				} else if span.start > position {
-					std::cmp::Ordering::Greater
-				} else {
-					std::cmp::Ordering::Equal
-				}
-			})
-			.ok()
-			.map(|idx| &spans[idx])
+		crate::spans::find_containing(self.spans(layer)?, position)
 	}
 
 	fn layers(&self) -> Vec<&str> {
