@@ -184,6 +184,11 @@ pub unsafe extern "C" fn montre_corpus_sentence_ids(
 		return ptr::null_mut();
 	}
 	let c = &*corpus;
-	let ids: Vec<&str> = c.sentence_ids.iter().map(|s| s.as_str()).collect();
+	let count = c.sentence_id_count();
+	if count == 0 {
+		*out_len = 0;
+		return ptr::null_mut();
+	}
+	let ids: Vec<&str> = (0..count).filter_map(|i| c.sentence_id(i)).collect();
 	export_string_array(&ids, out_len)
 }

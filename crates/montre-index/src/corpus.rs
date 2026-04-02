@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::forward_flat::{MappedForward, ForwardStore};
 use crate::inverted::InMemoryInverted;
 use crate::lexicon::InMemoryLexicon;
+use crate::sentence_ids::MappedSentenceIds;
 use crate::spans_flat::{MappedSpans, SpanStore};
 use crate::{IndexError, Result, SpanIndex};
 
@@ -98,7 +99,7 @@ pub struct Corpus {
 	pub spans: SpanStore,
 	pub lexicon: InMemoryLexicon,
 	pub alignments: AlignmentIndex,
-	pub sentence_ids: Vec<String>,
+	sentence_ids: Option<MappedSentenceIds>,
 }
 
 fn load_indexes(
@@ -152,12 +153,10 @@ impl Corpus {
 			AlignmentIndex::new()
 		};
 
-		let sentence_ids: Vec<String> = if path.join("sentence_ids.bin").exists() {
-			let bytes = std::fs::read(path.join("sentence_ids.bin"))?;
-			bincode::deserialize(&bytes)
-				.map_err(|e| IndexError::Format(format!("Failed to deserialize sentence IDs: {}", e)))?
+		let sentence_ids = if path.join("sentence_ids.bin").exists() {
+			Some(MappedSentenceIds::open(path.join("sentence_ids.bin"))?)
 		} else {
-			Vec::new()
+			None
 		};
 
 		Ok(Self {
@@ -270,10 +269,10 @@ impl Corpus {
 	}
 
 	pub fn sentence_id(&self, sentence_index: usize) -> Option<&str> {
-		self.sentence_ids.get(sentence_index).map(|s| s.as_str())
+		self.sentence_ids.as_ref()?.get(sentence_index)
 	}
 
 	pub fn sentence_id_count(&self) -> usize {
-		self.sentence_ids.len()
+		self.sentence_ids.as_ref().map_or(0, |s| s.len())
 	}
 }

@@ -235,9 +235,7 @@ impl IndexSink {
 		std::fs::write(path.join("lexicon.bin"), lexicon_bytes)?;
 
 		if !self.sentence_ids.is_empty() {
-			let sentence_ids_bytes = bincode::serialize(&self.sentence_ids)
-				.map_err(|e| crate::BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-			std::fs::write(path.join("sentence_ids.bin"), sentence_ids_bytes)?;
+			montre_index::write_sentence_ids(&self.sentence_ids, &path.join("sentence_ids.bin"))?;
 		}
 
 		tracing::info!(

@@ -5,6 +5,7 @@ pub mod forward;
 pub mod forward_flat;
 pub mod spans;
 pub mod spans_flat;
+pub mod sentence_ids;
 pub mod lexicon;
 pub mod corpus;
 
@@ -17,6 +18,7 @@ pub use forward::{ForwardIndex, InMemoryForward};
 pub use spans::{SpanIndex, InMemorySpans};
 pub use spans_flat::{MappedSpans, SpanStore, write_flat_spans};
 pub use forward_flat::{MappedForward, ForwardStore, write_flat_forward, write_mfwd, LayerBuild, build_dict_encoded_layer, build_dense_numeric_layer, is_numeric_layer};
+pub use sentence_ids::{MappedSentenceIds, write_sentence_ids};
 pub use lexicon::{Lexicon, InMemoryLexicon};
 
 #[derive(Error, Debug)]
