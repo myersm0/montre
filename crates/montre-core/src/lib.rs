@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
 pub type Position = u64;
+
+/// Implicit max of 65,535 layers (in practice this should never exceed a few dozen)
 pub type LayerId = u16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
