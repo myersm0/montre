@@ -2,23 +2,9 @@ use montre_core::{Position, Value};
 use serde::{Deserialize, Serialize};
 
 pub trait ForwardIndex {
-	fn get(&self, position: Position, layer: &str) -> Option<&Value>;
-	fn get_range(&self, start: Position, end: Position, layer: &str) -> Vec<Option<&Value>>;
 	fn token_count(&self) -> u64;
-
-	fn get_str(&self, position: Position, layer: &str) -> Option<&str> {
-		match self.get(position, layer)? {
-			Value::Str(s) => Some(s.as_str()),
-			Value::Int(_) => None,
-		}
-	}
-
-	fn get_int(&self, position: Position, layer: &str) -> Option<i64> {
-		match self.get(position, layer)? {
-			Value::Int(n) => Some(*n),
-			Value::Str(_) => None,
-		}
-	}
+	fn get_str(&self, position: Position, layer: &str) -> Option<&str>;
+	fn get_int(&self, position: Position, layer: &str) -> Option<i64>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,23 +79,24 @@ impl Default for InMemoryForward {
 }
 
 impl ForwardIndex for InMemoryForward {
-	fn get(&self, position: Position, layer: &str) -> Option<&Value> {
-		let layer_idx = self.layer_index(layer)?;
-		self.data[layer_idx].get(position as usize)
-	}
-
-	fn get_range(&self, start: Position, end: Position, layer: &str) -> Vec<Option<&Value>> {
-		let layer_idx = match self.layer_index(layer) {
-			Some(idx) => idx,
-			None => return vec![None; (end - start) as usize],
-		};
-		(start..end)
-			.map(|pos| self.data[layer_idx].get(pos as usize))
-			.collect()
-	}
-
 	fn token_count(&self) -> u64 {
 		self.token_count
+	}
+
+	fn get_str(&self, position: Position, layer: &str) -> Option<&str> {
+		let layer_idx = self.layer_index(layer)?;
+		match self.data[layer_idx].get(position as usize)? {
+			Value::Str(s) => Some(s.as_str()),
+			Value::Int(_) => None,
+		}
+	}
+
+	fn get_int(&self, position: Position, layer: &str) -> Option<i64> {
+		let layer_idx = self.layer_index(layer)?;
+		match self.data[layer_idx].get(position as usize)? {
+			Value::Int(n) => Some(*n),
+			Value::Str(_) => None,
+		}
 	}
 }
 
@@ -126,8 +113,8 @@ mod tests {
 		index.set(word_layer, 1, "cat".into());
 		index.set(word_layer, 2, "sat".into());
 
-		assert_eq!(index.get(0, "word"), Some(&Value::from("the")));
-		assert_eq!(index.get(1, "word"), Some(&Value::from("cat")));
+		assert_eq!(index.get_str(0, "word"), Some("the"));
+		assert_eq!(index.get_str(1, "word"), Some("cat"));
 		assert_eq!(index.token_count(), 3);
 	}
 
