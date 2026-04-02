@@ -191,3 +191,54 @@ mod tests {
 		assert_eq!(token.get(2), None);
 	}
 }
+
+#[cfg(test)]
+mod proptests {
+	use super::*;
+	use proptest::prelude::*;
+
+	fn span_strategy() -> impl Strategy<Value = Span> {
+		(0u64..10_000, 0u64..10_000).prop_map(|(a, b)| {
+			let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+			Span::new(lo, hi)
+		})
+	}
+
+	proptest! {
+		#[test]
+		fn len_is_end_minus_start(span in span_strategy()) {
+			prop_assert_eq!(span.len(), span.end - span.start);
+		}
+
+		#[test]
+		fn contains_span_is_reflexive(span in span_strategy()) {
+			prop_assert!(span.contains_span(&span));
+		}
+
+		#[test]
+		fn nonempty_span_contains_start_not_end(span in span_strategy()) {
+			if span.start < span.end {
+				prop_assert!(span.contains(span.start));
+				prop_assert!(!span.contains(span.end));
+			}
+		}
+
+		#[test]
+		fn contains_span_implies_overlaps(
+			a in span_strategy(),
+			b in span_strategy(),
+		) {
+			if a.contains_span(&b) && !b.is_empty() {
+				prop_assert!(a.overlaps(&b));
+			}
+		}
+
+		#[test]
+		fn overlaps_is_symmetric(
+			a in span_strategy(),
+			b in span_strategy(),
+		) {
+			prop_assert_eq!(a.overlaps(&b), b.overlaps(&a));
+		}
+	}
+}
