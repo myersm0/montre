@@ -82,6 +82,11 @@ impl Token {
 	}
 
 	pub fn with_annotation(mut self, layer: LayerId, value: impl Into<Value>) -> Self {
+		debug_assert!(
+			!self.annotations.iter().any(|(l, _)| *l == layer),
+			"duplicate layer ID {layer} on token at position {}",
+			self.position,
+		);
 		self.annotations.push((layer, value.into()));
 		self
 	}
