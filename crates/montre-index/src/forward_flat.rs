@@ -18,9 +18,7 @@ const DIR_ENTRY_SIZE: usize = 64;
 pub const ENCODING_DICT: u8 = 0x01;
 pub const ENCODING_DENSE_NUMERIC: u8 = 0x02;
 
-pub fn align_to_8(n: usize) -> usize {
-	(n + 7) & !7
-}
+use crate::align_to_8;
 
 pub struct LayerBuild {
 	pub name: String,

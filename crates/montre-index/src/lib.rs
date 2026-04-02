@@ -52,3 +52,7 @@ pub const index_version: u32 = 5;
 pub fn open(path: impl AsRef<Path>) -> Result<Corpus> {
 	Corpus::open(path)
 }
+
+pub(crate) fn align_to_8(n: usize) -> usize {
+	(n + 7) & !7
+}
