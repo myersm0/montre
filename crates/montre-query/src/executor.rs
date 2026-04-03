@@ -1146,23 +1146,6 @@ pub fn resolve_target_span(
 	None
 }
 
-impl PartialEq for PlanNode {
-	fn eq(&self, other: &Self) -> bool {
-		match (self, other) {
-			(PlanNode::ScanAll, PlanNode::ScanAll) => true,
-			(
-				PlanNode::ScanLiteral { layer: l1, value: v1 },
-				PlanNode::ScanLiteral { layer: l2, value: v2 },
-			) => l1 == l2 && v1 == v2,
-			(
-				PlanNode::ScanRegex { layer: l1, pattern: p1 },
-				PlanNode::ScanRegex { layer: l2, pattern: p2 },
-			) => l1 == l2 && p1 == p2,
-			_ => false,
-		}
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
