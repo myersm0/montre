@@ -63,7 +63,6 @@ fn collect_labels(query: &Query, seen: &mut Vec<String>) -> Result<()> {
 			Ok(())
 		}
 		Query::Within { inner, .. }
-		| Query::Containing { inner, .. }
 		| Query::WithinComponent { inner, .. }
 		| Query::WithinDocument { inner, .. }
 		| Query::Project { inner, .. }

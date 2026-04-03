@@ -144,14 +144,6 @@ fn plan_node(query: &Query) -> Result<PlanNode> {
 			})
 		}
 
-		Query::Containing { inner, span_layer } => {
-			let inner_plan = plan_node(inner)?;
-			Ok(PlanNode::FilterBySpan {
-				inner: Box::new(inner_plan),
-				span_layer: span_layer.clone(),
-			})
-		}
-
 		Query::Capture { name, inner } => {
 			let inner_plan = plan_node(inner)?;
 			Ok(PlanNode::SequenceScan {
@@ -217,7 +209,6 @@ fn collect_declared_labels(query: &Query, out: &mut HashSet<String>) {
 			}
 		}
 		Query::Within { inner, .. }
-		| Query::Containing { inner, .. }
 		| Query::WithinComponent { inner, .. }
 		| Query::WithinDocument { inner, .. }
 		| Query::Project { inner, .. }
