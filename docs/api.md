@@ -90,7 +90,7 @@ span.overlaps(&s)       // true if any overlap
 ```rust
 use montre_index::ForwardIndex;
 
-// String layers (word, lemma, upos, xpos, feats, deps, etc.) — preferred, zero-copy with mapped backend
+// String layers (word, lemma, upos, xpos, feats, deps, etc.) — zero-copy with mapped backend
 let word: Option<&str> = corpus.forward.get_str(position, "word");
 let upos: Option<&str> = corpus.forward.get_str(position, "upos");
 let xpos: Option<&str> = corpus.forward.get_str(position, "xpos");
@@ -98,15 +98,9 @@ let deps: Option<&str> = corpus.forward.get_str(position, "deps");  // raw enhan
 
 // Integer layers (head) — sentence-local values, not converted to global positions
 let head: Option<i64> = corpus.forward.get_int(position, "head");
-
-// Range of positions (returns owned Values)
-let vals: Vec<Option<&Value>> = corpus.forward.get_range(start, end, "lemma");
-
-// Legacy: returns &Value (requires allocation on mapped backend; prefer get_str/get_int)
-let val: Option<&Value> = corpus.forward.get(position, "word");
 ```
 
-`Value` is either `Value::Str(CompactString)` or `Value::Int(i64)`. The `get_str` and `get_int` methods are preferred for new code — they avoid the `Value` wrapper and enable zero-copy access from the memory-mapped forward index.
+The `ForwardIndex` trait provides `get_str` and `get_int` as its primary interface. Both enable zero-copy access from the memory-mapped forward index. `Value` (`Value::Str(CompactString)` or `Value::Int(i64)`) is used internally by the build pipeline but does not appear in the query-time API.
 
 ### Inverted index
 

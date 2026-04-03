@@ -61,7 +61,7 @@ Components remain independently queryable. You can query `maupassant-fr` as if t
                     ┌───────────────┐
                     │  montre-core  │
                     │               │
-                    │ Span, Token   │
+                    │ Span          │
                     │ Position      │
                     │ Value         │
                     └───────────────┘
@@ -71,7 +71,7 @@ Components remain independently queryable. You can query `maupassant-fr` as if t
 
 | Crate | Purpose | Depends On |
 |-------|---------|------------|
-| `montre-core` | Primitive types: `Span`, `Position`, `Value`, `Token` | (none) |
+| `montre-core` | Primitive types: `Span`, `Position`, `Value` | (none) |
 | `montre-index` | Index structures and corpus loading | `montre-core` |
 | `montre-build` | Corpus construction from source formats | `montre-core`, `montre-index` |
 | `montre-query` | Query parsing, planning, execution | `montre-core`, `montre-index` |
@@ -83,7 +83,7 @@ Components remain independently queryable. You can query `maupassant-fr` as if t
 
 ### Core entities
 
-**Token**: A position in the corpus with annotations across multiple layers.
+**Token**: A position in the corpus with annotations across multiple layers. This is a logical concept, not a struct — token data is accessed via `ForwardIndex::get_str` and `get_int` by position and layer name.
 
 **Layer**: A named annotation dimension (word, lemma, upos, xpos, feats, head, deprel, deps). `pos` is a parse-time alias for `upos`. The `head` layer stores sentence-local dependency head indices as integers and is forward-only (not in the inverted index). The `deps` layer stores raw enhanced dependency strings from CoNLL-U column 9 and is also forward-only — its high cardinality makes inverted indexing impractical. Tokens where the deps column is `_` have no entry (returns `None`). With `decompose_feats` enabled, morphological features are additionally indexed as `feats.Number`, `feats.Gender`, etc.
 
@@ -456,7 +456,7 @@ Note: Not all constructs will be implemented simultaneously. Early versions prio
 
 ### Phase 0: Foundation ✓
 
-- [x] Core data model (`Span`, `Token`, `Value`)
+- [x] Core data model (`Span`, `Position`, `Value`)
 - [x] In-memory inverted index (roaring bitmaps)
 - [x] In-memory forward index
 - [x] Sentence/document span tracking
