@@ -6,7 +6,7 @@ use montre_query::executor::{self, Hit};
 
 use crate::HitList;
 use crate::error::{set_error, clear_error};
-use crate::strings::{to_cstring, borrow_cstr};
+use crate::strings::{to_cstring, borrow_cstr, export_array};
 
 #[no_mangle]
 pub unsafe extern "C" fn montre_corpus_alignment_count(corpus: *const Corpus) -> u32 {
@@ -283,4 +283,99 @@ pub unsafe extern "C" fn montre_project(
 	if !out_projected.is_null() { *out_projected = result_hits.len() as u64; }
 
 	Box::into_raw(Box::new(HitList { hits: result_hits }))
+}
+
+/// Per-document alignment coverage for the source side of a named alignment.
+/// Returns parallel arrays: global document indices, aligned unit counts,
+/// and total unit counts. One entry per document in the source component.
+/// Free doc_indices/aligned/total with montre_u32_array_free(array, len).
+/// Returns 1 on success, 0 on failure (check montre_last_error).
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_alignment_coverage(
+	corpus: *const Corpus,
+	alignment_name: *const c_char,
+	out_doc_indices: *mut *mut u32,
+	out_aligned: *mut *mut u32,
+	out_total: *mut *mut u32,
+	out_len: *mut u64,
+) -> i32 {
+	clear_error();
+
+	if corpus.is_null() || out_doc_indices.is_null()
+		|| out_aligned.is_null() || out_total.is_null() || out_len.is_null()
+	{
+		if !out_len.is_null() { *out_len = 0; }
+		return 0;
+	}
+	let c = &*corpus;
+	let Some(align_str) = borrow_cstr(alignment_name) else {
+		set_error("null alignment name".into());
+		*out_len = 0;
+		return 0;
+	};
+
+	let Some(edges) = c.alignment_edges(align_str) else {
+		set_error(format!("alignment not found: {}", align_str));
+		*out_len = 0;
+		return 0;
+	};
+	let Some(align_meta) = c.alignment_meta(align_str) else {
+		set_error(format!("alignment metadata not found: {}", align_str));
+		*out_len = 0;
+		return 0;
+	};
+	let Some(source_comp) = c.component(&align_meta.source_component) else {
+		set_error(format!("source component not found: {}", align_meta.source_component));
+		*out_len = 0;
+		return 0;
+	};
+
+	let Some(doc_spans) = c.spans().spans("document") else {
+		set_error("no document spans".into());
+		*out_len = 0;
+		return 0;
+	};
+	let Some(sent_spans) = c.spans().spans(&align_meta.source_layer) else {
+		set_error(format!("source span layer not found: {}", align_meta.source_layer));
+		*out_len = 0;
+		return 0;
+	};
+
+	let source_edges: std::collections::HashSet<(u32, u32)> =
+		edges.iter().map(|&((sd, ss), _)| (sd, ss)).collect();
+
+	let (doc_start, doc_end) = source_comp.document_range;
+	let doc_count = doc_end - doc_start;
+
+	let mut indices = Vec::with_capacity(doc_count);
+	let mut aligned = Vec::with_capacity(doc_count);
+	let mut totals = Vec::with_capacity(doc_count);
+
+	for doc_within_comp in 0..doc_count {
+		let global_doc = doc_start + doc_within_comp;
+		let Some(doc_span) = doc_spans.get(global_doc) else {
+			continue;
+		};
+
+		let first_sent = sent_spans.partition_point(|s| s.start < doc_span.start);
+		let last_sent = sent_spans.partition_point(|s| s.start < doc_span.end);
+		let total = (last_sent - first_sent) as u32;
+
+		let mut count = 0u32;
+		for sent_within_doc in 0..total {
+			if source_edges.contains(&(doc_within_comp as u32, sent_within_doc)) {
+				count += 1;
+			}
+		}
+
+		indices.push(global_doc as u32);
+		aligned.push(count);
+		totals.push(total);
+	}
+
+	let mut len: u64 = 0;
+	*out_doc_indices = export_array(&indices, &mut len);
+	*out_aligned = export_array(&aligned, out_len);
+	*out_total = export_array(&totals, &mut len);
+	1
 }
