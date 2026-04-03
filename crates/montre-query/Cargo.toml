@@ -8,11 +8,9 @@ license.workspace = true
 [dependencies]
 montre-core = { workspace = true }
 montre-index = { workspace = true }
-winnow = { workspace = true }
 regex = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
-tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
