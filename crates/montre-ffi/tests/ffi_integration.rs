@@ -487,6 +487,61 @@ fn multi_component_lifecycle() {
 		let texts = read_string_array(arr, len);
 		assert!(texts[0].contains("cat"));
 
+		// projected hits should have UNPOPULATED context before populate_context
+		let doc_idx = montre_hit_document_index(target_hits, 0);
+		let sent_idx = montre_hit_sentence_index(target_hits, 0);
+		assert_eq!(doc_idx, u32::MAX, "projected hit should have UNPOPULATED document_index");
+		assert_eq!(sent_idx, u32::MAX, "projected hit should have UNPOPULATED sentence_index");
+
+		// populate_context fills in real indices
+		montre_hitlist_populate_context(target_hits, corpus);
+		let doc_idx = montre_hit_document_index(target_hits, 0);
+		let sent_idx = montre_hit_sentence_index(target_hits, 0);
+		assert_ne!(doc_idx, u32::MAX);
+		assert_ne!(sent_idx, u32::MAX);
+
+		// sentence_span: resolve fr component, doc 0, sentence 0
+		// components are sorted: en=0, fr=1
+		let mut span_start: u64 = 0;
+		let mut span_end: u64 = 0;
+		let global_sent = montre_corpus_sentence_span(
+			corpus, 1, 0, 0, &mut span_start, &mut span_end,
+		);
+		assert!(global_sent >= 0, "sentence_span failed");
+		assert_eq!(span_end - span_start, 4); // "Le chat dort ." = 4 tokens
+
+		// sentence_span: fr doc 0, sentence 1
+		let global_sent_1 = montre_corpus_sentence_span(
+			corpus, 1, 0, 1, &mut span_start, &mut span_end,
+		);
+		assert!(global_sent_1 >= 0);
+		assert_eq!(span_end - span_start, 5); // "La vieille maison dort ." = 5 tokens
+		assert_ne!(global_sent, global_sent_1);
+
+		// sentence_span: out of bounds
+		assert_eq!(montre_corpus_sentence_span(corpus, 1, 0, 99, &mut span_start, &mut span_end), -1);
+		assert_eq!(montre_corpus_sentence_span(corpus, 99, 0, 0, &mut span_start, &mut span_end), -1);
+		assert_eq!(montre_corpus_sentence_span(corpus, 1, 99, 0, &mut span_start, &mut span_end), -1);
+
+		// alignment_coverage: fr side of "sentence" alignment
+		let mut cov_doc_indices: *mut u32 = std::ptr::null_mut();
+		let mut cov_aligned: *mut u32 = std::ptr::null_mut();
+		let mut cov_total: *mut u32 = std::ptr::null_mut();
+		let mut cov_len: u64 = 0;
+		let rc = montre_corpus_alignment_coverage(
+			corpus, align.as_ptr(),
+			&mut cov_doc_indices, &mut cov_aligned, &mut cov_total, &mut cov_len,
+		);
+		assert_eq!(rc, 1, "alignment_coverage failed: {:?}", read_last_error());
+		assert_eq!(cov_len, 1); // 1 document in fr component
+		let aligned_count = *cov_aligned;
+		let total_count = *cov_total;
+		assert_eq!(total_count, 2); // 2 sentences in fr doc
+		assert_eq!(aligned_count, 2); // both sentences aligned
+		montre_u32_array_free(cov_doc_indices, cov_len);
+		montre_u32_array_free(cov_aligned, cov_len);
+		montre_u32_array_free(cov_total, cov_len);
+
 		montre_hitlist_free(target_hits);
 		montre_hitlist_free(fr_hits);
 		montre_hitlist_free(en_hits);
