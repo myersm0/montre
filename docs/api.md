@@ -66,7 +66,13 @@ pub struct Hit {
     pub sentence_index: u32,             // populated by populate_context
     pub captures: Vec<(String, Span)>,   // labeled submatches (populated by labeled queries, e.g. a:[pos="ADJ"])
 }
+
+impl Hit {
+    pub const UNPOPULATED: u32 = u32::MAX;
+}
 ```
+
+Both `document_index` and `sentence_index` are initialized to `Hit::UNPOPULATED` (`u32::MAX`). Call `Results::populate_context` to fill them from the span index. Code that reads these fields without calling `populate_context` will see `u32::MAX`, not a plausible-looking zero.
 
 ### Span
 
