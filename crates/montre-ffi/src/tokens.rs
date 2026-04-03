@@ -16,6 +16,16 @@ pub(crate) fn forward_value_string(corpus: &Corpus, position: u64, layer: &str) 
 	None
 }
 
+pub(crate) fn forward_value_cstr(corpus: &Corpus, position: u64, layer: &str) -> *mut c_char {
+	if let Some(s) = corpus.forward().get_str(position, layer) {
+		return to_cstring(s);
+	}
+	if let Some(n) = corpus.forward().get_int(position, layer) {
+		return to_cstring(&n.to_string());
+	}
+	ptr::null_mut()
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn montre_corpus_token_annotation(
 	corpus: *const Corpus,
@@ -29,10 +39,7 @@ pub unsafe extern "C" fn montre_corpus_token_annotation(
 	let Some(layer_str) = borrow_cstr(layer) else {
 		return ptr::null_mut();
 	};
-	match forward_value_string(c, position, layer_str) {
-		Some(val) => to_cstring(&val),
-		None => ptr::null_mut(),
-	}
+	forward_value_cstr(c, position, layer_str)
 }
 
 #[no_mangle]
@@ -96,8 +103,8 @@ pub unsafe extern "C" fn montre_corpus_token_annotations(
 	}
 
 	for (i, pos) in (start..end).enumerate() {
-		let val = forward_value_string(c, pos, layer_str).unwrap_or_default();
-		*array.add(i) = to_cstring(&val);
+		let p = forward_value_cstr(c, pos, layer_str);
+		*array.add(i) = if p.is_null() { to_cstring("") } else { p };
 	}
 
 	*out_len = count as u64;
