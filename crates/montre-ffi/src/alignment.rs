@@ -264,8 +264,8 @@ pub unsafe extern "C" fn montre_project(
 					) {
 						result_hits.push(Hit {
 							span,
-							document_index: 0,
-							sentence_index: 0,
+							document_index: Hit::UNPOPULATED,
+							sentence_index: Hit::UNPOPULATED,
 							captures: Vec::new(),
 						});
 					}

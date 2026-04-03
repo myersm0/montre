@@ -3,6 +3,7 @@ use std::ptr;
 
 use montre_index::{Corpus, SpanIndex};
 use montre_query::{Query, executor};
+use montre_query::executor::Hit;
 
 use crate::HitList;
 use crate::error::{set_error, clear_error};
@@ -354,31 +355,14 @@ pub unsafe extern "C" fn montre_hitlist_populate_context(
 
 	for hit in &mut hit_list.hits {
 		if let Some(spans) = doc_spans {
-			hit.document_index = binary_search_span_index(spans, hit.span.start);
+			hit.document_index = montre_core::span_containing(spans, hit.span.start)
+				.map_or(Hit::UNPOPULATED, |i| i as u32);
 		}
 		if let Some(spans) = sent_spans {
-			hit.sentence_index = binary_search_span_index(spans, hit.span.start);
+			hit.sentence_index = montre_core::span_containing(spans, hit.span.start)
+				.map_or(Hit::UNPOPULATED, |i| i as u32);
 		}
 	}
-}
-
-fn binary_search_span_index(spans: &[montre_core::Span], position: u64) -> u32 {
-	let mut lo = 0usize;
-	let mut hi = spans.len();
-
-	while lo < hi {
-		let mid = lo + (hi - lo) / 2;
-		let span = &spans[mid];
-		if position < span.start {
-			hi = mid;
-		} else if position >= span.end {
-			lo = mid + 1;
-		} else {
-			return mid as u32;
-		}
-	}
-
-	0
 }
 
 #[no_mangle]
