@@ -7,13 +7,28 @@ use crate::{QueryError, Result};
 /// Parser for CQL-like query language
 ///
 /// Grammar (informal):
-///   query      = sequence ("|" sequence)* within_clause?
-///   sequence   = element+
-///   element    = atom quantifier?
-///   atom       = token_pattern | quoted_word | "(" query ")"
-///   quantifier = "+" | "*" | "?" | "{" n "}" | "{" n "," m? "}"
-///   token_pattern = "[" constraints? "]"
-///   within_clause = "within" layer_name
+///   query          = alternation within_clause* constraint_clause?
+///   alternation    = sequence ("|" sequence)*
+///   sequence       = element+
+///   element        = atom quantifier?
+///   atom           = token_pattern | quoted_word | "(" query ")" | label ":" atom
+///   quantifier     = "+" | "*" | "?" | "{" n "}" | "{" n "," m? "}"
+///   token_pattern  = "[" (constraint ("&" constraint)*)? "]"
+///   constraint     = layer ("=" | "!=") (string | regex)
+///   string         = '"' ... '"'
+///   regex          = '/' ... '/'
+///   quoted_word    = '"' ... '"'                          -- shorthand for [word="..."]
+///   label          = identifier                           -- not a reserved word
+///   within_clause  = "within" span_name
+///                  | "within" ("doc" | "document") ":" name_list
+///                  | "within" "component" ":" name_list
+///                  | "=" identifier "=>"                  -- alignment projection
+///   constraint_clause = "::" global_constraint ("&" global_constraint)*
+///   global_constraint = label_attr ("=" | "!=") label_attr
+///                     | "distance" "(" label "," label ")" cmp_op number
+///   label_attr     = label "." layer
+///   name_list      = name ("," name)*
+///   name           = identifier | string
 
 pub fn parse(input: &str) -> Result<Query> {
 	let mut parser = Parser::new(input);
