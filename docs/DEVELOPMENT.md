@@ -929,6 +929,9 @@ JSON array of objects, sorted by `(sentence_index, node_id)`. Fields with `_` va
 - [x] **Bulk alignment coverage**: `montre_corpus_alignment_coverage(corpus, alignment_name)` returns parallel arrays of (global_doc_index, aligned_count, total_count) per source-side document. Avoids N round-trips from bindings for per-document coverage statistics.
 - [x] **`Hit::UNPOPULATED` in FFI**: `montre_project` now initializes projected hits with `Hit::UNPOPULATED` (`u32::MAX`) instead of `0`. `montre_hitlist_populate_context` returns `Hit::UNPOPULATED` (not `0`) for positions outside all spans.
 - [x] **Deduplicate binary search**: FFI `montre_hitlist_populate_context` and `montre_corpus_span_containing` now use `montre_core::span_containing` instead of local binary search implementations.
+- [x] **`forward_value_cstr`**: new helper in `tokens.rs` that produces `*mut c_char` directly from the forward index, skipping the intermediate `String` allocation on the `get_str` path. Used by `montre_corpus_token_annotation`, `montre_corpus_token_annotations`, and `montre_context_tokens`.
+- [x] **Eliminate manual `alloc` in `tokens.rs`**: `montre_corpus_token_annotations`, `montre_hitlist_texts`, and `montre_context_tokens` replaced manual `Layout::array` + `alloc` + pointer-write loops with `Vec` collect + `export_array`. Zero `std::alloc` usage remaining in `tokens.rs`.
+- [x] **Documentation audit**: api.md function count corrected (was 64, actual 78). Eight previously undocumented functions added: `montre_corpus_document_index_by_name`, `montre_corpus_inverted_count`, `montre_corpus_component_index_by_name`, `montre_corpus_inverted_counts`, `montre_hit_capture_count`, `montre_hit_capture_name`, `montre_hit_capture_start`, `montre_hit_capture_end`.
 - [x] 2 new FFI functions (78 total; prior count of 64 was an undercount — see api.md for full inventory).
 
 ### Phase 4: Statistics & bindings
