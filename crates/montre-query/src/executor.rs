@@ -17,11 +17,13 @@ pub struct Hit {
 }
 
 impl Hit {
+	pub const UNPOPULATED: u32 = u32::MAX;
+
 	fn new(span: Span) -> Self {
 		Self {
 			span,
-			document_index: 0,
-			sentence_index: 0,
+			document_index: Self::UNPOPULATED,
+			sentence_index: Self::UNPOPULATED,
 			captures: Vec::new(),
 		}
 	}
@@ -71,10 +73,14 @@ impl Results {
 
 		for hit in &mut self.hits {
 			if let Some(spans) = doc_spans {
-				hit.document_index = span_containing(spans, hit.span.start).unwrap_or(0) as u32;
+				hit.document_index = span_containing(spans, hit.span.start)
+					.map(|i| i as u32)
+					.unwrap_or(Hit::UNPOPULATED);
 			}
 			if let Some(spans) = sent_spans {
-				hit.sentence_index = span_containing(spans, hit.span.start).unwrap_or(0) as u32;
+				hit.sentence_index = span_containing(spans, hit.span.start)
+					.map(|i| i as u32)
+					.unwrap_or(Hit::UNPOPULATED);
 			}
 		}
 	}
