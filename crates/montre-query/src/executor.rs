@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use montre_core::{Span, UnitId, span_containing};
 use montre_index::{ComponentMeta, Corpus, ForwardIndex, InvertedIndex, SpanIndex};
 use rayon::prelude::*;
+use roaring::RoaringBitmap;
 
 use crate::ast::{CmpOp, GlobalConstraint, LabelAttr};
 use crate::planner::{PlanNode, QueryPlan, SequenceStep};
@@ -125,17 +126,17 @@ fn count_node(node: &PlanNode, corpus: &Corpus) -> Result<usize> {
 
 		PlanNode::ScanRegex { layer, pattern } => {
 			let re = regex::Regex::new(pattern)?;
-			let mut seen = HashSet::new();
+			let mut combined = RoaringBitmap::new();
 			if let Some(values) = corpus.inverted.values(layer) {
 				for value in values {
 					if re.is_match(value) {
 						if let Some(bitmap) = corpus.inverted.get(layer, value) {
-							seen.extend(bitmap.iter());
+							combined |= bitmap;
 						}
 					}
 				}
 			}
-			Ok(seen.len())
+			Ok(combined.len() as usize)
 		}
 
 		PlanNode::SequenceScan { steps } => count_sequence(steps, corpus),
