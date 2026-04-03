@@ -923,6 +923,14 @@ JSON array of objects, sorted by `(sentence_index, node_id)`. Fields with `_` va
 
 *Empty nodes as JSON.* Binary format considered and deferred — empty nodes are infrequent (many treebanks have zero), structurally complex (many string fields), and have no hot-path access pattern. JSON is debuggable and trivially extensible.
 
+### Phase 4c: FFI additions for projection workflow ✓
+
+- [x] **Sentence span resolver**: `montre_corpus_sentence_span(corpus, component_index, doc_within_component, sentence_within_doc)` → global sentence index + token span. Collapses multi-step coordinate translation into a single FFI call. Uses `partition_point` to locate sentences within a document span.
+- [x] **Bulk alignment coverage**: `montre_corpus_alignment_coverage(corpus, alignment_name)` returns parallel arrays of (global_doc_index, aligned_count, total_count) per source-side document. Avoids N round-trips from bindings for per-document coverage statistics.
+- [x] **`Hit::UNPOPULATED` in FFI**: `montre_project` now initializes projected hits with `Hit::UNPOPULATED` (`u32::MAX`) instead of `0`. `montre_hitlist_populate_context` returns `Hit::UNPOPULATED` (not `0`) for positions outside all spans.
+- [x] **Deduplicate binary search**: FFI `montre_hitlist_populate_context` and `montre_corpus_span_containing` now use `montre_core::span_containing` instead of local binary search implementations.
+- [x] 2 new FFI functions (66 total, was 64).
+
 ### Phase 4: Statistics & bindings
 
 - [x] `count` command (CLI)

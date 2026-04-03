@@ -319,7 +319,7 @@ BuildError::Alignment(String)
 
 ## C FFI
 
-The `montre-ffi` crate exports 64 `extern "C"` functions across eight modules. All string arguments are `*const c_char` (null-terminated). All returned strings are owned by Rust; copy and free with `montre_string_free`.
+The `montre-ffi` crate exports 66 `extern "C"` functions across eight modules. All string arguments are `*const c_char` (null-terminated). All returned strings are owned by Rust; copy and free with `montre_string_free`.
 
 ### Error handling
 
@@ -383,6 +383,9 @@ uint64_t montre_hit_end(const void *hits, uint64_t index);
 uint32_t montre_hit_document_index(const void *hits, uint64_t index);
 uint32_t montre_hit_sentence_index(const void *hits, uint64_t index);
 void     montre_hitlist_populate_context(void *hits, const void *corpus);
+```
+
+`montre_hit_document_index` and `montre_hit_sentence_index` return `UINT32_MAX` (`Hit::UNPOPULATED`) before `montre_hitlist_populate_context` is called. This includes hits returned by `montre_project`. Check for this sentinel before using the index as a lookup key.
 
 // Bulk hit field extraction as flat u64 arrays. Free with montre_u64_array_free.
 uint64_t *montre_hitlist_starts(const void *hits, uint64_t *out_len);
@@ -426,9 +429,21 @@ void *montre_project(
     const void *corpus, const void *source_hits, const char *alignment_name,
     uint64_t *out_unmapped, uint64_t *out_no_alignment, uint64_t *out_projected
 );
+
+// Per-document alignment coverage for the source side of a named alignment.
+// Returns parallel u32 arrays: global document indices, aligned unit counts, total unit counts.
+// Free each array with montre_u32_array_free(array, len).
+// Returns 1 on success, 0 on failure.
+int32_t montre_corpus_alignment_coverage(
+    const void *corpus, const char *alignment_name,
+    uint32_t **out_doc_indices, uint32_t **out_aligned, uint32_t **out_total,
+    uint64_t *out_len
+);
 ```
 
 The three out-parameters on `montre_project` are nullable. Pass NULL for any diagnostics you don't need.
+
+`montre_corpus_alignment_coverage` returns one entry per document in the source component of the named alignment. For each document, `aligned` is the number of source-layer units (typically sentences) that have at least one alignment edge, and `total` is the total number of source-layer units in that document.
 
 ### Span index access
 
@@ -438,9 +453,20 @@ char    *montre_corpus_span_layer_name(const void *corpus, uint32_t index);
 int64_t  montre_corpus_span_count(const void *corpus, const char *layer);
 int32_t  montre_corpus_span_at(const void *corpus, const char *layer, uint64_t index, uint64_t *out_start, uint64_t *out_end);
 int64_t  montre_corpus_span_containing(const void *corpus, const char *layer, uint64_t position, uint64_t *out_start, uint64_t *out_end);
+int64_t  montre_corpus_span_count_in_range(const void *corpus, const char *layer, uint64_t token_start, uint64_t token_end);
+
+// Resolve a sentence span from component-relative coordinates.
+// Returns the global sentence index (for use with montre_corpus_sentence_id), or -1 on failure.
+int64_t montre_corpus_sentence_span(
+    const void *corpus, uint32_t component_index,
+    uint32_t doc_within_component, uint32_t sentence_within_doc,
+    uint64_t *out_start, uint64_t *out_end
+);
 ```
 
 `montre_corpus_span_containing` returns the span index, or -1 if not found. The out-parameters are nullable — pass NULL if you only need the index.
+
+`montre_corpus_sentence_span` collapses the multi-step coordinate translation (component → document range → document span → sentence span) into a single call. The returned global sentence index can be passed directly to `montre_corpus_sentence_id`.
 
 ### Sentence IDs
 
