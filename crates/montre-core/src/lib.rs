@@ -1,9 +1,7 @@
 use compact_str::CompactString;
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
 
 pub type Position = u64;
-pub type LayerId = u16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(C)]
@@ -14,7 +12,7 @@ pub struct Span {
 
 impl Span {
 	pub fn new(start: Position, end: Position) -> Self {
-		debug_assert!(start <= end);
+		assert!(start <= end);
 		Self { start, end }
 	}
 
@@ -39,6 +37,20 @@ impl Span {
 	}
 }
 
+pub fn span_containing(spans: &[Span], position: Position) -> Option<usize> {
+	spans
+		.binary_search_by(|span| {
+			if span.end <= position {
+				std::cmp::Ordering::Less
+			} else if span.start > position {
+				std::cmp::Ordering::Greater
+			} else {
+				std::cmp::Ordering::Equal
+			}
+		})
+		.ok()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Value {
 	Str(CompactString),
@@ -60,35 +72,6 @@ impl From<String> for Value {
 impl From<i64> for Value {
 	fn from(n: i64) -> Self {
 		Value::Int(n)
-	}
-}
-
-pub type Annotations = SmallVec<[(LayerId, Value); 4]>;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Token {
-	pub position: Position,
-	pub annotations: Annotations,
-}
-
-impl Token {
-	pub fn new(position: Position) -> Self {
-		Self {
-			position,
-			annotations: SmallVec::new(),
-		}
-	}
-
-	pub fn with_annotation(mut self, layer: LayerId, value: impl Into<Value>) -> Self {
-		self.annotations.push((layer, value.into()));
-		self
-	}
-
-	pub fn get(&self, layer: LayerId) -> Option<&Value> {
-		self.annotations
-			.iter()
-			.find(|(l, _)| *l == layer)
-			.map(|(_, v)| v)
 	}
 }
 
@@ -142,25 +125,6 @@ pub mod alignment_flags {
 	pub const FILTERED: u8 = 0b1000;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct LayerName(pub CompactString);
-
-impl LayerName {
-	pub fn new(name: impl Into<CompactString>) -> Self {
-		Self(name.into())
-	}
-
-	pub fn as_str(&self) -> &str {
-		&self.0
-	}
-}
-
-impl From<&str> for LayerName {
-	fn from(s: &str) -> Self {
-		Self::new(s)
-	}
-}
-
 pub mod layers {
 	pub const WORD: &str = "word";
 	pub const LEMMA: &str = "lemma";
@@ -196,15 +160,55 @@ mod tests {
 		assert!(!a.overlaps(&c));
 		assert!(a.overlaps(&d));
 	}
+}
 
-	#[test]
-	fn token_annotations() {
-		let token = Token::new(42)
-			.with_annotation(0, "house")
-			.with_annotation(1, "NOUN");
+#[cfg(test)]
+mod proptests {
+	use super::*;
+	use proptest::prelude::*;
 
-		assert_eq!(token.get(0), Some(&Value::from("house")));
-		assert_eq!(token.get(1), Some(&Value::from("NOUN")));
-		assert_eq!(token.get(2), None);
+	fn span_strategy() -> impl Strategy<Value = Span> {
+		(0u64..10_000, 0u64..10_000).prop_map(|(a, b)| {
+			let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+			Span::new(lo, hi)
+		})
+	}
+
+	proptest! {
+		#[test]
+		fn len_is_end_minus_start(span in span_strategy()) {
+			prop_assert_eq!(span.len(), span.end - span.start);
+		}
+
+		#[test]
+		fn contains_span_is_reflexive(span in span_strategy()) {
+			prop_assert!(span.contains_span(&span));
+		}
+
+		#[test]
+		fn nonempty_span_contains_start_not_end(span in span_strategy()) {
+			if span.start < span.end {
+				prop_assert!(span.contains(span.start));
+				prop_assert!(!span.contains(span.end));
+			}
+		}
+
+		#[test]
+		fn contains_span_implies_overlaps(
+			a in span_strategy(),
+			b in span_strategy(),
+		) {
+			if a.contains_span(&b) && !b.is_empty() {
+				prop_assert!(a.overlaps(&b));
+			}
+		}
+
+		#[test]
+		fn overlaps_is_symmetric(
+			a in span_strategy(),
+			b in span_strategy(),
+		) {
+			prop_assert_eq!(a.overlaps(&b), b.overlaps(&a));
+		}
 	}
 }

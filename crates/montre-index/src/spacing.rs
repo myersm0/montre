@@ -10,11 +10,11 @@ const MAGIC: &[u8; 4] = b"MSPC";
 const FORMAT_VERSION: u32 = 1;
 const HEADER_SIZE: usize = 8;
 
-pub struct MappedSpacing {
+pub struct SpacingIndex {
 	bitmap: RoaringBitmap,
 }
 
-impl MappedSpacing {
+impl SpacingIndex {
 	pub fn open(path: impl AsRef<Path>) -> Result<Self> {
 		let mut file = File::open(path.as_ref())?;
 		let mut header = [0u8; HEADER_SIZE];
@@ -72,7 +72,7 @@ mod tests {
 		bitmap.insert(42);
 
 		write_spacing(&bitmap, &path).unwrap();
-		let mapped = MappedSpacing::open(&path).unwrap();
+		let mapped = SpacingIndex::open(&path).unwrap();
 
 		assert!(mapped.has_no_space_after(3));
 		assert!(mapped.has_no_space_after(10));
@@ -89,7 +89,7 @@ mod tests {
 
 		let bitmap = RoaringBitmap::new();
 		write_spacing(&bitmap, &path).unwrap();
-		let mapped = MappedSpacing::open(&path).unwrap();
+		let mapped = SpacingIndex::open(&path).unwrap();
 
 		assert!(mapped.is_empty());
 		assert!(!mapped.has_no_space_after(0));

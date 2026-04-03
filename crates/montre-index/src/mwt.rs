@@ -4,17 +4,13 @@ use std::path::Path;
 
 use memmap2::Mmap;
 
-use crate::{IndexError, Result};
+use crate::{IndexError, Result, align_to_8};
 
 const MAGIC: &[u8; 4] = b"MMWT";
 const FORMAT_VERSION: u32 = 1;
 const BYTE_ORDER_MARK: u32 = 0x01020304;
 const HEADER_SIZE: usize = 16;
 const ENTRY_SIZE: usize = 24;
-
-fn align_to_8(n: usize) -> usize {
-	(n + 7) & !7
-}
 
 #[derive(Debug, Clone)]
 pub struct MWTEntry {

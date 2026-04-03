@@ -18,9 +18,7 @@ const DIR_ENTRY_SIZE: usize = 64;
 pub const ENCODING_DICT: u8 = 0x01;
 pub const ENCODING_DENSE_NUMERIC: u8 = 0x02;
 
-pub fn align_to_8(n: usize) -> usize {
-	(n + 7) & !7
-}
+use crate::align_to_8;
 
 pub struct LayerBuild {
 	pub name: String,
@@ -440,14 +438,6 @@ impl MappedForward {
 }
 
 impl ForwardIndex for MappedForward {
-	fn get(&self, position: Position, layer: &str) -> Option<&Value> {
-		None
-	}
-
-	fn get_range(&self, start: Position, end: Position, layer: &str) -> Vec<Option<&Value>> {
-		vec![None; (end - start) as usize]
-	}
-
 	fn token_count(&self) -> u64 {
 		self.token_count
 	}
@@ -502,20 +492,6 @@ pub enum ForwardStore {
 }
 
 impl ForwardIndex for ForwardStore {
-	fn get(&self, position: Position, layer: &str) -> Option<&Value> {
-		match self {
-			Self::InMemory(f) => f.get(position, layer),
-			Self::Mapped(f) => f.get(position, layer),
-		}
-	}
-
-	fn get_range(&self, start: Position, end: Position, layer: &str) -> Vec<Option<&Value>> {
-		match self {
-			Self::InMemory(f) => f.get_range(start, end, layer),
-			Self::Mapped(f) => f.get_range(start, end, layer),
-		}
-	}
-
 	fn token_count(&self) -> u64 {
 		match self {
 			Self::InMemory(f) => f.token_count(),

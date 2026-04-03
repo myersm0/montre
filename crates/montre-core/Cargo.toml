@@ -9,7 +9,6 @@ license.workspace = true
 compact_str = { workspace = true }
 smallvec = { workspace = true }
 serde = { workspace = true }
-thiserror = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

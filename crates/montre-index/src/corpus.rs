@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use montre_core::{Span, UnitId};
+use montre_core::{Span, UnitId, span_containing};
 use rayon;
 use serde::{Deserialize, Serialize};
 
@@ -11,7 +11,7 @@ use crate::inverted::InMemoryInverted;
 use crate::lexicon::InMemoryLexicon;
 use crate::mwt::MappedMWTs;
 use crate::sentence_ids::MappedSentenceIds;
-use crate::spacing::MappedSpacing;
+use crate::spacing::SpacingIndex;
 use crate::spans_flat::{MappedSpans, SpanStore};
 use crate::{IndexError, Result, SpanIndex};
 
@@ -74,26 +74,6 @@ impl AlignmentIndex {
 	}
 }
 
-fn binary_search_doc(spans: &[Span], position: u64) -> Option<usize> {
-	let mut lo = 0;
-	let mut hi = spans.len();
-
-	while lo < hi {
-		let mid = lo + (hi - lo) / 2;
-		let span = &spans[mid];
-
-		if position < span.start {
-			hi = mid;
-		} else if position >= span.end {
-			lo = mid + 1;
-		} else {
-			return Some(mid);
-		}
-	}
-
-	None
-}
-
 pub struct Corpus {
 	path: PathBuf,
 	pub meta: CorpusMeta,
@@ -104,7 +84,7 @@ pub struct Corpus {
 	pub alignments: AlignmentIndex,
 	sentence_ids: Option<MappedSentenceIds>,
 	mwts: Option<MappedMWTs>,
-	spacing: Option<MappedSpacing>,
+	spacing: Option<SpacingIndex>,
 	empty_nodes: Option<EmptyNodeStore>,
 }
 
@@ -172,7 +152,7 @@ impl Corpus {
 		};
 
 		let spacing = if path.join("spacing.bin").exists() {
-			Some(MappedSpacing::open(path.join("spacing.bin"))?)
+			Some(SpacingIndex::open(path.join("spacing.bin"))?)
 		} else {
 			None
 		};
@@ -224,7 +204,7 @@ impl Corpus {
 
 	pub fn document_at(&self, position: u64) -> Option<&str> {
 		let doc_spans = self.spans.spans("document")?;
-		let idx = binary_search_doc(doc_spans, position)?;
+		let idx = span_containing(doc_spans, position)?;
 		self.meta.document_names.get(idx).map(|s| s.as_str())
 	}
 

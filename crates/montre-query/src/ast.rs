@@ -12,10 +12,6 @@ pub enum Query {
 		inner: Box<Query>,
 		span_layer: String,
 	},
-	Containing {
-		inner: Box<Query>,
-		span_layer: String,
-	},
 	Capture {
 		name: String,
 		inner: Box<Query>,

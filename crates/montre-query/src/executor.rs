@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use montre_core::{Span, UnitId};
+use montre_core::{Span, UnitId, span_containing};
 use montre_index::{ComponentMeta, Corpus, ForwardIndex, InvertedIndex, SpanIndex};
 use rayon::prelude::*;
+use roaring::RoaringBitmap;
 
 use crate::ast::{CmpOp, GlobalConstraint, LabelAttr};
 use crate::planner::{PlanNode, QueryPlan, SequenceStep};
@@ -17,11 +18,13 @@ pub struct Hit {
 }
 
 impl Hit {
+	pub const UNPOPULATED: u32 = u32::MAX;
+
 	fn new(span: Span) -> Self {
 		Self {
 			span,
-			document_index: 0,
-			sentence_index: 0,
+			document_index: Self::UNPOPULATED,
+			sentence_index: Self::UNPOPULATED,
 			captures: Vec::new(),
 		}
 	}
@@ -31,30 +34,6 @@ impl Hit {
 struct ActiveMatch {
 	start: u64,
 	captures: Vec<(String, Span)>,
-}
-
-fn binary_search_span(spans: &[Span], position: u64) -> Option<usize> {
-	if spans.is_empty() {
-		return None;
-	}
-
-	let mut lo = 0;
-	let mut hi = spans.len();
-
-	while lo < hi {
-		let mid = lo + (hi - lo) / 2;
-		let span = &spans[mid];
-
-		if position < span.start {
-			hi = mid;
-		} else if position >= span.end {
-			lo = mid + 1;
-		} else {
-			return Some(mid);
-		}
-	}
-
-	None
 }
 
 pub struct Results {
@@ -95,10 +74,14 @@ impl Results {
 
 		for hit in &mut self.hits {
 			if let Some(spans) = doc_spans {
-				hit.document_index = binary_search_span(spans, hit.span.start).unwrap_or(0) as u32;
+				hit.document_index = span_containing(spans, hit.span.start)
+					.map(|i| i as u32)
+					.unwrap_or(Hit::UNPOPULATED);
 			}
 			if let Some(spans) = sent_spans {
-				hit.sentence_index = binary_search_span(spans, hit.span.start).unwrap_or(0) as u32;
+				hit.sentence_index = span_containing(spans, hit.span.start)
+					.map(|i| i as u32)
+					.unwrap_or(Hit::UNPOPULATED);
 			}
 		}
 	}
@@ -143,17 +126,17 @@ fn count_node(node: &PlanNode, corpus: &Corpus) -> Result<usize> {
 
 		PlanNode::ScanRegex { layer, pattern } => {
 			let re = regex::Regex::new(pattern)?;
-			let mut seen = HashSet::new();
+			let mut combined = RoaringBitmap::new();
 			if let Some(values) = corpus.inverted.values(layer) {
 				for value in values {
 					if re.is_match(value) {
 						if let Some(bitmap) = corpus.inverted.get(layer, value) {
-							seen.extend(bitmap.iter());
+							combined |= bitmap;
 						}
 					}
 				}
 			}
-			Ok(seen.len())
+			Ok(combined.len() as usize)
 		}
 
 		PlanNode::SequenceScan { steps } => count_sequence(steps, corpus),
@@ -303,7 +286,7 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 			let hits = hits
 				.into_iter()
 				.filter(|hit| {
-					binary_search_span(spans, hit.span.start)
+					span_containing(spans, hit.span.start)
 						.map(|idx| hit.span.end <= spans[idx].end)
 						.unwrap_or(false)
 				})
@@ -331,7 +314,7 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 			let hits = hits
 				.into_iter()
 				.filter(|hit| {
-					binary_search_span(doc_spans, hit.span.start)
+					span_containing(doc_spans, hit.span.start)
 						.map(|doc_idx| {
 							hit.span.end <= doc_spans[doc_idx].end
 								&& comp_metas.iter().any(|comp| {
@@ -368,7 +351,7 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 			let hits = hits
 				.into_iter()
 				.filter(|hit| {
-					binary_search_span(doc_spans, hit.span.start)
+					span_containing(doc_spans, hit.span.start)
 						.map(|doc_idx| {
 							hit.span.end <= doc_spans[doc_idx].end
 								&& matching_indices.contains(&doc_idx)
@@ -1116,7 +1099,7 @@ pub fn find_doc_and_sent(
 	sent_spans: &[Span],
 	comp: &ComponentMeta,
 ) -> Option<(u32, u32)> {
-	let doc_idx = binary_search_span(doc_spans, hit.span.start)?;
+	let doc_idx = span_containing(doc_spans, hit.span.start)?;
 	if doc_idx < comp.document_range.0 || doc_idx >= comp.document_range.1 {
 		return None;
 	}
@@ -1168,23 +1151,6 @@ pub fn resolve_target_span(
 		}
 	}
 	None
-}
-
-impl PartialEq for PlanNode {
-	fn eq(&self, other: &Self) -> bool {
-		match (self, other) {
-			(PlanNode::ScanAll, PlanNode::ScanAll) => true,
-			(
-				PlanNode::ScanLiteral { layer: l1, value: v1 },
-				PlanNode::ScanLiteral { layer: l2, value: v2 },
-			) => l1 == l2 && v1 == v2,
-			(
-				PlanNode::ScanRegex { layer: l1, pattern: p1 },
-				PlanNode::ScanRegex { layer: l2, pattern: p2 },
-			) => l1 == l2 && p1 == p2,
-			_ => false,
-		}
-	}
 }
 
 #[cfg(test)]
@@ -1307,26 +1273,5 @@ mod tests {
 		// min=2: single-position run can't produce length-2 spans
 		let spans = ri.spans_for_quantifier(2, Some(3));
 		assert!(spans.is_empty());
-	}
-
-	#[test]
-	fn binary_search_span_basic() {
-		let spans = vec![
-			Span::new(0, 10),
-			Span::new(10, 20),
-			Span::new(20, 30),
-		];
-
-		assert_eq!(binary_search_span(&spans, 0), Some(0));
-		assert_eq!(binary_search_span(&spans, 5), Some(0));
-		assert_eq!(binary_search_span(&spans, 9), Some(0));
-		assert_eq!(binary_search_span(&spans, 10), Some(1));
-		assert_eq!(binary_search_span(&spans, 20), Some(2));
-		assert_eq!(binary_search_span(&spans, 30), None);
-	}
-
-	#[test]
-	fn binary_search_span_empty() {
-		assert_eq!(binary_search_span(&[], 0), None);
 	}
 }

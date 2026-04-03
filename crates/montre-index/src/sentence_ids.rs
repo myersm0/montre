@@ -4,16 +4,12 @@ use std::path::Path;
 
 use memmap2::Mmap;
 
-use crate::{IndexError, Result};
+use crate::{IndexError, Result, align_to_8};
 
 const MAGIC: &[u8; 4] = b"MSID";
 const FORMAT_VERSION: u32 = 1;
 const BYTE_ORDER_MARK: u32 = 0x01020304;
 const HEADER_SIZE: usize = 16;
-
-fn align_to_8(n: usize) -> usize {
-	(n + 7) & !7
-}
 
 pub struct MappedSentenceIds {
 	mmap: Mmap,
@@ -164,5 +160,30 @@ mod tests {
 
 		assert_eq!(mapped.get(0), Some("données:0"));
 		assert_eq!(mapped.get(1), Some("日本語:1"));
+	}
+}
+
+#[cfg(test)]
+mod proptests {
+	use super::*;
+	use proptest::prelude::*;
+	use proptest::collection::vec as pvec;
+
+	proptest! {
+		#[test]
+		fn roundtrip_preserves_ids(ids in pvec("[a-z0-9:_-]{1,40}", 0..50)) {
+			let dir = tempfile::tempdir().unwrap();
+			let path = dir.path().join("sentence_ids.bin");
+
+			let owned: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+			write_sentence_ids(&owned, &path).unwrap();
+			let mapped = MappedSentenceIds::open(&path).unwrap();
+
+			prop_assert_eq!(mapped.len(), ids.len());
+			for (i, id) in ids.iter().enumerate() {
+				prop_assert_eq!(mapped.get(i), Some(id.as_str()));
+			}
+			prop_assert_eq!(mapped.get(ids.len()), None);
+		}
 	}
 }

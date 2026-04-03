@@ -15,17 +15,26 @@ pub mod corpus;
 use std::path::Path;
 use thiserror::Error;
 
+// Reading API
 pub use corpus::{Corpus, CorpusMeta, ComponentMeta, AlignmentMeta, AlignmentIndex};
 pub use inverted::{InvertedIndex, InMemoryInverted};
 pub use forward::{ForwardIndex, InMemoryForward};
+pub use forward_flat::{MappedForward, ForwardStore};
 pub use spans::{SpanIndex, InMemorySpans};
-pub use spans_flat::{MappedSpans, SpanStore, write_flat_spans};
-pub use forward_flat::{MappedForward, ForwardStore, write_flat_forward, write_mfwd, LayerBuild, build_dict_encoded_layer, build_dense_numeric_layer, is_numeric_layer};
-pub use sentence_ids::{MappedSentenceIds, write_sentence_ids};
-pub use mwt::{MWTEntry, MappedMWTs, write_mwts};
-pub use spacing::{MappedSpacing, write_spacing};
-pub use empty_nodes::{EmptyNode, EmptyNodeStore, write_empty_nodes};
+pub use spans_flat::{MappedSpans, SpanStore};
+pub use sentence_ids::MappedSentenceIds;
+pub use mwt::{MWTEntry, MappedMWTs};
+pub use spacing::SpacingIndex;
+pub use empty_nodes::{EmptyNode, EmptyNodeStore};
 pub use lexicon::{Lexicon, InMemoryLexicon};
+
+// Build helpers (consumed by montre-build)
+pub use forward_flat::{write_flat_forward, write_mfwd, LayerBuild, build_dict_encoded_layer, build_dense_numeric_layer, is_numeric_layer};
+pub use spans_flat::write_flat_spans;
+pub use sentence_ids::write_sentence_ids;
+pub use mwt::write_mwts;
+pub use spacing::write_spacing;
+pub use empty_nodes::write_empty_nodes;
 
 #[derive(Error, Debug)]
 pub enum IndexError {
@@ -51,4 +60,8 @@ pub const index_version: u32 = 5;
 
 pub fn open(path: impl AsRef<Path>) -> Result<Corpus> {
 	Corpus::open(path)
+}
+
+pub(crate) fn align_to_8(n: usize) -> usize {
+	(n + 7) & !7
 }
