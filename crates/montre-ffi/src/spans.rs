@@ -42,7 +42,7 @@ pub unsafe extern "C" fn montre_corpus_span_count(
 	let Some(layer_str) = borrow_cstr(layer) else {
 		return -1;
 	};
-	match c.spans.spans(layer_str) {
+	match c.spans().spans(layer_str) {
 		Some(spans) => spans.len() as i64,
 		None => -1,
 	}
@@ -65,7 +65,7 @@ pub unsafe extern "C" fn montre_corpus_span_at(
 	let Some(layer_str) = borrow_cstr(layer) else {
 		return 0;
 	};
-	let Some(spans) = c.spans.spans(layer_str) else {
+	let Some(spans) = c.spans().spans(layer_str) else {
 		return 0;
 	};
 	let Some(span) = spans.get(index as usize) else {
@@ -95,28 +95,19 @@ pub unsafe extern "C" fn montre_corpus_span_containing(
 	let Some(layer_str) = borrow_cstr(layer) else {
 		return -1;
 	};
-	let Some(spans) = c.spans.spans(layer_str) else {
+	let Some(spans) = c.spans().spans(layer_str) else {
 		return -1;
 	};
 
-	let mut lo = 0usize;
-	let mut hi = spans.len();
-
-	while lo < hi {
-		let mid = lo + (hi - lo) / 2;
-		let span = &spans[mid];
-		if position < span.start {
-			hi = mid;
-		} else if position >= span.end {
-			lo = mid + 1;
-		} else {
+	match montre_core::span_containing(spans, position) {
+		Some(idx) => {
+			let span = &spans[idx];
 			if !out_start.is_null() { *out_start = span.start; }
 			if !out_end.is_null() { *out_end = span.end; }
-			return mid as i64;
+			idx as i64
 		}
+		None => -1,
 	}
-
-	-1
 }
 
 /// Count spans of the given layer whose start falls within [token_start, token_end).
@@ -135,7 +126,7 @@ pub unsafe extern "C" fn montre_corpus_span_count_in_range(
 	let Some(layer_str) = borrow_cstr(layer) else {
 		return -1;
 	};
-	let Some(spans) = c.spans.spans(layer_str) else {
+	let Some(spans) = c.spans().spans(layer_str) else {
 		return -1;
 	};
 	if spans.is_empty() || token_start >= token_end {
@@ -191,4 +182,58 @@ pub unsafe extern "C" fn montre_corpus_sentence_ids(
 	}
 	let ids: Vec<&str> = (0..count).filter_map(|i| c.sentence_id(i)).collect();
 	export_string_array(&ids, out_len)
+}
+
+/// Resolve a sentence's token span from component-relative coordinates.
+/// Returns the global sentence index (for use with montre_corpus_sentence_id),
+/// or -1 if any coordinate is out of bounds or span layers are missing.
+/// out_start and out_end receive the token position range [start, end).
+#[no_mangle]
+pub unsafe extern "C" fn montre_corpus_sentence_span(
+	corpus: *const Corpus,
+	component_index: u32,
+	doc_within_component: u32,
+	sentence_within_doc: u32,
+	out_start: *mut u64,
+	out_end: *mut u64,
+) -> i64 {
+	if corpus.is_null() || out_start.is_null() || out_end.is_null() {
+		return -1;
+	}
+	let c = &*corpus;
+
+	let Some(comp) = c.components().get(component_index as usize) else {
+		return -1;
+	};
+
+	let global_doc = comp.document_range.0 + doc_within_component as usize;
+	if global_doc >= comp.document_range.1 {
+		return -1;
+	}
+
+	let Some(doc_spans) = c.spans().spans("document") else {
+		return -1;
+	};
+	let Some(doc_span) = doc_spans.get(global_doc) else {
+		return -1;
+	};
+
+	let Some(sent_spans) = c.spans().spans("sentence") else {
+		return -1;
+	};
+
+	let first_sent = sent_spans.partition_point(|s| s.start < doc_span.start);
+	let target_sent = first_sent + sentence_within_doc as usize;
+
+	if target_sent >= sent_spans.len() {
+		return -1;
+	}
+	let span = &sent_spans[target_sent];
+	if span.start >= doc_span.end {
+		return -1;
+	}
+
+	*out_start = span.start;
+	*out_end = span.end;
+	target_sent as i64
 }

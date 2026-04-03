@@ -76,12 +76,12 @@ impl AlignmentIndex {
 
 pub struct Corpus {
 	path: PathBuf,
-	pub meta: CorpusMeta,
-	pub inverted: InMemoryInverted,
-	pub forward: ForwardStore,
-	pub spans: SpanStore,
-	pub lexicon: InMemoryLexicon,
-	pub alignments: AlignmentIndex,
+	meta: CorpusMeta,
+	inverted: InMemoryInverted,
+	forward: ForwardStore,
+	spans: SpanStore,
+	lexicon: InMemoryLexicon,
+	alignments: AlignmentIndex,
 	sentence_ids: Option<MappedSentenceIds>,
 	mwts: Option<MappedMWTs>,
 	spacing: Option<SpacingIndex>,
@@ -178,26 +178,57 @@ impl Corpus {
 		})
 	}
 
+	#[inline]
 	pub fn path(&self) -> &Path {
 		&self.path
 	}
 
+	#[inline]
+	pub fn meta(&self) -> &CorpusMeta {
+		&self.meta
+	}
+
+	#[inline]
+	pub fn inverted(&self) -> &InMemoryInverted {
+		&self.inverted
+	}
+
+	#[inline]
+	pub fn forward(&self) -> &ForwardStore {
+		&self.forward
+	}
+
+	#[inline]
+	pub fn spans(&self) -> &SpanStore {
+		&self.spans
+	}
+
+	#[inline]
+	pub fn alignment_metas(&self) -> &[AlignmentMeta] {
+		&self.meta.alignments
+	}
+
+	#[inline]
 	pub fn name(&self) -> &str {
 		&self.meta.name
 	}
 
+	#[inline]
 	pub fn token_count(&self) -> u64 {
 		self.meta.token_count
 	}
 
+	#[inline]
 	pub fn layers(&self) -> &[String] {
 		&self.meta.layers
 	}
 
+	#[inline]
 	pub fn span_layers(&self) -> &[String] {
 		&self.meta.span_layers
 	}
 
+	#[inline]
 	pub fn document_names(&self) -> &[String] {
 		&self.meta.document_names
 	}

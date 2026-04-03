@@ -69,8 +69,8 @@ impl Results {
 	/// Call this only when you need structural context (e.g., alignment projection).
 	/// Most display operations don't need this.
 	pub fn populate_context(&mut self, corpus: &Corpus) {
-		let doc_spans = corpus.spans.spans("document");
-		let sent_spans = corpus.spans.spans("sentence");
+		let doc_spans = corpus.spans().spans("document");
+		let sent_spans = corpus.spans().spans("sentence");
 
 		for hit in &mut self.hits {
 			if let Some(spans) = doc_spans {
@@ -117,7 +117,7 @@ pub fn execute_count(plan: &QueryPlan, corpus: &Corpus) -> Result<usize> {
 fn count_node(node: &PlanNode, corpus: &Corpus) -> Result<usize> {
 	match node {
 		PlanNode::ScanLiteral { layer, value } => {
-			Ok(corpus.inverted.get(layer, value).map(|b| b.len() as usize).unwrap_or(0))
+			Ok(corpus.inverted().get(layer, value).map(|b| b.len() as usize).unwrap_or(0))
 		}
 
 		PlanNode::ScanAll => {
@@ -127,10 +127,10 @@ fn count_node(node: &PlanNode, corpus: &Corpus) -> Result<usize> {
 		PlanNode::ScanRegex { layer, pattern } => {
 			let re = regex::Regex::new(pattern)?;
 			let mut combined = RoaringBitmap::new();
-			if let Some(values) = corpus.inverted.values(layer) {
+			if let Some(values) = corpus.inverted().values(layer) {
 				for value in values {
 					if re.is_match(value) {
-						if let Some(bitmap) = corpus.inverted.get(layer, value) {
+						if let Some(bitmap) = corpus.inverted().get(layer, value) {
 							combined |= bitmap;
 						}
 					}
@@ -145,7 +145,7 @@ fn count_node(node: &PlanNode, corpus: &Corpus) -> Result<usize> {
 			match (base.as_ref(), subtract.as_ref()) {
 				(PlanNode::ScanAll, PlanNode::ScanLiteral { layer, value }) => {
 					let total = corpus.token_count() as usize;
-					let excluded = corpus.inverted.get(layer, value)
+					let excluded = corpus.inverted().get(layer, value)
 						.map(|b| b.len() as usize)
 						.unwrap_or(0);
 					Ok(total - excluded)
@@ -167,7 +167,7 @@ fn count_node(node: &PlanNode, corpus: &Corpus) -> Result<usize> {
 fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 	match node {
 		PlanNode::ScanLiteral { layer, value } => {
-			let Some(bitmap) = corpus.inverted.get(layer, value) else {
+			let Some(bitmap) = corpus.inverted().get(layer, value) else {
 				return Ok(Vec::new());
 			};
 
@@ -183,10 +183,10 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 			let re = regex::Regex::new(pattern)?;
 			let mut positions = Vec::new();
 
-			if let Some(values) = corpus.inverted.values(layer) {
+			if let Some(values) = corpus.inverted().values(layer) {
 				for value in values {
 					if re.is_match(value) {
-						if let Some(bitmap) = corpus.inverted.get(layer, value) {
+						if let Some(bitmap) = corpus.inverted().get(layer, value) {
 							positions.extend(bitmap.iter().map(|p| p as u64));
 						}
 					}
@@ -279,7 +279,7 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 		PlanNode::FilterBySpan { inner, span_layer } => {
 			let hits = execute_node(inner, corpus)?;
 
-			let Some(spans) = corpus.spans.spans(span_layer) else {
+			let Some(spans) = corpus.spans().spans(span_layer) else {
 				return Ok(hits);
 			};
 
@@ -307,7 +307,7 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 				return Ok(Vec::new());
 			}
 
-			let Some(doc_spans) = corpus.spans.spans("document") else {
+			let Some(doc_spans) = corpus.spans().spans("document") else {
 				return Ok(Vec::new());
 			};
 
@@ -332,7 +332,7 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 		PlanNode::FilterByDocument { inner, documents } => {
 			let hits = execute_node(inner, corpus)?;
 
-			let Some(doc_spans) = corpus.spans.spans("document") else {
+			let Some(doc_spans) = corpus.spans().spans("document") else {
 				return Ok(Vec::new());
 			};
 
@@ -394,15 +394,15 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 				)));
 			};
 
-			let Some(doc_spans) = corpus.spans.spans("document") else {
+			let Some(doc_spans) = corpus.spans().spans("document") else {
 				return Ok(Vec::new());
 			};
 
-			let Some(sent_spans) = corpus.spans.spans(&align_meta.source_layer) else {
+			let Some(sent_spans) = corpus.spans().spans(&align_meta.source_layer) else {
 				return Ok(Vec::new());
 			};
 
-			let Some(target_sent_spans) = corpus.spans.spans(&align_meta.target_layer) else {
+			let Some(target_sent_spans) = corpus.spans().spans(&align_meta.target_layer) else {
 				return Ok(Vec::new());
 			};
 
@@ -477,7 +477,7 @@ fn resolve_attrs<'a>(
 	keys.iter()
 		.map(|(label, attr)| {
 			let span = hit.captures.iter().find(|(n, _)| n == label)?.1;
-			corpus.forward.get_str(span.start, attr)
+			corpus.forward().get_str(span.start, attr)
 		})
 		.collect()
 }
@@ -545,7 +545,7 @@ fn benefits_from_parallel(steps: &[SequenceStep]) -> bool {
 }
 
 fn execute_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<Vec<Hit>> {
-	let doc_spans = corpus.spans.spans("document");
+	let doc_spans = corpus.spans().spans("document");
 
 	match doc_spans {
 		Some(spans) if spans.len() > 1 && benefits_from_parallel(steps) => {
@@ -608,7 +608,7 @@ fn execute_sequence_in_range(
 }
 
 fn count_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<usize> {
-	let doc_spans = corpus.spans.spans("document");
+	let doc_spans = corpus.spans().spans("document");
 
 	// count path never needs captures, always use the fast unlabeled path
 	match doc_spans {
@@ -991,7 +991,7 @@ fn get_matching_positions_in_range(
 		PlanNode::ScanAll => Ok((range_start..range_end).collect()),
 
 		PlanNode::ScanLiteral { layer, value } => {
-			let Some(bitmap) = corpus.inverted.get(layer, value) else {
+			let Some(bitmap) = corpus.inverted().get(layer, value) else {
 				return Ok(Vec::new());
 			};
 			Ok(bitmap
@@ -1006,10 +1006,10 @@ fn get_matching_positions_in_range(
 			let re = regex::Regex::new(pattern)?;
 			let mut positions = Vec::new();
 
-			if let Some(values) = corpus.inverted.values(layer) {
+			if let Some(values) = corpus.inverted().values(layer) {
 				for value in values {
 					if re.is_match(value) {
-						if let Some(bitmap) = corpus.inverted.get(layer, value) {
+						if let Some(bitmap) = corpus.inverted().get(layer, value) {
 							positions.extend(
 								bitmap
 									.iter()

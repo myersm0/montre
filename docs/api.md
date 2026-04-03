@@ -97,13 +97,13 @@ span.overlaps(&s)       // true if any overlap
 use montre_index::ForwardIndex;
 
 // String layers (word, lemma, upos, xpos, feats, deps, etc.) — zero-copy with mapped backend
-let word: Option<&str> = corpus.forward.get_str(position, "word");
-let upos: Option<&str> = corpus.forward.get_str(position, "upos");
-let xpos: Option<&str> = corpus.forward.get_str(position, "xpos");
-let deps: Option<&str> = corpus.forward.get_str(position, "deps");  // raw enhanced deps string
+let word: Option<&str> = corpus.forward().get_str(position, "word");
+let upos: Option<&str> = corpus.forward().get_str(position, "upos");
+let xpos: Option<&str> = corpus.forward().get_str(position, "xpos");
+let deps: Option<&str> = corpus.forward().get_str(position, "deps");  // raw enhanced deps string
 
 // Integer layers (head) — sentence-local values, not converted to global positions
-let head: Option<i64> = corpus.forward.get_int(position, "head");
+let head: Option<i64> = corpus.forward().get_int(position, "head");
 ```
 
 The `ForwardIndex` trait provides `get_str` and `get_int` as its primary interface. Both enable zero-copy access from the memory-mapped forward index. `Value` (`Value::Str(CompactString)` or `Value::Int(i64)`) is used internally by the build pipeline but does not appear in the query-time API.
@@ -114,13 +114,13 @@ The `ForwardIndex` trait provides `get_str` and `get_int` as its primary interfa
 use montre_index::InvertedIndex;
 
 // Positions where layer==value (as a RoaringBitmap)
-let bitmap = corpus.inverted.get("pos", "NOUN");
+let bitmap = corpus.inverted().get("pos", "NOUN");
 
 // All values for a layer
-let values: Option<Vec<&str>> = corpus.inverted.values("upos");
+let values: Option<Vec<&str>> = corpus.inverted().values("upos");
 
 // All indexed layer names
-let layers: Vec<&str> = corpus.inverted.layers();
+let layers: Vec<&str> = corpus.inverted().layers();
 ```
 
 **Note on `pos` alias**: In CQL queries, `pos` is rewritten to `upos` at parse time. When accessing the inverted index or forward index directly via the API, use `"upos"` (the physical layer name).
@@ -133,14 +133,14 @@ let layers: Vec<&str> = corpus.inverted.layers();
 use montre_index::SpanIndex;
 
 // All spans for a layer
-let sentences: Option<&[Span]> = corpus.spans.spans("sentence");
-let documents: Option<&[Span]> = corpus.spans.spans("document");
+let sentences: Option<&[Span]> = corpus.spans().spans("sentence");
+let documents: Option<&[Span]> = corpus.spans().spans("document");
 
 // Find the span containing a position
-let span: Option<&Span> = corpus.spans.containing("sentence", position);
+let span: Option<&Span> = corpus.spans().containing("sentence", position);
 
 // Available span layers
-let layers: Vec<&str> = corpus.spans.layers();
+let layers: Vec<&str> = corpus.spans().layers();
 ```
 
 ### Sentence IDs
@@ -319,7 +319,7 @@ BuildError::Alignment(String)
 
 ## C FFI
 
-The `montre-ffi` crate exports 64 `extern "C"` functions across eight modules. All string arguments are `*const c_char` (null-terminated). All returned strings are owned by Rust; copy and free with `montre_string_free`.
+The `montre-ffi` crate exports 78 `extern "C"` functions across eight modules. All string arguments are `*const c_char` (null-terminated). All returned strings are owned by Rust; copy and free with `montre_string_free`.
 
 ### Error handling
 
@@ -350,13 +350,29 @@ char      *montre_corpus_component_language(const void *corpus, uint32_t index);
 int32_t    montre_corpus_component_document_range(const void *corpus, uint32_t index, uint32_t *out_start, uint32_t *out_end);
 int32_t    montre_corpus_component_for_document(const void *corpus, uint32_t doc_index);
 int64_t    montre_corpus_component_token_count(const void *corpus, uint32_t index);
+int64_t    montre_corpus_document_index_by_name(const void *corpus, const char *name);
+int32_t    montre_corpus_component_index_by_name(const void *corpus, const char *name);
 ```
+
+`montre_corpus_document_index_by_name` returns the global document index, or -1 if not found. `montre_corpus_component_index_by_name` returns the component index, or -1 if not found.
 
 ### Inverted index introspection
 
 ```c
 // All distinct values for a layer (e.g., all POS tags). Free with montre_string_array_free.
 char **montre_corpus_inverted_values(const void *corpus, const char *layer, uint64_t *out_len);
+
+// Bitmap cardinality for a single layer/value pair. Returns -1 if not found.
+int64_t montre_corpus_inverted_count(const void *corpus, const char *layer, const char *value);
+
+// All values and their bitmap cardinalities for a layer.
+// Returns parallel arrays: out_values (string array) and out_counts (u64 array).
+// Free values with montre_string_array_free, counts with montre_u64_array_free.
+// Returns 1 on success, 0 if the layer does not exist.
+int32_t montre_corpus_inverted_counts(
+    const void *corpus, const char *layer,
+    char ***out_values, uint64_t **out_counts, uint64_t *out_len
+);
 ```
 
 ### Token access
@@ -383,13 +399,25 @@ uint64_t montre_hit_end(const void *hits, uint64_t index);
 uint32_t montre_hit_document_index(const void *hits, uint64_t index);
 uint32_t montre_hit_sentence_index(const void *hits, uint64_t index);
 void     montre_hitlist_populate_context(void *hits, const void *corpus);
+```
 
+`montre_hit_document_index` and `montre_hit_sentence_index` return `UINT32_MAX` (`Hit::UNPOPULATED`) before `montre_hitlist_populate_context` is called. This includes hits returned by `montre_project`. Check for this sentinel before using the index as a lookup key.
+
+```c
 // Bulk hit field extraction as flat u64 arrays. Free with montre_u64_array_free.
 uint64_t *montre_hitlist_starts(const void *hits, uint64_t *out_len);
 uint64_t *montre_hitlist_ends(const void *hits, uint64_t *out_len);
 uint64_t *montre_hitlist_document_indices(const void *hits, uint64_t *out_len);
 uint64_t *montre_hitlist_sentence_indices(const void *hits, uint64_t *out_len);
+
+// Labeled capture accessors for a single hit.
+uint32_t montre_hit_capture_count(const void *hits, uint64_t index);
+char    *montre_hit_capture_name(const void *hits, uint64_t hit_index, uint32_t capture_index);
+uint64_t montre_hit_capture_start(const void *hits, uint64_t hit_index, uint32_t capture_index);
+uint64_t montre_hit_capture_end(const void *hits, uint64_t hit_index, uint32_t capture_index);
 ```
+
+Capture accessors return data from labeled queries (e.g., `a:[pos="ADJ"] b:[pos="NOUN"]`). `montre_hit_capture_count` returns 0 for unlabeled queries. Free capture name strings with `montre_string_free`.
 
 ### Bulk extraction
 
@@ -426,9 +454,21 @@ void *montre_project(
     const void *corpus, const void *source_hits, const char *alignment_name,
     uint64_t *out_unmapped, uint64_t *out_no_alignment, uint64_t *out_projected
 );
+
+// Per-document alignment coverage for the source side of a named alignment.
+// Returns parallel u32 arrays: global document indices, aligned unit counts, total unit counts.
+// Free each array with montre_u32_array_free(array, len).
+// Returns 1 on success, 0 on failure.
+int32_t montre_corpus_alignment_coverage(
+    const void *corpus, const char *alignment_name,
+    uint32_t **out_doc_indices, uint32_t **out_aligned, uint32_t **out_total,
+    uint64_t *out_len
+);
 ```
 
 The three out-parameters on `montre_project` are nullable. Pass NULL for any diagnostics you don't need.
+
+`montre_corpus_alignment_coverage` returns one entry per document in the source component of the named alignment. For each document, `aligned` is the number of source-layer units (typically sentences) that have at least one alignment edge, and `total` is the total number of source-layer units in that document.
 
 ### Span index access
 
@@ -438,9 +478,20 @@ char    *montre_corpus_span_layer_name(const void *corpus, uint32_t index);
 int64_t  montre_corpus_span_count(const void *corpus, const char *layer);
 int32_t  montre_corpus_span_at(const void *corpus, const char *layer, uint64_t index, uint64_t *out_start, uint64_t *out_end);
 int64_t  montre_corpus_span_containing(const void *corpus, const char *layer, uint64_t position, uint64_t *out_start, uint64_t *out_end);
+int64_t  montre_corpus_span_count_in_range(const void *corpus, const char *layer, uint64_t token_start, uint64_t token_end);
+
+// Resolve a sentence span from component-relative coordinates.
+// Returns the global sentence index (for use with montre_corpus_sentence_id), or -1 on failure.
+int64_t montre_corpus_sentence_span(
+    const void *corpus, uint32_t component_index,
+    uint32_t doc_within_component, uint32_t sentence_within_doc,
+    uint64_t *out_start, uint64_t *out_end
+);
 ```
 
 `montre_corpus_span_containing` returns the span index, or -1 if not found. The out-parameters are nullable — pass NULL if you only need the index.
+
+`montre_corpus_sentence_span` collapses the multi-step coordinate translation (component → document range → document span → sentence span) into a single call. The returned global sentence index can be passed directly to `montre_corpus_sentence_id`.
 
 ### Sentence IDs
 

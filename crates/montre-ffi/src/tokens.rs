@@ -4,16 +4,26 @@ use std::ptr;
 use montre_index::{Corpus, ForwardIndex};
 
 use crate::HitList;
-use crate::strings::{to_cstring, borrow_cstr};
+use crate::strings::{to_cstring, borrow_cstr, export_array};
 
 pub(crate) fn forward_value_string(corpus: &Corpus, position: u64, layer: &str) -> Option<String> {
-	if let Some(s) = corpus.forward.get_str(position, layer) {
+	if let Some(s) = corpus.forward().get_str(position, layer) {
 		return Some(s.to_string());
 	}
-	if let Some(n) = corpus.forward.get_int(position, layer) {
+	if let Some(n) = corpus.forward().get_int(position, layer) {
 		return Some(n.to_string());
 	}
 	None
+}
+
+pub(crate) fn forward_value_cstr(corpus: &Corpus, position: u64, layer: &str) -> *mut c_char {
+	if let Some(s) = corpus.forward().get_str(position, layer) {
+		return to_cstring(s);
+	}
+	if let Some(n) = corpus.forward().get_int(position, layer) {
+		return to_cstring(&n.to_string());
+	}
+	ptr::null_mut()
 }
 
 #[no_mangle]
@@ -29,10 +39,7 @@ pub unsafe extern "C" fn montre_corpus_token_annotation(
 	let Some(layer_str) = borrow_cstr(layer) else {
 		return ptr::null_mut();
 	};
-	match forward_value_string(c, position, layer_str) {
-		Some(val) => to_cstring(&val),
-		None => ptr::null_mut(),
-	}
+	forward_value_cstr(c, position, layer_str)
 }
 
 #[no_mangle]
@@ -88,20 +95,13 @@ pub unsafe extern "C" fn montre_corpus_token_annotations(
 		return ptr::null_mut();
 	}
 
-	let layout = std::alloc::Layout::array::<*mut c_char>(count).unwrap();
-	let array = std::alloc::alloc(layout) as *mut *mut c_char;
-	if array.is_null() {
-		*out_len = 0;
-		return ptr::null_mut();
-	}
-
-	for (i, pos) in (start..end).enumerate() {
-		let val = forward_value_string(c, pos, layer_str).unwrap_or_default();
-		*array.add(i) = to_cstring(&val);
-	}
-
-	*out_len = count as u64;
-	array
+	let ptrs: Vec<*mut c_char> = (start..end)
+		.map(|pos| {
+			let p = forward_value_cstr(c, pos, layer_str);
+			if p.is_null() { to_cstring("") } else { p }
+		})
+		.collect();
+	export_array(&ptrs, out_len)
 }
 
 /// Bulk-extract matched text for every hit in a HitList.
@@ -133,26 +133,17 @@ pub unsafe extern "C" fn montre_hitlist_texts(
 		return ptr::null_mut();
 	}
 
-	let layout = std::alloc::Layout::array::<*mut c_char>(count).unwrap();
-	let array = std::alloc::alloc(layout) as *mut *mut c_char;
-	if array.is_null() {
-		*out_len = 0;
-		return ptr::null_mut();
-	}
-
-	for (i, hit) in hitlist.hits.iter().enumerate() {
+	let ptrs: Vec<*mut c_char> = hitlist.hits.iter().map(|hit| {
 		if layer_str == "word" {
-			*array.add(i) = to_cstring(&c.surface_text(hit.span.start, hit.span.end));
+			to_cstring(&c.surface_text(hit.span.start, hit.span.end))
 		} else {
 			let words: Vec<String> = (hit.span.start..hit.span.end)
 				.filter_map(|p| forward_value_string(c, p, layer_str))
 				.collect();
-			*array.add(i) = to_cstring(&words.join(" "));
+			to_cstring(&words.join(" "))
 		}
-	}
-
-	*out_len = count as u64;
-	array
+	}).collect();
+	export_array(&ptrs, out_len)
 }
 
 /// Bulk context-token extraction for collocational analysis.
@@ -195,7 +186,7 @@ pub unsafe extern "C" fn montre_context_tokens(
 	let hit_count = hitlist.hits.len();
 
 	let mut all_positions: Vec<i32> = Vec::new();
-	let mut all_tokens: Vec<String> = Vec::new();
+	let mut all_tokens: Vec<*mut c_char> = Vec::new();
 	let mut offsets: Vec<u64> = Vec::with_capacity(hit_count + 1);
 
 	for hit in &hitlist.hits {
@@ -208,16 +199,14 @@ pub unsafe extern "C" fn montre_context_tokens(
 			let relative = pos as i64 - hit.span.start as i64;
 			all_positions.push(relative as i32);
 
-			let token_str = forward_value_string(c, pos, layer_str)
-				.unwrap_or_default();
-			all_tokens.push(token_str);
+			let p = forward_value_cstr(c, pos, layer_str);
+			all_tokens.push(if p.is_null() { to_cstring("") } else { p });
 		}
 	}
 
 	offsets.push(all_positions.len() as u64);
-	let total = all_positions.len();
 
-	if total == 0 {
+	if all_positions.is_empty() {
 		*out_positions = ptr::null_mut();
 		*out_tokens = ptr::null_mut();
 		*out_offsets = ptr::null_mut();
@@ -225,26 +214,9 @@ pub unsafe extern "C" fn montre_context_tokens(
 		return;
 	}
 
-	let pos_layout = std::alloc::Layout::array::<i32>(total).unwrap();
-	let pos_array = std::alloc::alloc(pos_layout) as *mut i32;
-	for (i, &p) in all_positions.iter().enumerate() {
-		*pos_array.add(i) = p;
-	}
-
-	let tok_layout = std::alloc::Layout::array::<*mut c_char>(total).unwrap();
-	let tok_array = std::alloc::alloc(tok_layout) as *mut *mut c_char;
-	for (i, s) in all_tokens.iter().enumerate() {
-		*tok_array.add(i) = to_cstring(s);
-	}
-
-	let off_layout = std::alloc::Layout::array::<u64>(offsets.len()).unwrap();
-	let off_array = std::alloc::alloc(off_layout) as *mut u64;
-	for (i, &o) in offsets.iter().enumerate() {
-		*off_array.add(i) = o;
-	}
-
-	*out_positions = pos_array;
-	*out_tokens = tok_array;
-	*out_offsets = off_array;
-	*out_len = total as u64;
+	*out_positions = export_array(&all_positions, out_len);
+	let mut tok_len: u64 = 0;
+	*out_tokens = export_array(&all_tokens, &mut tok_len);
+	let mut off_len: u64 = 0;
+	*out_offsets = export_array(&offsets, &mut off_len);
 }

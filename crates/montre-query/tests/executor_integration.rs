@@ -651,7 +651,7 @@ fn parallel_corpus_structure() {
 	let corpus = build_parallel_corpus();
 	assert_eq!(corpus.components().len(), 2);
 	assert_eq!(corpus.document_names().len(), 4);
-	assert!(corpus.meta.alignments.len() == 1);
+	assert!(corpus.alignment_metas().len() == 1);
 }
 
 #[test]
@@ -1016,24 +1016,24 @@ fn head_layer_stores_sentence_local_values() {
 	let corpus = build_corpus(SAMPLE);
 	// Sentence 1 (positions 0-9):
 	//   "The"(0) head=5, "quick"(1) head=5, "jumps"(4) head=0 (root)
-	assert_eq!(corpus.forward.get_int(0, "head"), Some(5));
-	assert_eq!(corpus.forward.get_int(1, "head"), Some(5));
-	assert_eq!(corpus.forward.get_int(4, "head"), Some(0));
+	assert_eq!(corpus.forward().get_int(0, "head"), Some(5));
+	assert_eq!(corpus.forward().get_int(1, "head"), Some(5));
+	assert_eq!(corpus.forward().get_int(4, "head"), Some(0));
 	// Sentence 2 (positions 10-15):
 	//   "Dogs"(10) head=5, "pets"(14) head=0 (root)
-	assert_eq!(corpus.forward.get_int(10, "head"), Some(5));
-	assert_eq!(corpus.forward.get_int(14, "head"), Some(0));
+	assert_eq!(corpus.forward().get_int(10, "head"), Some(5));
+	assert_eq!(corpus.forward().get_int(14, "head"), Some(0));
 	// Sentence 3 (positions 16-22):
 	//   "The"(16) head=2, "cat"(17) head=3, "sat"(18) head=0 (root)
-	assert_eq!(corpus.forward.get_int(16, "head"), Some(2));
-	assert_eq!(corpus.forward.get_int(17, "head"), Some(3));
-	assert_eq!(corpus.forward.get_int(18, "head"), Some(0));
+	assert_eq!(corpus.forward().get_int(16, "head"), Some(2));
+	assert_eq!(corpus.forward().get_int(17, "head"), Some(3));
+	assert_eq!(corpus.forward().get_int(18, "head"), Some(0));
 }
 
 #[test]
 fn head_layer_not_in_inverted_index() {
 	let corpus = build_corpus(SAMPLE);
-	assert!(corpus.inverted.values("head").is_none());
+	assert!(corpus.inverted().values("head").is_none());
 }
 
 #[test]
@@ -1045,7 +1045,7 @@ fn head_layer_in_corpus_layers() {
 #[test]
 fn head_get_str_returns_none_for_numeric_layer() {
 	let corpus = build_corpus(SAMPLE);
-	assert_eq!(corpus.forward.get_str(0, "head"), None);
+	assert_eq!(corpus.forward().get_str(0, "head"), None);
 }
 
 // ===========================================================================
@@ -1064,18 +1064,18 @@ fn upos_and_xpos_are_distinct_layers() {
 #[test]
 fn upos_values_correct() {
 	let corpus = build_corpus(SAMPLE);
-	assert_eq!(corpus.forward.get_str(0, "upos"), Some("DET"));
-	assert_eq!(corpus.forward.get_str(3, "upos"), Some("NOUN"));
-	assert_eq!(corpus.forward.get_str(4, "upos"), Some("VERB"));
+	assert_eq!(corpus.forward().get_str(0, "upos"), Some("DET"));
+	assert_eq!(corpus.forward().get_str(3, "upos"), Some("NOUN"));
+	assert_eq!(corpus.forward().get_str(4, "upos"), Some("VERB"));
 }
 
 #[test]
 fn xpos_values_correct() {
 	let corpus = build_corpus(SAMPLE);
-	assert_eq!(corpus.forward.get_str(0, "xpos"), Some("DT"));
-	assert_eq!(corpus.forward.get_str(3, "xpos"), Some("NN"));
-	assert_eq!(corpus.forward.get_str(4, "xpos"), Some("VBZ"));
-	assert_eq!(corpus.forward.get_str(7, "xpos"), Some("JJ"));
+	assert_eq!(corpus.forward().get_str(0, "xpos"), Some("DT"));
+	assert_eq!(corpus.forward().get_str(3, "xpos"), Some("NN"));
+	assert_eq!(corpus.forward().get_str(4, "xpos"), Some("VBZ"));
+	assert_eq!(corpus.forward().get_str(7, "xpos"), Some("JJ"));
 }
 
 #[test]
@@ -1165,7 +1165,7 @@ fn sentence_id_out_of_bounds() {
 #[test]
 fn sentence_id_count_matches_sentence_spans() {
 	let corpus = build_corpus(SAMPLE);
-	let span_count = corpus.spans.spans("sentence").map_or(0, |s| s.len());
+	let span_count = corpus.spans().spans("sentence").map_or(0, |s| s.len());
 	assert_eq!(corpus.sentence_id_count(), span_count);
 }
 
@@ -1250,11 +1250,11 @@ fn mwt_space_after_no_surface_text() {
 #[test]
 fn deps_layer_forward_only() {
 	let corpus = build_corpus(FRENCH_MWT);
-	assert_eq!(corpus.forward.get_str(0, "deps"), Some("2:nsubj"));
-	assert_eq!(corpus.forward.get_str(1, "deps"), Some("0:root"));
-	assert_eq!(corpus.forward.get_str(5, "deps"), None);
+	assert_eq!(corpus.forward().get_str(0, "deps"), Some("2:nsubj"));
+	assert_eq!(corpus.forward().get_str(1, "deps"), Some("0:root"));
+	assert_eq!(corpus.forward().get_str(5, "deps"), None);
 
-	let inverted_values = corpus.inverted.values("deps");
+	let inverted_values = corpus.inverted().values("deps");
 	assert!(inverted_values.is_none());
 }
 
@@ -1296,5 +1296,5 @@ fn empty_nodes_not_indexed() {
 #[test]
 fn deps_with_empty_node_references() {
 	let corpus = build_corpus(EMPTY_NODE_DATA);
-	assert_eq!(corpus.forward.get_str(5, "deps"), Some("2:obj|4:obj"));
+	assert_eq!(corpus.forward().get_str(5, "deps"), Some("2:obj|4:obj"));
 }
