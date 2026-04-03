@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use montre_core::{Span, UnitId};
+use montre_core::{Span, UnitId, span_containing};
 use montre_index::{ComponentMeta, Corpus, ForwardIndex, InvertedIndex, SpanIndex};
 use rayon::prelude::*;
 
@@ -31,30 +31,6 @@ impl Hit {
 struct ActiveMatch {
 	start: u64,
 	captures: Vec<(String, Span)>,
-}
-
-fn binary_search_span(spans: &[Span], position: u64) -> Option<usize> {
-	if spans.is_empty() {
-		return None;
-	}
-
-	let mut lo = 0;
-	let mut hi = spans.len();
-
-	while lo < hi {
-		let mid = lo + (hi - lo) / 2;
-		let span = &spans[mid];
-
-		if position < span.start {
-			hi = mid;
-		} else if position >= span.end {
-			lo = mid + 1;
-		} else {
-			return Some(mid);
-		}
-	}
-
-	None
 }
 
 pub struct Results {
@@ -95,10 +71,10 @@ impl Results {
 
 		for hit in &mut self.hits {
 			if let Some(spans) = doc_spans {
-				hit.document_index = binary_search_span(spans, hit.span.start).unwrap_or(0) as u32;
+				hit.document_index = span_containing(spans, hit.span.start).unwrap_or(0) as u32;
 			}
 			if let Some(spans) = sent_spans {
-				hit.sentence_index = binary_search_span(spans, hit.span.start).unwrap_or(0) as u32;
+				hit.sentence_index = span_containing(spans, hit.span.start).unwrap_or(0) as u32;
 			}
 		}
 	}
@@ -303,7 +279,7 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 			let hits = hits
 				.into_iter()
 				.filter(|hit| {
-					binary_search_span(spans, hit.span.start)
+					span_containing(spans, hit.span.start)
 						.map(|idx| hit.span.end <= spans[idx].end)
 						.unwrap_or(false)
 				})
@@ -331,7 +307,7 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 			let hits = hits
 				.into_iter()
 				.filter(|hit| {
-					binary_search_span(doc_spans, hit.span.start)
+					span_containing(doc_spans, hit.span.start)
 						.map(|doc_idx| {
 							hit.span.end <= doc_spans[doc_idx].end
 								&& comp_metas.iter().any(|comp| {
@@ -368,7 +344,7 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 			let hits = hits
 				.into_iter()
 				.filter(|hit| {
-					binary_search_span(doc_spans, hit.span.start)
+					span_containing(doc_spans, hit.span.start)
 						.map(|doc_idx| {
 							hit.span.end <= doc_spans[doc_idx].end
 								&& matching_indices.contains(&doc_idx)
@@ -1116,7 +1092,7 @@ pub fn find_doc_and_sent(
 	sent_spans: &[Span],
 	comp: &ComponentMeta,
 ) -> Option<(u32, u32)> {
-	let doc_idx = binary_search_span(doc_spans, hit.span.start)?;
+	let doc_idx = span_containing(doc_spans, hit.span.start)?;
 	if doc_idx < comp.document_range.0 || doc_idx >= comp.document_range.1 {
 		return None;
 	}
@@ -1307,26 +1283,5 @@ mod tests {
 		// min=2: single-position run can't produce length-2 spans
 		let spans = ri.spans_for_quantifier(2, Some(3));
 		assert!(spans.is_empty());
-	}
-
-	#[test]
-	fn binary_search_span_basic() {
-		let spans = vec![
-			Span::new(0, 10),
-			Span::new(10, 20),
-			Span::new(20, 30),
-		];
-
-		assert_eq!(binary_search_span(&spans, 0), Some(0));
-		assert_eq!(binary_search_span(&spans, 5), Some(0));
-		assert_eq!(binary_search_span(&spans, 9), Some(0));
-		assert_eq!(binary_search_span(&spans, 10), Some(1));
-		assert_eq!(binary_search_span(&spans, 20), Some(2));
-		assert_eq!(binary_search_span(&spans, 30), None);
-	}
-
-	#[test]
-	fn binary_search_span_empty() {
-		assert_eq!(binary_search_span(&[], 0), None);
 	}
 }
