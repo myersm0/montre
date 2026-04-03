@@ -97,13 +97,13 @@ span.overlaps(&s)       // true if any overlap
 use montre_index::ForwardIndex;
 
 // String layers (word, lemma, upos, xpos, feats, deps, etc.) — zero-copy with mapped backend
-let word: Option<&str> = corpus.forward.get_str(position, "word");
-let upos: Option<&str> = corpus.forward.get_str(position, "upos");
-let xpos: Option<&str> = corpus.forward.get_str(position, "xpos");
-let deps: Option<&str> = corpus.forward.get_str(position, "deps");  // raw enhanced deps string
+let word: Option<&str> = corpus.forward().get_str(position, "word");
+let upos: Option<&str> = corpus.forward().get_str(position, "upos");
+let xpos: Option<&str> = corpus.forward().get_str(position, "xpos");
+let deps: Option<&str> = corpus.forward().get_str(position, "deps");  // raw enhanced deps string
 
 // Integer layers (head) — sentence-local values, not converted to global positions
-let head: Option<i64> = corpus.forward.get_int(position, "head");
+let head: Option<i64> = corpus.forward().get_int(position, "head");
 ```
 
 The `ForwardIndex` trait provides `get_str` and `get_int` as its primary interface. Both enable zero-copy access from the memory-mapped forward index. `Value` (`Value::Str(CompactString)` or `Value::Int(i64)`) is used internally by the build pipeline but does not appear in the query-time API.
@@ -114,13 +114,13 @@ The `ForwardIndex` trait provides `get_str` and `get_int` as its primary interfa
 use montre_index::InvertedIndex;
 
 // Positions where layer==value (as a RoaringBitmap)
-let bitmap = corpus.inverted.get("pos", "NOUN");
+let bitmap = corpus.inverted().get("pos", "NOUN");
 
 // All values for a layer
-let values: Option<Vec<&str>> = corpus.inverted.values("upos");
+let values: Option<Vec<&str>> = corpus.inverted().values("upos");
 
 // All indexed layer names
-let layers: Vec<&str> = corpus.inverted.layers();
+let layers: Vec<&str> = corpus.inverted().layers();
 ```
 
 **Note on `pos` alias**: In CQL queries, `pos` is rewritten to `upos` at parse time. When accessing the inverted index or forward index directly via the API, use `"upos"` (the physical layer name).
@@ -133,14 +133,14 @@ let layers: Vec<&str> = corpus.inverted.layers();
 use montre_index::SpanIndex;
 
 // All spans for a layer
-let sentences: Option<&[Span]> = corpus.spans.spans("sentence");
-let documents: Option<&[Span]> = corpus.spans.spans("document");
+let sentences: Option<&[Span]> = corpus.spans().spans("sentence");
+let documents: Option<&[Span]> = corpus.spans().spans("document");
 
 // Find the span containing a position
-let span: Option<&Span> = corpus.spans.containing("sentence", position);
+let span: Option<&Span> = corpus.spans().containing("sentence", position);
 
 // Available span layers
-let layers: Vec<&str> = corpus.spans.layers();
+let layers: Vec<&str> = corpus.spans().layers();
 ```
 
 ### Sentence IDs
