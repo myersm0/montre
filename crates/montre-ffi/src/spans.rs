@@ -42,7 +42,7 @@ pub unsafe extern "C" fn montre_corpus_span_count(
 	let Some(layer_str) = borrow_cstr(layer) else {
 		return -1;
 	};
-	match c.spans.spans(layer_str) {
+	match c.spans().spans(layer_str) {
 		Some(spans) => spans.len() as i64,
 		None => -1,
 	}
@@ -65,7 +65,7 @@ pub unsafe extern "C" fn montre_corpus_span_at(
 	let Some(layer_str) = borrow_cstr(layer) else {
 		return 0;
 	};
-	let Some(spans) = c.spans.spans(layer_str) else {
+	let Some(spans) = c.spans().spans(layer_str) else {
 		return 0;
 	};
 	let Some(span) = spans.get(index as usize) else {
@@ -95,7 +95,7 @@ pub unsafe extern "C" fn montre_corpus_span_containing(
 	let Some(layer_str) = borrow_cstr(layer) else {
 		return -1;
 	};
-	let Some(spans) = c.spans.spans(layer_str) else {
+	let Some(spans) = c.spans().spans(layer_str) else {
 		return -1;
 	};
 
@@ -135,7 +135,7 @@ pub unsafe extern "C" fn montre_corpus_span_count_in_range(
 	let Some(layer_str) = borrow_cstr(layer) else {
 		return -1;
 	};
-	let Some(spans) = c.spans.spans(layer_str) else {
+	let Some(spans) = c.spans().spans(layer_str) else {
 		return -1;
 	};
 	if spans.is_empty() || token_start >= token_end {

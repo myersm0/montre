@@ -76,12 +76,12 @@ impl AlignmentIndex {
 
 pub struct Corpus {
 	path: PathBuf,
-	pub meta: CorpusMeta,
-	pub inverted: InMemoryInverted,
-	pub forward: ForwardStore,
-	pub spans: SpanStore,
-	pub lexicon: InMemoryLexicon,
-	pub alignments: AlignmentIndex,
+	meta: CorpusMeta,
+	inverted: InMemoryInverted,
+	forward: ForwardStore,
+	spans: SpanStore,
+	lexicon: InMemoryLexicon,
+	alignments: AlignmentIndex,
 	sentence_ids: Option<MappedSentenceIds>,
 	mwts: Option<MappedMWTs>,
 	spacing: Option<SpacingIndex>,
@@ -180,6 +180,26 @@ impl Corpus {
 
 	pub fn path(&self) -> &Path {
 		&self.path
+	}
+
+	pub fn meta(&self) -> &CorpusMeta {
+		&self.meta
+	}
+
+	pub fn inverted(&self) -> &InMemoryInverted {
+		&self.inverted
+	}
+
+	pub fn forward(&self) -> &ForwardStore {
+		&self.forward
+	}
+
+	pub fn spans(&self) -> &SpanStore {
+		&self.spans
+	}
+
+	pub fn alignment_metas(&self) -> &[AlignmentMeta] {
+		&self.meta.alignments
 	}
 
 	pub fn name(&self) -> &str {

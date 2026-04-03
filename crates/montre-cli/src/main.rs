@@ -532,9 +532,9 @@ fn cmd_info(corpus_path: PathBuf) -> Result<()> {
 		}
 	}
 
-	if !corpus.meta.alignments.is_empty() {
+	if !corpus.alignment_metas().is_empty() {
 		println!("\nAlignments:");
-		for align in &corpus.meta.alignments {
+		for align in corpus.alignment_metas() {
 			println!(
 				"  {} ({} -> {}, {} layer, {} edges)",
 				align.name,
@@ -655,7 +655,7 @@ fn cmd_vocab(
 	let layer = resolve_cli_layer_name(&layer);
 
 	let values = corpus
-		.inverted
+		.inverted()
 		.values(layer)
 		.with_context(|| format!("Layer '{}' not found", layer))?;
 
@@ -666,7 +666,7 @@ fn cmd_vocab(
 			.iter()
 			.filter(|value| {
 				corpus
-					.inverted
+					.inverted()
 					.get(layer, value)
 					.map(|bitmap| !(bitmap & mask).is_empty())
 					.unwrap_or(false)
@@ -689,7 +689,7 @@ fn build_position_mask(
 	components: &[String],
 	documents: &[String],
 ) -> Result<Option<roaring::RoaringBitmap>> {
-	let doc_spans = corpus.spans.spans("document").unwrap_or(&[]);
+	let doc_spans = corpus.spans().spans("document").unwrap_or(&[]);
 	let doc_names = corpus.document_names();
 
 	let mut doc_indices: Option<Vec<usize>> = None;

@@ -153,12 +153,12 @@ fn bench_vocab(c: &mut Criterion) {
 	for layer in &layers {
 		group.bench_function(*layer, |b| {
 			b.iter(|| {
-				let values = corpus.inverted.values(black_box(layer)).unwrap();
+				let values = corpus.inverted().values(black_box(layer)).unwrap();
 				let mut entries: Vec<(&str, u64)> = values
 					.iter()
 					.map(|value| {
 						let count = corpus
-							.inverted
+							.inverted()
 							.get(layer, value)
 							.map(|bm| bm.len())
 							.unwrap_or(0);

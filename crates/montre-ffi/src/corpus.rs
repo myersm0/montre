@@ -186,7 +186,7 @@ pub unsafe extern "C" fn montre_corpus_component_token_count(
 	if doc_start >= doc_end {
 		return 0;
 	}
-	let Some(doc_spans) = c.spans.spans("document") else {
+	let Some(doc_spans) = c.spans().spans("document") else {
 		return -1;
 	};
 	let Some(first) = doc_spans.get(doc_start) else {
@@ -217,7 +217,7 @@ pub unsafe extern "C" fn montre_corpus_inverted_values(
 		if !out_len.is_null() { *out_len = 0; }
 		return ptr::null_mut();
 	};
-	let Some(values) = c.inverted.values(layer_str) else {
+	let Some(values) = c.inverted().values(layer_str) else {
 		if !out_len.is_null() { *out_len = 0; }
 		return ptr::null_mut();
 	};
@@ -261,7 +261,7 @@ pub unsafe extern "C" fn montre_corpus_inverted_count(
 	let Some(value_str) = borrow_cstr(value) else {
 		return -1;
 	};
-	match c.inverted.get(layer_str, value_str) {
+	match c.inverted().get(layer_str, value_str) {
 		Some(bitmap) => bitmap.len() as i64,
 		None => -1,
 	}
@@ -307,13 +307,13 @@ pub unsafe extern "C" fn montre_corpus_inverted_counts(
 		*out_len = 0;
 		return 0;
 	};
-	let Some(values) = c.inverted.values(layer_str) else {
+	let Some(values) = c.inverted().values(layer_str) else {
 		*out_len = 0;
 		return 0;
 	};
 
 	let counts: Vec<u64> = values.iter().map(|v| {
-		c.inverted.get(layer_str, v).map_or(0, |b| b.len() as u64)
+		c.inverted().get(layer_str, v).map_or(0, |b| b.len() as u64)
 	}).collect();
 
 	*out_values = export_string_array(&values, out_len);

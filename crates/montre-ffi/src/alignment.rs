@@ -14,7 +14,7 @@ pub unsafe extern "C" fn montre_corpus_alignment_count(corpus: *const Corpus) ->
 		return 0;
 	}
 	let c = &*corpus;
-	c.meta.alignments.len() as u32
+	c.alignment_metas().len() as u32
 }
 
 #[no_mangle]
@@ -26,7 +26,7 @@ pub unsafe extern "C" fn montre_corpus_alignment_name(
 		return ptr::null_mut();
 	}
 	let c = &*corpus;
-	match c.meta.alignments.get(index as usize) {
+	match c.alignment_metas().get(index as usize) {
 		Some(a) => to_cstring(&a.name),
 		None => ptr::null_mut(),
 	}
@@ -41,7 +41,7 @@ pub unsafe extern "C" fn montre_corpus_alignment_source(
 		return ptr::null_mut();
 	}
 	let c = &*corpus;
-	match c.meta.alignments.get(index as usize) {
+	match c.alignment_metas().get(index as usize) {
 		Some(a) => to_cstring(&a.source_component),
 		None => ptr::null_mut(),
 	}
@@ -56,7 +56,7 @@ pub unsafe extern "C" fn montre_corpus_alignment_target(
 		return ptr::null_mut();
 	}
 	let c = &*corpus;
-	match c.meta.alignments.get(index as usize) {
+	match c.alignment_metas().get(index as usize) {
 		Some(a) => to_cstring(&a.target_component),
 		None => ptr::null_mut(),
 	}
@@ -71,7 +71,7 @@ pub unsafe extern "C" fn montre_corpus_alignment_edge_count(
 		return 0;
 	}
 	let c = &*corpus;
-	match c.meta.alignments.get(index as usize) {
+	match c.alignment_metas().get(index as usize) {
 		Some(a) => a.edge_count as u64,
 		None => 0,
 	}
@@ -86,7 +86,7 @@ pub unsafe extern "C" fn montre_corpus_alignment_source_layer(
 		return ptr::null_mut();
 	}
 	let c = &*corpus;
-	match c.meta.alignments.get(index as usize) {
+	match c.alignment_metas().get(index as usize) {
 		Some(a) => to_cstring(&a.source_layer),
 		None => ptr::null_mut(),
 	}
@@ -101,7 +101,7 @@ pub unsafe extern "C" fn montre_corpus_alignment_target_layer(
 		return ptr::null_mut();
 	}
 	let c = &*corpus;
-	match c.meta.alignments.get(index as usize) {
+	match c.alignment_metas().get(index as usize) {
 		Some(a) => to_cstring(&a.target_layer),
 		None => ptr::null_mut(),
 	}
@@ -117,7 +117,7 @@ pub unsafe extern "C" fn montre_corpus_alignment_directed(
 		return -1;
 	}
 	let c = &*corpus;
-	match c.meta.alignments.get(index as usize) {
+	match c.alignment_metas().get(index as usize) {
 		Some(a) => a.directed as i32,
 		None => -1,
 	}
@@ -226,17 +226,17 @@ pub unsafe extern "C" fn montre_project(
 		return ptr::null_mut();
 	};
 
-	let Some(doc_spans) = c.spans.spans("document") else {
+	let Some(doc_spans) = c.spans().spans("document") else {
 		set_error("no document spans".into());
 		return ptr::null_mut();
 	};
 
-	let Some(source_sent_spans) = c.spans.spans(&align_meta.source_layer) else {
+	let Some(source_sent_spans) = c.spans().spans(&align_meta.source_layer) else {
 		set_error(format!("source span layer not found: {}", align_meta.source_layer));
 		return ptr::null_mut();
 	};
 
-	let Some(target_sent_spans) = c.spans.spans(&align_meta.target_layer) else {
+	let Some(target_sent_spans) = c.spans().spans(&align_meta.target_layer) else {
 		set_error(format!("target span layer not found: {}", align_meta.target_layer));
 		return ptr::null_mut();
 	};

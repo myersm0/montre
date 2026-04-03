@@ -349,8 +349,8 @@ pub unsafe extern "C" fn montre_hitlist_populate_context(
 	let hit_list = &mut *hits;
 	let corpus = &*corpus;
 
-	let doc_spans = corpus.spans.spans("document");
-	let sent_spans = corpus.spans.spans("sentence");
+	let doc_spans = corpus.spans().spans("document");
+	let sent_spans = corpus.spans().spans("sentence");
 
 	for hit in &mut hit_list.hits {
 		if let Some(spans) = doc_spans {

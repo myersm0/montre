@@ -7,10 +7,10 @@ use crate::HitList;
 use crate::strings::{to_cstring, borrow_cstr};
 
 pub(crate) fn forward_value_string(corpus: &Corpus, position: u64, layer: &str) -> Option<String> {
-	if let Some(s) = corpus.forward.get_str(position, layer) {
+	if let Some(s) = corpus.forward().get_str(position, layer) {
 		return Some(s.to_string());
 	}
-	if let Some(n) = corpus.forward.get_int(position, layer) {
+	if let Some(n) = corpus.forward().get_int(position, layer) {
 		return Some(n.to_string());
 	}
 	None
