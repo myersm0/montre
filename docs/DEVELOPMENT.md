@@ -929,7 +929,7 @@ JSON array of objects, sorted by `(sentence_index, node_id)`. Fields with `_` va
 - [x] **Bulk alignment coverage**: `montre_corpus_alignment_coverage(corpus, alignment_name)` returns parallel arrays of (global_doc_index, aligned_count, total_count) per source-side document. Avoids N round-trips from bindings for per-document coverage statistics.
 - [x] **`Hit::UNPOPULATED` in FFI**: `montre_project` now initializes projected hits with `Hit::UNPOPULATED` (`u32::MAX`) instead of `0`. `montre_hitlist_populate_context` returns `Hit::UNPOPULATED` (not `0`) for positions outside all spans.
 - [x] **Deduplicate binary search**: FFI `montre_hitlist_populate_context` and `montre_corpus_span_containing` now use `montre_core::span_containing` instead of local binary search implementations.
-- [x] 2 new FFI functions (66 total, was 64).
+- [x] 2 new FFI functions (78 total; prior count of 64 was an undercount — see api.md for full inventory).
 
 ### Phase 4: Statistics & bindings
 

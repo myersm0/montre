@@ -319,7 +319,7 @@ BuildError::Alignment(String)
 
 ## C FFI
 
-The `montre-ffi` crate exports 66 `extern "C"` functions across eight modules. All string arguments are `*const c_char` (null-terminated). All returned strings are owned by Rust; copy and free with `montre_string_free`.
+The `montre-ffi` crate exports 78 `extern "C"` functions across eight modules. All string arguments are `*const c_char` (null-terminated). All returned strings are owned by Rust; copy and free with `montre_string_free`.
 
 ### Error handling
 
@@ -350,13 +350,29 @@ char      *montre_corpus_component_language(const void *corpus, uint32_t index);
 int32_t    montre_corpus_component_document_range(const void *corpus, uint32_t index, uint32_t *out_start, uint32_t *out_end);
 int32_t    montre_corpus_component_for_document(const void *corpus, uint32_t doc_index);
 int64_t    montre_corpus_component_token_count(const void *corpus, uint32_t index);
+int64_t    montre_corpus_document_index_by_name(const void *corpus, const char *name);
+int32_t    montre_corpus_component_index_by_name(const void *corpus, const char *name);
 ```
+
+`montre_corpus_document_index_by_name` returns the global document index, or -1 if not found. `montre_corpus_component_index_by_name` returns the component index, or -1 if not found.
 
 ### Inverted index introspection
 
 ```c
 // All distinct values for a layer (e.g., all POS tags). Free with montre_string_array_free.
 char **montre_corpus_inverted_values(const void *corpus, const char *layer, uint64_t *out_len);
+
+// Bitmap cardinality for a single layer/value pair. Returns -1 if not found.
+int64_t montre_corpus_inverted_count(const void *corpus, const char *layer, const char *value);
+
+// All values and their bitmap cardinalities for a layer.
+// Returns parallel arrays: out_values (string array) and out_counts (u64 array).
+// Free values with montre_string_array_free, counts with montre_u64_array_free.
+// Returns 1 on success, 0 if the layer does not exist.
+int32_t montre_corpus_inverted_counts(
+    const void *corpus, const char *layer,
+    char ***out_values, uint64_t **out_counts, uint64_t *out_len
+);
 ```
 
 ### Token access
@@ -387,12 +403,21 @@ void     montre_hitlist_populate_context(void *hits, const void *corpus);
 
 `montre_hit_document_index` and `montre_hit_sentence_index` return `UINT32_MAX` (`Hit::UNPOPULATED`) before `montre_hitlist_populate_context` is called. This includes hits returned by `montre_project`. Check for this sentinel before using the index as a lookup key.
 
+```c
 // Bulk hit field extraction as flat u64 arrays. Free with montre_u64_array_free.
 uint64_t *montre_hitlist_starts(const void *hits, uint64_t *out_len);
 uint64_t *montre_hitlist_ends(const void *hits, uint64_t *out_len);
 uint64_t *montre_hitlist_document_indices(const void *hits, uint64_t *out_len);
 uint64_t *montre_hitlist_sentence_indices(const void *hits, uint64_t *out_len);
+
+// Labeled capture accessors for a single hit.
+uint32_t montre_hit_capture_count(const void *hits, uint64_t index);
+char    *montre_hit_capture_name(const void *hits, uint64_t hit_index, uint32_t capture_index);
+uint64_t montre_hit_capture_start(const void *hits, uint64_t hit_index, uint32_t capture_index);
+uint64_t montre_hit_capture_end(const void *hits, uint64_t hit_index, uint32_t capture_index);
 ```
+
+Capture accessors return data from labeled queries (e.g., `a:[pos="ADJ"] b:[pos="NOUN"]`). `montre_hit_capture_count` returns 0 for unlabeled queries. Free capture name strings with `montre_string_free`.
 
 ### Bulk extraction
 
