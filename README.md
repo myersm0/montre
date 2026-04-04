@@ -6,9 +6,9 @@ A modern, embeddable corpus query engine with first-class support for aligned co
 
 > **montre** *(/mɔ̃tʁ/):* “shows,” “reveals,” “makes visible” — from French _montrer_, “to show.” The Latin root is _monstrare_, “to point out, indicate.”
 
-No server, external services, or prerequisites.
+Montre's internals map cleanly onto the [Universal Dependencies](https://universaldependencies.org/) data model: each CoNLL-U column has a corresponding layer, multiword tokens and empty nodes are preserved with their UD semantics, and the annotation hierarchy (token, sentence, document, component) mirrors the structure of UD treebanks.
 
-A corpus is a self-contained directory with its own data, indexes, and (optionally) alignments. Build it in one line from your annotation files, or from a TOML manifest describing multiple components.
+No server, external services, or prerequisites. A corpus is a self-contained directory with its own data, indexes, and (optionally) alignments. Build it in one line from your annotation files, or from a TOML manifest describing multiple components.
 
 Designed to be used from the CLI or embedded directly in Julia or Python.
 
@@ -97,9 +97,9 @@ Requires using the flag `--decompose-feats` at build time.
 [feats.Gender="Masc" & feats.Tense="Past"]
 ```
 
-### CoNLL-U fidelity
+### Universal Dependencies data model
 
-Montre preserves UD annotation data:
+Montre preserves the full UD annotation structure:
 
 - **Multiword tokens** (range-ID rows like `3-4`): stored in a side table and used for correct surface text reconstruction. Concordance output shows `au` instead of `à le`.
 - **SpaceAfter=No**: preserved from the misc column. Surface text joins tokens without spaces where appropriate (e.g., `dort.` not `dort .`).
@@ -144,6 +144,8 @@ This enables:
 - tracing translations across languages
 - detecting omissions or expansions
 - comparing editions or variants
+
+**Coming soon**: contrastive alignment queries. Query patterns like "show me sentences where French uses the subjunctive but the English translation doesn't" — expressing constraints that span across aligned components. This is expressible today as composed operations in the Julia bindings, but native CQL syntax will make it concise and efficient.
 
 ### Build a multi-component corpus
 ```toml
@@ -198,7 +200,7 @@ Montre exposes a C FFI for embedding in other languages.
 ```julia
 using Montre
 
-corpus = open_corpus("./my-corpus")
+corpus = Montre.open("./my-corpus")
 hits = query(corpus, "[pos=\"ADJ\"] [pos=\"NOUN\"]")
 
 for line in concordance(corpus, hits)
@@ -218,6 +220,7 @@ for hit in corpus.query('[pos="DET"] [pos="NOUN"]'):
 
 ## Roadmap
 Coming soon:
+- Contrastive alignment queries
 - Statistics: group, collocation
 - Python bindings (feature-complete, pip install)
 - REPL (persistent corpus session)
