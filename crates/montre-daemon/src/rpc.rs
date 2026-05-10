@@ -1,14 +1,18 @@
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver, Sender, SyncSender};
 use std::sync::{Arc, RwLock};
 use std::thread;
 
-use montre_index::Corpus;
+use montre_index::{Corpus, InvertedIndex};
 
 use crate::protocol::error_codes;
-use crate::protocol::{ProcessId, ProtocolError, RegisterParams, RegisterReply};
+use crate::protocol::{
+	CorpusDocumentsParams, CorpusDocumentsReply, CorpusInfo, CorpusLayerInfoParams,
+	DocumentEntry, LayerInfo, LayerKind, ProcessId, ProtocolError, RegisterParams,
+	RegisterReply,
+};
 use crate::state::{Command, Outbound, ResultsTable};
 
 pub(crate) const MAX_PAYLOAD_SIZE: usize = 16 * 1024 * 1024;
@@ -117,8 +121,9 @@ pub(crate) struct RpcContext {
 	pub process_id: Option<ProcessId>,
 	pub state_tx: Sender<Command>,
 	pub outbound_tx: SyncSender<Outbound>,
-	#[allow(dead_code)]
 	pub corpus: Arc<Corpus>,
+	pub corpus_id: String,
+	pub canonical_path: PathBuf,
 	#[allow(dead_code)]
 	pub results: Arc<RwLock<ResultsTable>>,
 }
@@ -128,6 +133,8 @@ pub(crate) fn run_listener(
 	state_tx: Sender<Command>,
 	corpus: Arc<Corpus>,
 	results: Arc<RwLock<ResultsTable>>,
+	corpus_id: String,
+	canonical_path: PathBuf,
 ) -> io::Result<()> {
 	if socket_path.exists() {
 		std::fs::remove_file(socket_path)?;
@@ -141,7 +148,11 @@ pub(crate) fn run_listener(
 				let tx = state_tx.clone();
 				let corpus = Arc::clone(&corpus);
 				let results = Arc::clone(&results);
-				thread::spawn(move || run_connection(stream, tx, corpus, results));
+				let corpus_id = corpus_id.clone();
+				let canonical_path = canonical_path.clone();
+				thread::spawn(move || {
+					run_connection(stream, tx, corpus, results, corpus_id, canonical_path)
+				});
 			}
 			Err(e) => {
 				tracing::warn!(error = %e, "accept failed");
@@ -156,6 +167,8 @@ fn run_connection(
 	state_tx: Sender<Command>,
 	corpus: Arc<Corpus>,
 	results: Arc<RwLock<ResultsTable>>,
+	corpus_id: String,
+	canonical_path: PathBuf,
 ) {
 	let read_stream = match stream.try_clone() {
 		Ok(s) => s,
@@ -170,7 +183,15 @@ fn run_connection(
 
 	let writer_handle = thread::spawn(move || run_writer(write_stream, outbound_rx));
 
-	run_reader(read_stream, state_tx, outbound_tx, corpus, results);
+	run_reader(
+		read_stream,
+		state_tx,
+		outbound_tx,
+		corpus,
+		results,
+		corpus_id,
+		canonical_path,
+	);
 
 	let _ = writer_handle.join();
 }
@@ -197,12 +218,16 @@ fn run_reader(
 	outbound_tx: SyncSender<Outbound>,
 	corpus: Arc<Corpus>,
 	results: Arc<RwLock<ResultsTable>>,
+	corpus_id: String,
+	canonical_path: PathBuf,
 ) {
 	let mut ctx = RpcContext {
 		process_id: None,
 		state_tx: state_tx.clone(),
 		outbound_tx: outbound_tx.clone(),
 		corpus,
+		corpus_id,
+		canonical_path,
 		results,
 	};
 
@@ -265,6 +290,9 @@ pub(crate) fn dispatch_request(
 
 	match method {
 		"session.register" => handle_register(params, ctx),
+		"corpus.info" => handle_corpus_info(ctx),
+		"corpus.documents" => handle_corpus_documents(params, ctx),
+		"corpus.layer_info" => handle_corpus_layer_info(params, ctx),
 		_ => Err(ProtocolError::new(
 			-32601,
 			format!("Method not found: {}", method),
@@ -319,6 +347,122 @@ fn handle_register(
 		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
 }
 
+fn handle_corpus_info(ctx: &RpcContext) -> Result<serde_json::Value, ProtocolError> {
+	let components = ctx
+		.corpus
+		.components()
+		.iter()
+		.map(|c| c.name.clone())
+		.collect();
+	let alignments = ctx
+		.corpus
+		.alignments()
+		.iter()
+		.map(|a| a.name.clone())
+		.collect();
+	let info = CorpusInfo {
+		name: ctx.corpus.name().to_string(),
+		canonical_path: ctx.canonical_path.display().to_string(),
+		stable_key: ctx.corpus_id.clone(),
+		components,
+		layers: ctx.corpus.layers().to_vec(),
+		alignments,
+	};
+	serde_json::to_value(info)
+		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+}
+
+fn handle_corpus_documents(
+	params: Option<serde_json::Value>,
+	ctx: &RpcContext,
+) -> Result<serde_json::Value, ProtocolError> {
+	let parsed: CorpusDocumentsParams = match params {
+		None => CorpusDocumentsParams::default(),
+		Some(v) => serde_json::from_value(v)
+			.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?,
+	};
+
+	let allowed_range = match parsed.component.as_deref() {
+		None => None,
+		Some(name) => {
+			let component = ctx.corpus.component(name).ok_or_else(|| {
+				ProtocolError::new(-32602, format!("unknown component '{}'", name))
+			})?;
+			Some(component.document_range)
+		}
+	};
+
+	let document_names = ctx.corpus.document_names();
+	let mut documents = Vec::with_capacity(document_names.len());
+	for (idx, name) in document_names.iter().enumerate() {
+		if let Some((start, end)) = allowed_range {
+			if idx < start || idx >= end {
+				continue;
+			}
+		}
+		documents.push(DocumentEntry {
+			index: idx as u32,
+			name: name.clone(),
+			component: document_component(ctx, idx),
+			sentence_count: document_sentence_count(ctx, idx),
+		});
+	}
+
+	let reply = CorpusDocumentsReply { documents };
+	serde_json::to_value(reply)
+		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+}
+
+fn document_component(ctx: &RpcContext, document_index: usize) -> String {
+	ctx.corpus
+		.component_for_document(document_index)
+		.map(|c| c.name.clone())
+		.unwrap_or_else(|| ctx.corpus.name().to_string())
+}
+
+fn document_sentence_count(ctx: &RpcContext, document_index: usize) -> u32 {
+	match (
+		ctx.corpus.first_sentence_of_document(document_index),
+		ctx.corpus.last_sentence_of_document(document_index),
+	) {
+		(Some(first), Some(last)) if last >= first => (last - first + 1) as u32,
+		_ => 0,
+	}
+}
+
+fn handle_corpus_layer_info(
+	params: Option<serde_json::Value>,
+	ctx: &RpcContext,
+) -> Result<serde_json::Value, ProtocolError> {
+	let raw = params
+		.ok_or_else(|| ProtocolError::new(-32602, "corpus.layer_info requires params"))?;
+	let parsed: CorpusLayerInfoParams = serde_json::from_value(raw)
+		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+
+	let (kind, value_count) = classify_layer(&ctx.corpus, &parsed.layer).ok_or_else(|| {
+		ProtocolError::new(-32602, format!("unknown layer '{}'", parsed.layer))
+	})?;
+
+	let info = LayerInfo {
+		name: parsed.layer,
+		kind,
+		value_count,
+	};
+	serde_json::to_value(info)
+		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+}
+
+fn classify_layer(corpus: &Corpus, name: &str) -> Option<(LayerKind, u32)> {
+	if let Some(values) = corpus.inverted().values(name) {
+		return Some((LayerKind::String, values.len() as u32));
+	}
+	match name {
+		"head" => Some((LayerKind::Int, 0)),
+		"deps" => Some((LayerKind::String, 0)),
+		_ => None,
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -330,9 +474,9 @@ mod tests {
 	use std::sync::OnceLock;
 	use tempfile::TempDir;
 
-	fn corpus_fixture() -> &'static Path {
-		static FIXTURE: OnceLock<(TempDir, PathBuf)> = OnceLock::new();
-		let (_keep, path) = FIXTURE.get_or_init(|| {
+	fn corpus_fixture() -> (&'static Path, &'static Path) {
+		static FIXTURE: OnceLock<(TempDir, PathBuf, PathBuf)> = OnceLock::new();
+		let (_keep, path, canonical) = FIXTURE.get_or_init(|| {
 			let temp = TempDir::new().expect("tempdir");
 			let out = temp.path().join("corpus");
 			let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -341,26 +485,45 @@ mod tests {
 				.expect("manifest load")
 				.build(&out)
 				.expect("corpus build");
-			(temp, out)
+			let canonical = std::fs::canonicalize(&out).expect("canonicalize");
+			(temp, out, canonical)
 		});
-		path.as_path()
+		(path.as_path(), canonical.as_path())
 	}
 
-	fn open_test_corpus() -> Arc<Corpus> {
-		Arc::new(montre_index::open(corpus_fixture()).expect("corpus open"))
+	fn open_test_corpus() -> (Arc<Corpus>, PathBuf) {
+		let (path, canonical) = corpus_fixture();
+		let corpus = Arc::new(montre_index::open(path).expect("corpus open"));
+		(corpus, canonical.to_path_buf())
 	}
 
 	fn make_context(
 		state_tx: Sender<Command>,
 		outbound_tx: SyncSender<Outbound>,
 	) -> RpcContext {
+		let (corpus, canonical_path) = open_test_corpus();
 		RpcContext {
 			process_id: None,
 			state_tx,
 			outbound_tx,
-			corpus: open_test_corpus(),
+			corpus,
+			corpus_id: "test-corpus-id".to_string(),
+			canonical_path,
 			results: Arc::new(RwLock::new(HashMap::new())),
 		}
+	}
+
+	fn make_registered_context(
+		state_tx: Sender<Command>,
+		outbound_tx: SyncSender<Outbound>,
+	) -> RpcContext {
+		let mut ctx = make_context(state_tx, outbound_tx);
+		let params = serde_json::json!({
+			"protocol_version": 1,
+			"kind": "external",
+		});
+		dispatch_request("session.register", Some(params), &mut ctx).expect("register");
+		ctx
 	}
 
 	#[test]
@@ -573,6 +736,173 @@ mod tests {
 
 			let err = dispatch_request("does.not.exist", None, &mut ctx).unwrap_err();
 			assert_eq!(err.code, -32601);
+		}
+
+		drop(state_tx);
+		let _ = state_handle.join();
+	}
+
+	#[test]
+	fn corpus_info_returns_expected_shape() {
+		let st = state::State::new("test".to_string(), 1);
+		let (state_tx, state_rx) = channel();
+		let state_handle = thread::spawn(move || state::run(st, state_rx));
+
+		{
+			let (outbound_tx, _outbound_rx) = sync_channel(OUTBOUND_QUEUE_DEPTH);
+			let mut ctx = make_registered_context(state_tx.clone(), outbound_tx);
+
+			let result = dispatch_request("corpus.info", None, &mut ctx).unwrap();
+			let info: CorpusInfo = serde_json::from_value(result).unwrap();
+
+			assert_eq!(info.name, "test-parallel");
+			assert_eq!(info.stable_key, ctx.corpus_id);
+			assert_eq!(info.canonical_path, ctx.canonical_path.display().to_string());
+
+			let mut components = info.components.clone();
+			components.sort();
+			assert_eq!(components, vec!["en".to_string(), "fr".to_string()]);
+
+			assert_eq!(info.alignments, vec!["sentence".to_string()]);
+			assert!(info.layers.iter().any(|l| l == "upos"));
+			assert!(info.layers.iter().any(|l| l == "lemma"));
+		}
+
+		drop(state_tx);
+		let _ = state_handle.join();
+	}
+
+	#[test]
+	fn corpus_documents_returns_all_without_filter() {
+		let st = state::State::new("test".to_string(), 1);
+		let (state_tx, state_rx) = channel();
+		let state_handle = thread::spawn(move || state::run(st, state_rx));
+
+		{
+			let (outbound_tx, _outbound_rx) = sync_channel(OUTBOUND_QUEUE_DEPTH);
+			let mut ctx = make_registered_context(state_tx.clone(), outbound_tx);
+
+			let result = dispatch_request("corpus.documents", None, &mut ctx).unwrap();
+			let reply: CorpusDocumentsReply = serde_json::from_value(result).unwrap();
+
+			assert_eq!(reply.documents.len(), 4);
+			let names: Vec<&str> = reply.documents.iter().map(|d| d.name.as_str()).collect();
+			assert!(names.iter().any(|n| n.contains("la_maison")));
+			assert!(names.iter().any(|n| n.contains("le_chat")));
+			assert!(names.iter().any(|n| n.contains("the_house")));
+			assert!(names.iter().any(|n| n.contains("the_cat")));
+
+			for doc in &reply.documents {
+				assert!(doc.sentence_count >= 1);
+				assert!(doc.component == "fr" || doc.component == "en");
+			}
+		}
+
+		drop(state_tx);
+		let _ = state_handle.join();
+	}
+
+	#[test]
+	fn corpus_documents_filters_by_component() {
+		let st = state::State::new("test".to_string(), 1);
+		let (state_tx, state_rx) = channel();
+		let state_handle = thread::spawn(move || state::run(st, state_rx));
+
+		{
+			let (outbound_tx, _outbound_rx) = sync_channel(OUTBOUND_QUEUE_DEPTH);
+			let mut ctx = make_registered_context(state_tx.clone(), outbound_tx);
+
+			let params = serde_json::json!({ "component": "fr" });
+			let result = dispatch_request("corpus.documents", Some(params), &mut ctx).unwrap();
+			let reply: CorpusDocumentsReply = serde_json::from_value(result).unwrap();
+
+			assert_eq!(reply.documents.len(), 2);
+			for doc in &reply.documents {
+				assert_eq!(doc.component, "fr");
+			}
+		}
+
+		drop(state_tx);
+		let _ = state_handle.join();
+	}
+
+	#[test]
+	fn corpus_documents_unknown_component_rejected() {
+		let st = state::State::new("test".to_string(), 1);
+		let (state_tx, state_rx) = channel();
+		let state_handle = thread::spawn(move || state::run(st, state_rx));
+
+		{
+			let (outbound_tx, _outbound_rx) = sync_channel(OUTBOUND_QUEUE_DEPTH);
+			let mut ctx = make_registered_context(state_tx.clone(), outbound_tx);
+
+			let params = serde_json::json!({ "component": "nonexistent" });
+			let err = dispatch_request("corpus.documents", Some(params), &mut ctx).unwrap_err();
+			assert_eq!(err.code, -32602);
+		}
+
+		drop(state_tx);
+		let _ = state_handle.join();
+	}
+
+	#[test]
+	fn corpus_layer_info_indexed_string_layer() {
+		let st = state::State::new("test".to_string(), 1);
+		let (state_tx, state_rx) = channel();
+		let state_handle = thread::spawn(move || state::run(st, state_rx));
+
+		{
+			let (outbound_tx, _outbound_rx) = sync_channel(OUTBOUND_QUEUE_DEPTH);
+			let mut ctx = make_registered_context(state_tx.clone(), outbound_tx);
+
+			let params = serde_json::json!({ "layer": "upos" });
+			let result = dispatch_request("corpus.layer_info", Some(params), &mut ctx).unwrap();
+			let info: LayerInfo = serde_json::from_value(result).unwrap();
+
+			assert_eq!(info.name, "upos");
+			assert!(matches!(info.kind, LayerKind::String));
+			assert!(info.value_count > 0);
+		}
+
+		drop(state_tx);
+		let _ = state_handle.join();
+	}
+
+	#[test]
+	fn corpus_layer_info_head_classified_as_int() {
+		let st = state::State::new("test".to_string(), 1);
+		let (state_tx, state_rx) = channel();
+		let state_handle = thread::spawn(move || state::run(st, state_rx));
+
+		{
+			let (outbound_tx, _outbound_rx) = sync_channel(OUTBOUND_QUEUE_DEPTH);
+			let mut ctx = make_registered_context(state_tx.clone(), outbound_tx);
+
+			let params = serde_json::json!({ "layer": "head" });
+			let result = dispatch_request("corpus.layer_info", Some(params), &mut ctx).unwrap();
+			let info: LayerInfo = serde_json::from_value(result).unwrap();
+
+			assert_eq!(info.name, "head");
+			assert!(matches!(info.kind, LayerKind::Int));
+		}
+
+		drop(state_tx);
+		let _ = state_handle.join();
+	}
+
+	#[test]
+	fn corpus_layer_info_unknown_layer_rejected() {
+		let st = state::State::new("test".to_string(), 1);
+		let (state_tx, state_rx) = channel();
+		let state_handle = thread::spawn(move || state::run(st, state_rx));
+
+		{
+			let (outbound_tx, _outbound_rx) = sync_channel(OUTBOUND_QUEUE_DEPTH);
+			let mut ctx = make_registered_context(state_tx.clone(), outbound_tx);
+
+			let params = serde_json::json!({ "layer": "totally-not-a-layer" });
+			let err = dispatch_request("corpus.layer_info", Some(params), &mut ctx).unwrap_err();
+			assert_eq!(err.code, -32602);
 		}
 
 		drop(state_tx);

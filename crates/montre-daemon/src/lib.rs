@@ -43,14 +43,15 @@ pub fn serve(options: ServeOptions) -> Result<(), DaemonError> {
 	};
 
 	let daemon_epoch = 1;
-	let state = state::State::new(corpus_id, daemon_epoch);
+	let state = state::State::new(corpus_id.clone(), daemon_epoch);
 	let results = state.results();
 
 	let (state_tx, state_rx) = channel();
 
 	let state_thread = thread::spawn(move || state::run(state, state_rx));
 
-	let listener_result = rpc::run_listener(&socket_path, state_tx, corpus, results);
+	let listener_result =
+		rpc::run_listener(&socket_path, state_tx, corpus, results, corpus_id, canonical);
 
 	let _ = state_thread.join();
 

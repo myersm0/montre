@@ -170,6 +170,54 @@ pub struct Capabilities {
 	pub anchor_kinds: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorpusInfo {
+	pub name: String,
+	pub canonical_path: String,
+	pub stable_key: String,
+	pub components: Vec<String>,
+	pub layers: Vec<String>,
+	pub alignments: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CorpusDocumentsParams {
+	#[serde(default)]
+	pub component: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentEntry {
+	pub index: u32,
+	pub name: String,
+	pub component: String,
+	pub sentence_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorpusDocumentsReply {
+	pub documents: Vec<DocumentEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorpusLayerInfoParams {
+	pub layer: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LayerKind {
+	String,
+	Int,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerInfo {
+	pub name: String,
+	pub kind: LayerKind,
+	pub value_count: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Topic {
