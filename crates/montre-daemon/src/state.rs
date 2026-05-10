@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, RwLock};
 
-use montre_index::Corpus;
 use montre_query::executor::Hit;
 use uuid::Uuid;
 
@@ -33,7 +32,7 @@ pub(crate) struct ResultEntry {
 }
 
 pub(crate) enum Outbound {
-	Notification(serde_json::Value),
+	Message(serde_json::Value),
 }
 
 pub(crate) struct Connection {
@@ -42,7 +41,6 @@ pub(crate) struct Connection {
 }
 
 pub(crate) struct State {
-	corpus: Arc<Corpus>,
 	corpus_id: String,
 	daemon_epoch: u64,
 	results: Arc<RwLock<ResultsTable>>,
@@ -55,10 +53,8 @@ pub(crate) struct State {
 }
 
 impl State {
-	pub(crate) fn new(corpus: Arc<Corpus>, daemon_epoch: u64) -> Self {
-		let corpus_id = corpus.name().to_string();
+	pub(crate) fn new(corpus_id: String, daemon_epoch: u64) -> Self {
 		Self {
-			corpus,
 			corpus_id,
 			daemon_epoch,
 			results: Arc::new(RwLock::new(HashMap::new())),
@@ -71,14 +67,12 @@ impl State {
 		}
 	}
 
-	pub(crate) fn corpus(&self) -> Arc<Corpus> {
-		Arc::clone(&self.corpus)
-	}
-
+	#[allow(dead_code)]
 	pub(crate) fn results(&self) -> Arc<RwLock<ResultsTable>> {
 		Arc::clone(&self.results)
 	}
 
+	#[allow(dead_code)]
 	pub(crate) fn corpus_id(&self) -> &str {
 		&self.corpus_id
 	}
@@ -618,7 +612,7 @@ fn try_send_outbound(
 	payload: serde_json::Value,
 	process_id: ProcessId,
 ) -> Result<(), ()> {
-	match tx.try_send(Outbound::Notification(payload)) {
+	match tx.try_send(Outbound::Message(payload)) {
 		Ok(()) => Ok(()),
 		Err(std::sync::mpsc::TrySendError::Full(_)) => {
 			tracing::warn!(
@@ -631,6 +625,7 @@ fn try_send_outbound(
 	}
 }
 
+#[allow(dead_code)]
 pub(crate) enum Command {
 	Register {
 		params: RegisterParams,
@@ -767,5 +762,332 @@ pub(crate) fn run(mut state: State, commands: Receiver<Command>) {
 				let _ = reply.send(());
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::protocol::{InterestKind, ProcessKind};
+	use std::sync::mpsc::sync_channel;
+
+	fn make_state() -> State {
+		State::new("test-corpus".to_string(), 1)
+	}
+
+	fn dummy_outbound() -> SyncSender<Outbound> {
+		let (tx, _rx) = sync_channel(256);
+		tx
+	}
+
+	fn make_register_params(kind: ProcessKind) -> RegisterParams {
+		RegisterParams {
+			protocol_version: PROTOCOL_VERSION,
+			kind,
+			label: None,
+			provides: vec![],
+			consumes: vec![],
+		}
+	}
+
+	fn register(state: &mut State) -> ProcessId {
+		state
+			.register(make_register_params(ProcessKind::External), dummy_outbound())
+			.unwrap()
+			.process_id
+	}
+
+	#[test]
+	fn register_happy_path() {
+		let mut state = make_state();
+		let reply = state
+			.register(make_register_params(ProcessKind::External), dummy_outbound())
+			.unwrap();
+		assert_eq!(reply.process_id, 1);
+		assert_eq!(reply.daemon_epoch, 1);
+		assert_eq!(reply.protocol_version, PROTOCOL_VERSION);
+	}
+
+	#[test]
+	fn register_assigns_increasing_ids() {
+		let mut state = make_state();
+		let r1 = register(&mut state);
+		let r2 = register(&mut state);
+		assert_eq!(r1, 1);
+		assert_eq!(r2, 2);
+	}
+
+	#[test]
+	fn register_version_mismatch() {
+		let mut state = make_state();
+		let mut params = make_register_params(ProcessKind::External);
+		params.protocol_version = 999;
+		let err = state.register(params, dummy_outbound()).unwrap_err();
+		assert_eq!(err.code, error_codes::PROTOCOL_VERSION_MISMATCH);
+	}
+
+	#[test]
+	fn register_capabilities_includes_all_anchor_kinds() {
+		let mut state = make_state();
+		let reply = state
+			.register(make_register_params(ProcessKind::External), dummy_outbound())
+			.unwrap();
+		for kind in SUPPORTED_ANCHOR_KINDS {
+			assert!(
+				reply.capabilities.anchor_kinds.iter().any(|k| k == kind),
+				"expected capability '{}' present",
+				kind,
+			);
+		}
+	}
+
+	#[test]
+	fn unregister_drops_anchors_involving_process() {
+		let mut state = make_state();
+		let p1 = register(&mut state);
+		let p2 = register(&mut state);
+		let anchor_id = state
+			.anchor_create(p1, p2, AnchorKind::SentenceMirror)
+			.unwrap();
+		assert!(state.anchors.contains_key(&anchor_id));
+
+		state.unregister(p1);
+		assert!(!state.anchors.contains_key(&anchor_id));
+	}
+
+	#[test]
+	fn unregister_removes_from_subscriptions() {
+		let mut state = make_state();
+		let pid = register(&mut state);
+		state.subscribe(pid, Topic::RosterChanged).unwrap();
+		assert!(state.subscriptions[&Topic::RosterChanged].contains(&pid));
+
+		state.unregister(pid);
+		assert!(!state.subscriptions[&Topic::RosterChanged].contains(&pid));
+	}
+
+	#[test]
+	fn anchor_create_unknown_master_rejected() {
+		let mut state = make_state();
+		let p = register(&mut state);
+		let err = state
+			.anchor_create(999, p, AnchorKind::SentenceMirror)
+			.unwrap_err();
+		assert_eq!(err.code, error_codes::PROCESS_NOT_FOUND);
+	}
+
+	#[test]
+	fn anchor_create_unknown_follower_rejected() {
+		let mut state = make_state();
+		let p = register(&mut state);
+		let err = state
+			.anchor_create(p, 999, AnchorKind::SentenceMirror)
+			.unwrap_err();
+		assert_eq!(err.code, error_codes::PROCESS_NOT_FOUND);
+	}
+
+	#[test]
+	fn anchor_create_self_loop_rejected_as_cycle() {
+		let mut state = make_state();
+		let p = register(&mut state);
+		let err = state
+			.anchor_create(p, p, AnchorKind::SentenceMirror)
+			.unwrap_err();
+		assert_eq!(err.code, error_codes::ANCHOR_CYCLE);
+	}
+
+	#[test]
+	fn anchor_create_two_node_cycle_rejected() {
+		let mut state = make_state();
+		let p1 = register(&mut state);
+		let p2 = register(&mut state);
+		state
+			.anchor_create(p1, p2, AnchorKind::SentenceMirror)
+			.unwrap();
+		let err = state
+			.anchor_create(p2, p1, AnchorKind::SentenceMirror)
+			.unwrap_err();
+		assert_eq!(err.code, error_codes::ANCHOR_CYCLE);
+	}
+
+	#[test]
+	fn anchor_create_three_node_cycle_rejected() {
+		let mut state = make_state();
+		let p1 = register(&mut state);
+		let p2 = register(&mut state);
+		let p3 = register(&mut state);
+		state
+			.anchor_create(p1, p2, AnchorKind::SentenceMirror)
+			.unwrap();
+		state
+			.anchor_create(p2, p3, AnchorKind::SentenceMirror)
+			.unwrap();
+		let err = state
+			.anchor_create(p3, p1, AnchorKind::SentenceMirror)
+			.unwrap_err();
+		assert_eq!(err.code, error_codes::ANCHOR_CYCLE);
+	}
+
+	#[test]
+	fn anchor_remove_unknown_rejected() {
+		let mut state = make_state();
+		let err = state.anchor_remove(999).unwrap_err();
+		assert_eq!(err.code, error_codes::ANCHOR_NOT_FOUND);
+	}
+
+	#[test]
+	fn insert_result_returns_prefixed_handle() {
+		let mut state = make_state();
+		let handle = state.insert_result("foo".to_string(), vec![]);
+		assert!(handle.starts_with("r-"), "handle = {}", handle);
+		assert!(handle.len() > "r-".len());
+	}
+
+	#[test]
+	fn insert_result_distinct_handles() {
+		let mut state = make_state();
+		let h1 = state.insert_result("foo".to_string(), vec![]);
+		let h2 = state.insert_result("foo".to_string(), vec![]);
+		assert_ne!(h1, h2);
+	}
+
+	#[test]
+	fn save_result_duplicate_name_rejected() {
+		let mut state = make_state();
+		let h1 = state.insert_result("foo".to_string(), vec![]);
+		let h2 = state.insert_result("foo".to_string(), vec![]);
+		state.save_result(h1, "named".to_string()).unwrap();
+		let err = state.save_result(h2, "named".to_string()).unwrap_err();
+		assert_eq!(err.code, error_codes::NAMED_RESULT_ALREADY_EXISTS);
+	}
+
+	#[test]
+	fn save_result_invalid_handle_rejected() {
+		let mut state = make_state();
+		let err = state
+			.save_result("r-nonexistent".to_string(), "named".to_string())
+			.unwrap_err();
+		assert_eq!(err.code, error_codes::RESULT_HANDLE_INVALID);
+	}
+
+	#[test]
+	fn materialize_unknown_name_rejected() {
+		let mut state = make_state();
+		let err = state.materialize_result("absent".to_string()).unwrap_err();
+		assert_eq!(err.code, error_codes::NAMED_RESULT_NOT_FOUND);
+	}
+
+	#[test]
+	fn materialize_already_materialized_rejected() {
+		let mut state = make_state();
+		let h = state.insert_result("foo".to_string(), vec![]);
+		state.save_result(h, "named".to_string()).unwrap();
+		state.materialize_result("named".to_string()).unwrap();
+		let err = state.materialize_result("named".to_string()).unwrap_err();
+		assert_eq!(err.code, error_codes::RESULT_ALREADY_MATERIALIZED);
+	}
+
+	#[test]
+	fn delete_named_removes_handle_and_table_entry() {
+		let mut state = make_state();
+		let h = state.insert_result("foo".to_string(), vec![]);
+		state.save_result(h.clone(), "named".to_string()).unwrap();
+		assert!(state.results.read().unwrap().contains_key(&h));
+
+		state.delete_named("named".to_string()).unwrap();
+		assert!(!state.results.read().unwrap().contains_key(&h));
+		assert!(!state.named_results.contains_key("named"));
+	}
+
+	#[test]
+	fn delete_named_unknown_rejected() {
+		let mut state = make_state();
+		let err = state.delete_named("absent".to_string()).unwrap_err();
+		assert_eq!(err.code, error_codes::NAMED_RESULT_NOT_FOUND);
+	}
+
+	#[test]
+	fn discard_handle_session_form_removed() {
+		let mut state = make_state();
+		let h = state.insert_result("foo".to_string(), vec![]);
+		assert!(state.results.read().unwrap().contains_key(&h));
+
+		state.discard_handle(h.clone());
+		assert!(!state.results.read().unwrap().contains_key(&h));
+	}
+
+	#[test]
+	fn discard_handle_named_is_no_op() {
+		let mut state = make_state();
+		let h = state.insert_result("foo".to_string(), vec![]);
+		state.save_result(h.clone(), "named".to_string()).unwrap();
+
+		state.discard_handle(h.clone());
+		assert!(state.results.read().unwrap().contains_key(&h));
+		assert!(state.named_results.contains_key("named"));
+	}
+
+	fn make_info(kind: ProcessKind, provides: Vec<InterestKind>) -> ProcessInfo {
+		ProcessInfo {
+			id: 1,
+			kind,
+			label: None,
+			provides,
+			consumes: vec![],
+			current_interest: None,
+		}
+	}
+
+	#[test]
+	fn roster_filter_kind_match_and_mismatch() {
+		let info = make_info(ProcessKind::Reader, vec![]);
+		let filter = RosterFilter {
+			kinds: vec![ProcessKind::Reader],
+			..Default::default()
+		};
+		assert!(roster_filter_matches(&filter, &info));
+
+		let filter = RosterFilter {
+			kinds: vec![ProcessKind::Kwic],
+			..Default::default()
+		};
+		assert!(!roster_filter_matches(&filter, &info));
+	}
+
+	#[test]
+	fn roster_filter_provides_any_of() {
+		let info = make_info(
+			ProcessKind::Reader,
+			vec![InterestKind::Sentence, InterestKind::Document],
+		);
+		let filter = RosterFilter {
+			provides_any_of: vec![InterestKind::Sentence],
+			..Default::default()
+		};
+		assert!(roster_filter_matches(&filter, &info));
+
+		let filter = RosterFilter {
+			provides_any_of: vec![InterestKind::Hit],
+			..Default::default()
+		};
+		assert!(!roster_filter_matches(&filter, &info));
+	}
+
+	#[test]
+	fn roster_filter_combines_with_and() {
+		let info = make_info(ProcessKind::Reader, vec![InterestKind::Sentence]);
+		let filter = RosterFilter {
+			kinds: vec![ProcessKind::Reader],
+			provides_any_of: vec![InterestKind::Sentence],
+			..Default::default()
+		};
+		assert!(roster_filter_matches(&filter, &info));
+
+		let filter = RosterFilter {
+			kinds: vec![ProcessKind::Reader],
+			provides_any_of: vec![InterestKind::Hit],
+			..Default::default()
+		};
+		assert!(!roster_filter_matches(&filter, &info));
 	}
 }
