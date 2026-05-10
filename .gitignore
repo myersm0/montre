@@ -8,3 +8,17 @@ Cargo.lock
 *.idx
 benches/data
 .meta
+716*
+artifact_stage/
+corpus.toml
+my-corpus/
+eltec.toml
+eltec/
+isosceles.toml
+isosceles/
+maupassant.toml
+maupassant/
+poe.toml
+single-component/
+poe/
+*tar.gz
