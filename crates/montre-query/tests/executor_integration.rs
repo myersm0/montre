@@ -651,7 +651,7 @@ fn parallel_corpus_structure() {
 	let corpus = build_parallel_corpus();
 	assert_eq!(corpus.components().len(), 2);
 	assert_eq!(corpus.document_names().len(), 4);
-	assert!(corpus.alignment_metas().len() == 1);
+	assert!(corpus.alignments().len() == 1);
 }
 
 #[test]

@@ -204,7 +204,7 @@ impl Corpus {
 	}
 
 	#[inline]
-	pub fn alignment_metas(&self) -> &[AlignmentMeta] {
+	pub fn alignments(&self) -> &[AlignmentMeta] {
 		&self.meta.alignments
 	}
 

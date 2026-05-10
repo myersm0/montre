@@ -532,9 +532,9 @@ fn cmd_info(corpus_path: PathBuf) -> Result<()> {
 		}
 	}
 
-	if !corpus.alignment_metas().is_empty() {
+	if !corpus.alignments().is_empty() {
 		println!("\nAlignments:");
-		for align in corpus.alignment_metas() {
+		for align in corpus.alignments() {
 			println!(
 				"  {} ({} -> {}, {} layer, {} edges)",
 				align.name,
