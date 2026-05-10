@@ -1,0 +1,15 @@
+[package]
+name = "montre-daemon"
+description = "Session daemon for the Montre corpus query engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+montre-core = { workspace = true }
+montre-index = { workspace = true }
+montre-query = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

@@ -117,6 +117,21 @@ enum Commands {
 		#[arg(long, value_delimiter = ',', help = "Restrict to named document(s)")]
 		document: Vec<String>,
 	},
+
+	/// Run the session daemon for a corpus
+	Serve {
+		corpus: PathBuf,
+
+		#[arg(long, help = "Override the auto-derived socket path")]
+		socket_path: Option<PathBuf>,
+
+		#[arg(
+			long,
+			default_value = "600",
+			help = "Idle shutdown timeout in seconds (0 disables)",
+		)]
+		idle_timeout: u64,
+	},
 }
 
 fn main() -> Result<()> {
@@ -177,6 +192,11 @@ fn main() -> Result<()> {
 			component,
 			document,
 		} => cmd_vocab(corpus, layer, component, document),
+		Commands::Serve {
+			corpus,
+			socket_path,
+			idle_timeout,
+		} => cmd_serve(corpus, socket_path, idle_timeout),
 	}
 }
 
@@ -634,6 +654,26 @@ fn cmd_layers(corpus_path: PathBuf) -> Result<()> {
 	}
 
 	Ok(())
+}
+
+fn cmd_serve(
+	corpus_path: PathBuf,
+	socket_path: Option<PathBuf>,
+	idle_timeout_secs: u64,
+) -> Result<()> {
+	let idle_timeout = if idle_timeout_secs == 0 {
+		None
+	} else {
+		Some(std::time::Duration::from_secs(idle_timeout_secs))
+	};
+
+	let options = montre_daemon::ServeOptions {
+		corpus_path,
+		socket_path,
+		idle_timeout,
+	};
+
+	montre_daemon::serve(options).map_err(anyhow::Error::from)
 }
 
 fn resolve_cli_layer_name(name: &str) -> &str {

@@ -14,6 +14,7 @@ montre-core = { workspace = true }
 montre-index = { workspace = true }
 montre-query = { workspace = true }
 montre-build = { workspace = true }
+montre-daemon = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
