@@ -31,6 +31,11 @@ pub use spacing::SpacingIndex;
 pub use empty_nodes::{EmptyNode, EmptyNodeStore};
 pub use lexicon::{Lexicon, InMemoryLexicon};
 
+/// Common traits re-exported for ergonomic bulk import.
+pub mod prelude {
+	pub use crate::{ForwardIndex, InvertedIndex, SpanIndex};
+}
+
 // Build helpers (consumed by montre-build)
 pub use forward_flat::{write_flat_forward, write_mfwd, LayerBuild, build_dict_encoded_layer, build_dense_numeric_layer, is_numeric_layer};
 pub use spans_flat::write_flat_spans;
