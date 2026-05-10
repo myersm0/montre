@@ -13,6 +13,7 @@ montre-query = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+time = { version = "0.3", features = ["formatting"] }
 tracing = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 

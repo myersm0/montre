@@ -135,6 +135,7 @@ pub struct ResultMetadata {
 	pub handle: ResultHandle,
 	pub query: String,
 	pub created_at: String,
+	pub materialized_at: Option<String>,
 	pub hit_count: u64,
 	pub corpus_id: String,
 	pub name: Option<String>,

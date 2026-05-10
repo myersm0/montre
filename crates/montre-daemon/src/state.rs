@@ -221,6 +221,7 @@ impl State {
 			handle: handle.clone(),
 			query: cql.clone(),
 			created_at: now_rfc3339(),
+			materialized_at: None,
 			hit_count: hits.len() as u64,
 			corpus_id: self.corpus_id.clone(),
 			name: None,
@@ -301,7 +302,7 @@ impl State {
 				metadata: existing.metadata.clone(),
 			};
 			next.metadata.form = ResultForm::Materialized;
-			next.metadata.created_at = now_rfc3339();
+			next.metadata.materialized_at = Some(now_rfc3339());
 			Arc::new(next)
 		};
 
@@ -604,7 +605,9 @@ fn generate_handle() -> ResultHandle {
 }
 
 fn now_rfc3339() -> String {
-	String::new()
+	time::OffsetDateTime::now_utc()
+		.format(&time::format_description::well_known::Rfc3339)
+		.unwrap_or_default()
 }
 
 fn try_send_outbound(
@@ -985,6 +988,29 @@ mod tests {
 		state.materialize_result("named".to_string()).unwrap();
 		let err = state.materialize_result("named".to_string()).unwrap_err();
 		assert_eq!(err.code, error_codes::RESULT_ALREADY_MATERIALIZED);
+	}
+
+	#[test]
+	fn materialize_sets_materialized_at_and_preserves_created_at() {
+		let mut state = make_state();
+		let h = state.insert_result("foo".to_string(), vec![]);
+		state.save_result(h.clone(), "named".to_string()).unwrap();
+
+		let created_at_before = state
+			.results
+			.read()
+			.unwrap()
+			.get(&h)
+			.unwrap()
+			.metadata
+			.created_at
+			.clone();
+		assert!(state.results.read().unwrap().get(&h).unwrap().metadata.materialized_at.is_none());
+
+		let metadata = state.materialize_result("named".to_string()).unwrap();
+		assert_eq!(metadata.created_at, created_at_before);
+		assert!(metadata.materialized_at.is_some());
+		assert!(!metadata.materialized_at.as_ref().unwrap().is_empty());
 	}
 
 	#[test]

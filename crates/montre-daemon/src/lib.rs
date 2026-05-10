@@ -60,7 +60,7 @@ pub fn serve(options: ServeOptions) -> Result<(), DaemonError> {
 }
 
 fn derive_corpus_id(canonical: &Path) -> String {
-	hex_prefix(canonical, 32)
+	hex_prefix(canonical, 16)
 }
 
 fn derive_socket_filename(canonical: &Path) -> String {
@@ -132,7 +132,7 @@ mod tests {
 	#[test]
 	fn corpus_id_format() {
 		let id = derive_corpus_id(Path::new("/some/path"));
-		assert_eq!(id.len(), 32);
+		assert_eq!(id.len(), 16);
 		assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
 	}
 
