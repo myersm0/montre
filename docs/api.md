@@ -319,7 +319,24 @@ BuildError::Alignment(String)
 
 ## C FFI
 
-The `montre-ffi` crate exports 78 `extern "C"` functions across eight modules. All string arguments are `*const c_char` (null-terminated). All returned strings are owned by Rust; copy and free with `montre_string_free`.
+The `montre-ffi` crate exports 78 `extern "C"` functions across eight modules. All string arguments are `*const c_char` (null-terminated).
+
+### Ownership and lifetimes
+
+Every pointer or array returned by an FFI function is allocated by Rust and owned by the caller. Free each return type with the matching deallocator below; failing to do so leaks. Passing a foreign pointer (one not allocated by Montre) to any of these is undefined behavior.
+
+| Return type | Free with | Notes |
+|---|---|---|
+| `void *` (corpus handle) | `montre_corpus_close` | one per `montre_corpus_open` |
+| `void *` (hitlist handle) | `montre_hitlist_free` | one per `montre_query`, `montre_query_in_component`, or `montre_project` |
+| `char *` | `montre_string_free` | NULL on absent value or error |
+| `char **` | `montre_string_array_free(arr, len)` | pass the `out_len` returned by the producing call |
+| `int32_t *` | `montre_i32_array_free(arr, len)` | |
+| `uint32_t *` | `montre_u32_array_free(arr, len)` | |
+| `uint64_t *` | `montre_u64_array_free(arr, len)` | |
+| `const char *` from `montre_last_error` | do not free | thread-local static, valid until the next FFI call on this thread |
+
+Out-parameters (`out_start`, `out_end`, `out_len`, and similar) are caller-allocated and only written by the FFI function. Where a function documents an out-parameter as nullable, passing NULL skips that write — useful when you only need the function's return value.
 
 ### Error handling
 
@@ -566,7 +583,7 @@ corpus/
 └── alignments.bin       # alignment edges (optional, only for multi-component corpora)
 ```
 
-Index version is stored in `corpus.json` and checked on load. Current version: 5.
+Index version is stored in `corpus.json` and checked on load.
 
 The `forward.bin`, `spans.bin`, `sentence_ids.bin`, and `mwt.bin` files use custom flat binary formats designed for memory-mapped access. They are opened via `mmap` on `Corpus::open` with no deserialization — the OS pages data into RAM on demand. The `inverted.bin` and `lexicon.bin` files are still bincode-serialized and deserialized into heap structures on open. The `spacing.bin` file contains a serialized roaring bitmap with a small header. The `empty_nodes.json` file is deserialized into memory on open.
 

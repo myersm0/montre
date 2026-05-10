@@ -36,14 +36,14 @@ montre count my-corpus/ '[pos="NOUN"]' --by-component
 
 # Filter
 montre query my-corpus/ '[pos="ADJ"] [pos="NOUN"]' --document la-parure
-montre query my-corpus/ '[pos="ADJ"] [pos="NOUN"]' --component fr
+montre query my-corpus/ '[pos="ADJ"] [pos="NOUN"]' --component maupassant-fr
 
 # Inspect
 montre info my-corpus/
 montre docs my-corpus/
 montre layers my-corpus/
 montre vocab my-corpus/ pos
-montre vocab my-corpus/ lemma --top 50 --component fr
+montre vocab my-corpus/ lemma --top 50 --component maupassant-fr
 ```
 
 ## Query language
@@ -109,7 +109,7 @@ Montre preserves the full UD annotation structure:
 
 ### Component and document filtering
 ```cql
-[pos="NOUN"] within component:fr
+[pos="NOUN"] within component:"maupassant-fr"
 [pos="ADJ"] [pos="NOUN"] within doc:"la-parure","boule-de-suif"
 ```
 
@@ -135,9 +135,9 @@ Montre treats a parallel corpus as a single object with multiple ***components**
 - Alignment projection between components
 
 ### Example
-```cql
-# Query French, project to English
-[lemma="maison"] within component:fr =labse=>
+```bash
+# Query French and project the matches to English via the labse alignment
+montre query my-corpus '[lemma="maison"] within component:"maupassant-fr" =labse=>'
 ```
 
 This enables:
@@ -195,8 +195,8 @@ On a 1.5M token corpus (Maupassant French/English, Apple M4 Max):
 ## Bindings
 Montre exposes a C FFI for embedding in other languages.
 
-### Julia (almost complete)
-**[Montre.jl](https://github.com/myersm0/Montre.jl)**
+### Julia
+**[Montre.jl](https://github.com/myersm0/Montre.jl)** — registered Julia package.
 ```julia
 using Montre
 
@@ -208,8 +208,10 @@ for line in concordance(corpus, hits)
 end
 ```
 
-### Python (early)
-Bindings via PyO3 are in progress.
+### Python (planned)
+PyO3 bindings are in early prototyping and not yet usable.
+
+Planned API:
 ```python
 import montre
 
