@@ -218,6 +218,108 @@ pub struct LayerInfo {
 	pub value_count: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AnnotationValue {
+	Int(i64),
+	String(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextSurfaceParams {
+	pub start: u64,
+	pub end: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextSurfaceReply {
+	pub surface: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextSentenceParams {
+	pub doc: u32,
+	pub sent: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextSentenceReply {
+	pub span: Span,
+	pub surface: String,
+	pub sentence_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextSentencesParams {
+	pub doc: u32,
+	pub sent_start: u32,
+	pub sent_end: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SentenceEntry {
+	pub sent: u32,
+	pub span: Span,
+	pub surface: String,
+	pub sentence_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextSentencesReply {
+	pub sentences: Vec<SentenceEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextDocumentParams {
+	pub doc: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextDocumentReply {
+	pub index: u32,
+	pub name: String,
+	pub component: String,
+	pub span: Span,
+	pub sentence_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextAnnotationsParams {
+	pub positions: Vec<u64>,
+	pub layers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnnotationEntry {
+	pub position: u64,
+	pub layer: String,
+	pub value: AnnotationValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextAnnotationsReply {
+	pub values: Vec<AnnotationEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextAnnotationsRangeParams {
+	pub start: u64,
+	pub end: u64,
+	#[serde(default)]
+	pub layers: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnnotationRow {
+	pub position: u64,
+	pub values: HashMap<String, AnnotationValue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextAnnotationsRangeReply {
+	pub rows: Vec<AnnotationRow>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Topic {
