@@ -1298,3 +1298,40 @@ fn deps_with_empty_node_references() {
 	let corpus = build_corpus(EMPTY_NODE_DATA);
 	assert_eq!(corpus.forward().get_str(5, "deps"), Some("2:obj|4:obj"));
 }
+
+#[test]
+fn document_navigation_helpers() {
+	let doc_a = "\
+1\tle\tle\tDET\t_\t_\t0\troot\t_\t_
+2\tchat\tchat\tNOUN\t_\t_\t0\troot\t_\t_
+
+1\tla\tla\tDET\t_\t_\t0\troot\t_\t_
+2\tsouris\tsouris\tNOUN\t_\t_\t0\troot\t_\t_
+";
+	let doc_b = "\
+1\tle\tle\tDET\t_\t_\t0\troot\t_\t_
+2\tchien\tchien\tNOUN\t_\t_\t0\troot\t_\t_
+";
+	let corpus = build_corpus_multi_doc(&[("doc-a", doc_a), ("doc-b", doc_b)]);
+
+	// doc-a: positions 0-3 (two sentences of 2 tokens each)
+	// doc-b: positions 4-5 (one sentence of 2 tokens)
+
+	assert_eq!(corpus.document_for_position(0), Some(0));
+	assert_eq!(corpus.document_for_position(3), Some(0));
+	assert_eq!(corpus.document_for_position(4), Some(1));
+	assert_eq!(corpus.document_for_position(5), Some(1));
+	assert_eq!(corpus.document_for_position(99), None);
+
+	assert_eq!(corpus.document_for_sentence(0), Some(0));
+	assert_eq!(corpus.document_for_sentence(1), Some(0));
+	assert_eq!(corpus.document_for_sentence(2), Some(1));
+	assert_eq!(corpus.document_for_sentence(99), None);
+
+	assert_eq!(corpus.first_sentence_of_document(0), Some(0));
+	assert_eq!(corpus.last_sentence_of_document(0), Some(1));
+	assert_eq!(corpus.first_sentence_of_document(1), Some(2));
+	assert_eq!(corpus.last_sentence_of_document(1), Some(2));
+	assert_eq!(corpus.first_sentence_of_document(99), None);
+	assert_eq!(corpus.last_sentence_of_document(99), None);
+}

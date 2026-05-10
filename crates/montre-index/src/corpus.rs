@@ -234,9 +234,44 @@ impl Corpus {
 	}
 
 	pub fn document_at(&self, position: u64) -> Option<&str> {
-		let doc_spans = self.spans.spans("document")?;
-		let idx = span_containing(doc_spans, position)?;
+		let idx = self.document_for_position(position)?;
 		self.meta.document_names.get(idx).map(|s| s.as_str())
+	}
+
+	pub fn document_for_position(&self, position: u64) -> Option<usize> {
+		let doc_spans = self.spans.spans("document")?;
+		span_containing(doc_spans, position)
+	}
+
+	pub fn document_for_sentence(&self, sent_index: usize) -> Option<usize> {
+		let sent_span = self.sentence_span(sent_index)?;
+		self.document_for_position(sent_span.start)
+	}
+
+	pub fn first_sentence_of_document(&self, doc_index: usize) -> Option<usize> {
+		let doc_span = self.document_span(doc_index)?;
+		let sent_spans = self.spans.spans("sentence")?;
+		let first = sent_spans.partition_point(|s| s.start < doc_span.start);
+		if first >= sent_spans.len() || sent_spans[first].start >= doc_span.end {
+			None
+		} else {
+			Some(first)
+		}
+	}
+
+	pub fn last_sentence_of_document(&self, doc_index: usize) -> Option<usize> {
+		let doc_span = self.document_span(doc_index)?;
+		let sent_spans = self.spans.spans("sentence")?;
+		let after = sent_spans.partition_point(|s| s.start < doc_span.end);
+		if after == 0 {
+			return None;
+		}
+		let last = after - 1;
+		if sent_spans[last].start < doc_span.start {
+			None
+		} else {
+			Some(last)
+		}
 	}
 
 	pub fn document_index_by_name(&self, name: &str) -> Option<usize> {
