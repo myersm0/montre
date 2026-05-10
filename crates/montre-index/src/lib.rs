@@ -15,6 +15,9 @@ pub mod corpus;
 use std::path::Path;
 use thiserror::Error;
 
+// Re-exports from montre-core (foundational types used throughout the API surface)
+pub use montre_core::{Position, Span};
+
 // Reading API
 pub use corpus::{Corpus, CorpusMeta, ComponentMeta, AlignmentMeta, AlignmentIndex};
 pub use inverted::{InvertedIndex, InMemoryInverted};
