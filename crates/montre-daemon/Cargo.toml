@@ -18,4 +18,5 @@ tracing = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+montre-build = { workspace = true }
 tempfile = "3.14"

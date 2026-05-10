@@ -67,7 +67,6 @@ impl State {
 		}
 	}
 
-	#[allow(dead_code)]
 	pub(crate) fn results(&self) -> Arc<RwLock<ResultsTable>> {
 		Arc::clone(&self.results)
 	}

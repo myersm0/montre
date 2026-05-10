@@ -2,11 +2,14 @@ use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::mpsc::{sync_channel, Receiver, Sender, SyncSender};
+use std::sync::{Arc, RwLock};
 use std::thread;
+
+use montre_index::Corpus;
 
 use crate::protocol::error_codes;
 use crate::protocol::{ProcessId, ProtocolError, RegisterParams, RegisterReply};
-use crate::state::{Command, Outbound};
+use crate::state::{Command, Outbound, ResultsTable};
 
 pub(crate) const MAX_PAYLOAD_SIZE: usize = 16 * 1024 * 1024;
 const OUTBOUND_QUEUE_DEPTH: usize = 256;
@@ -114,11 +117,17 @@ pub(crate) struct RpcContext {
 	pub process_id: Option<ProcessId>,
 	pub state_tx: Sender<Command>,
 	pub outbound_tx: SyncSender<Outbound>,
+	#[allow(dead_code)]
+	pub corpus: Arc<Corpus>,
+	#[allow(dead_code)]
+	pub results: Arc<RwLock<ResultsTable>>,
 }
 
 pub(crate) fn run_listener(
 	socket_path: &Path,
 	state_tx: Sender<Command>,
+	corpus: Arc<Corpus>,
+	results: Arc<RwLock<ResultsTable>>,
 ) -> io::Result<()> {
 	if socket_path.exists() {
 		std::fs::remove_file(socket_path)?;
@@ -130,7 +139,9 @@ pub(crate) fn run_listener(
 		match stream {
 			Ok(stream) => {
 				let tx = state_tx.clone();
-				thread::spawn(move || run_connection(stream, tx));
+				let corpus = Arc::clone(&corpus);
+				let results = Arc::clone(&results);
+				thread::spawn(move || run_connection(stream, tx, corpus, results));
 			}
 			Err(e) => {
 				tracing::warn!(error = %e, "accept failed");
@@ -140,7 +151,12 @@ pub(crate) fn run_listener(
 	Ok(())
 }
 
-fn run_connection(stream: UnixStream, state_tx: Sender<Command>) {
+fn run_connection(
+	stream: UnixStream,
+	state_tx: Sender<Command>,
+	corpus: Arc<Corpus>,
+	results: Arc<RwLock<ResultsTable>>,
+) {
 	let read_stream = match stream.try_clone() {
 		Ok(s) => s,
 		Err(e) => {
@@ -154,7 +170,7 @@ fn run_connection(stream: UnixStream, state_tx: Sender<Command>) {
 
 	let writer_handle = thread::spawn(move || run_writer(write_stream, outbound_rx));
 
-	run_reader(read_stream, state_tx, outbound_tx);
+	run_reader(read_stream, state_tx, outbound_tx, corpus, results);
 
 	let _ = writer_handle.join();
 }
@@ -179,11 +195,15 @@ fn run_reader(
 	mut stream: UnixStream,
 	state_tx: Sender<Command>,
 	outbound_tx: SyncSender<Outbound>,
+	corpus: Arc<Corpus>,
+	results: Arc<RwLock<ResultsTable>>,
 ) {
 	let mut ctx = RpcContext {
 		process_id: None,
 		state_tx: state_tx.clone(),
 		outbound_tx: outbound_tx.clone(),
+		corpus,
+		results,
 	};
 
 	loop {
@@ -303,8 +323,45 @@ fn handle_register(
 mod tests {
 	use super::*;
 	use crate::state;
+	use std::collections::HashMap;
 	use std::io::Cursor;
+	use std::path::PathBuf;
 	use std::sync::mpsc::channel;
+	use std::sync::OnceLock;
+	use tempfile::TempDir;
+
+	fn corpus_fixture() -> &'static Path {
+		static FIXTURE: OnceLock<(TempDir, PathBuf)> = OnceLock::new();
+		let (_keep, path) = FIXTURE.get_or_init(|| {
+			let temp = TempDir::new().expect("tempdir");
+			let out = temp.path().join("corpus");
+			let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+				.join("../../testdata/parallel/corpus.toml");
+			montre_build::MultiCorpusBuilder::from_manifest(&manifest)
+				.expect("manifest load")
+				.build(&out)
+				.expect("corpus build");
+			(temp, out)
+		});
+		path.as_path()
+	}
+
+	fn open_test_corpus() -> Arc<Corpus> {
+		Arc::new(montre_index::open(corpus_fixture()).expect("corpus open"))
+	}
+
+	fn make_context(
+		state_tx: Sender<Command>,
+		outbound_tx: SyncSender<Outbound>,
+	) -> RpcContext {
+		RpcContext {
+			process_id: None,
+			state_tx,
+			outbound_tx,
+			corpus: open_test_corpus(),
+			results: Arc::new(RwLock::new(HashMap::new())),
+		}
+	}
 
 	#[test]
 	fn framing_roundtrip() {
@@ -463,11 +520,7 @@ mod tests {
 
 		{
 			let (outbound_tx, _outbound_rx) = sync_channel(OUTBOUND_QUEUE_DEPTH);
-			let mut ctx = RpcContext {
-				process_id: None,
-				state_tx: state_tx.clone(),
-				outbound_tx,
-			};
+			let mut ctx = make_context(state_tx.clone(), outbound_tx);
 
 			let params = serde_json::json!({
 				"protocol_version": 1,
@@ -492,11 +545,7 @@ mod tests {
 
 		{
 			let (outbound_tx, _outbound_rx) = sync_channel(OUTBOUND_QUEUE_DEPTH);
-			let mut ctx = RpcContext {
-				process_id: None,
-				state_tx: state_tx.clone(),
-				outbound_tx,
-			};
+			let mut ctx = make_context(state_tx.clone(), outbound_tx);
 
 			let err = dispatch_request("query.execute", None, &mut ctx).unwrap_err();
 			assert_eq!(err.code, error_codes::NOT_REGISTERED);
@@ -514,11 +563,7 @@ mod tests {
 
 		{
 			let (outbound_tx, _outbound_rx) = sync_channel(OUTBOUND_QUEUE_DEPTH);
-			let mut ctx = RpcContext {
-				process_id: None,
-				state_tx: state_tx.clone(),
-				outbound_tx,
-			};
+			let mut ctx = make_context(state_tx.clone(), outbound_tx);
 
 			let params = serde_json::json!({
 				"protocol_version": 1,

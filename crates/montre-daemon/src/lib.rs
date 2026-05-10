@@ -32,7 +32,7 @@ pub enum DaemonError {
 
 pub fn serve(options: ServeOptions) -> Result<(), DaemonError> {
 	tracing::info!(corpus = %options.corpus_path.display(), "opening corpus");
-	let _corpus = Arc::new(montre_index::open(&options.corpus_path)?);
+	let corpus = Arc::new(montre_index::open(&options.corpus_path)?);
 
 	let canonical = std::fs::canonicalize(&options.corpus_path)?;
 	let corpus_id = derive_corpus_id(&canonical);
@@ -44,12 +44,13 @@ pub fn serve(options: ServeOptions) -> Result<(), DaemonError> {
 
 	let daemon_epoch = 1;
 	let state = state::State::new(corpus_id, daemon_epoch);
+	let results = state.results();
 
 	let (state_tx, state_rx) = channel();
 
 	let state_thread = thread::spawn(move || state::run(state, state_rx));
 
-	let listener_result = rpc::run_listener(&socket_path, state_tx);
+	let listener_result = rpc::run_listener(&socket_path, state_tx, corpus, results);
 
 	let _ = state_thread.join();
 
