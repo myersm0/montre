@@ -95,13 +95,9 @@ pub unsafe extern "C" fn montre_corpus_span_containing(
 	let Some(layer_str) = borrow_cstr(layer) else {
 		return -1;
 	};
-	let Some(spans) = c.spans().spans(layer_str) else {
-		return -1;
-	};
 
-	match montre_core::span_containing(spans, position) {
-		Some(idx) => {
-			let span = &spans[idx];
+	match c.spans().containing_with_index(layer_str, position) {
+		Some((idx, span)) => {
 			if !out_start.is_null() { *out_start = span.start; }
 			if !out_end.is_null() { *out_end = span.end; }
 			idx as i64

@@ -4,8 +4,12 @@ use std::collections::HashMap;
 
 pub trait SpanIndex {
 	fn spans(&self, layer: &str) -> Option<&[Span]>;
-	fn containing(&self, layer: &str, position: Position) -> Option<&Span>;
+	fn containing_with_index(&self, layer: &str, position: Position) -> Option<(usize, &Span)>;
 	fn layers(&self) -> Vec<&str>;
+
+	fn containing(&self, layer: &str, position: Position) -> Option<&Span> {
+		self.containing_with_index(layer, position).map(|(_, span)| span)
+	}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,9 +58,9 @@ impl SpanIndex for InMemorySpans {
 		self.data.get(layer).map(|v| v.as_slice())
 	}
 
-	fn containing(&self, layer: &str, position: Position) -> Option<&Span> {
+	fn containing_with_index(&self, layer: &str, position: Position) -> Option<(usize, &Span)> {
 		let spans = self.data.get(layer)?;
-		span_containing(spans, position).map(|idx| &spans[idx])
+		span_containing(spans, position).map(|idx| (idx, &spans[idx]))
 	}
 
 	fn layers(&self) -> Vec<&str> {
@@ -160,5 +164,31 @@ mod tests {
 		assert_eq!(index.containing("document", 50), Some(&Span::new(0, 100)));
 		assert_eq!(index.containing("document", 99), Some(&Span::new(0, 100)));
 		assert_eq!(index.containing("document", 100), None);
+	}
+
+	#[test]
+	fn containing_with_index_returns_correct_position() {
+		let mut index = InMemorySpans::new();
+		index.add_span("sentence", Span::new(0, 5));
+		index.add_span("sentence", Span::new(5, 12));
+		index.add_span("sentence", Span::new(12, 20));
+		index.finalize();
+
+		let spans = index.spans("sentence").unwrap();
+
+		let (idx, span) = index.containing_with_index("sentence", 0).unwrap();
+		assert_eq!(idx, 0);
+		assert_eq!(span, &spans[0]);
+
+		let (idx, span) = index.containing_with_index("sentence", 7).unwrap();
+		assert_eq!(idx, 1);
+		assert_eq!(span, &spans[1]);
+
+		let (idx, span) = index.containing_with_index("sentence", 15).unwrap();
+		assert_eq!(idx, 2);
+		assert_eq!(span, &spans[2]);
+
+		assert_eq!(index.containing_with_index("sentence", 100), None);
+		assert_eq!(index.containing_with_index("nonexistent", 0), None);
 	}
 }

@@ -109,9 +109,9 @@ impl SpanIndex for MappedSpans {
 		Some(self.layer_spans(entry))
 	}
 
-	fn containing(&self, layer: &str, position: Position) -> Option<&Span> {
+	fn containing_with_index(&self, layer: &str, position: Position) -> Option<(usize, &Span)> {
 		let spans = self.spans(layer)?;
-		montre_core::span_containing(spans, position).map(|idx| &spans[idx])
+		montre_core::span_containing(spans, position).map(|idx| (idx, &spans[idx]))
 	}
 
 	fn layers(&self) -> Vec<&str> {
@@ -132,10 +132,10 @@ impl SpanIndex for SpanStore {
 		}
 	}
 
-	fn containing(&self, layer: &str, position: Position) -> Option<&Span> {
+	fn containing_with_index(&self, layer: &str, position: Position) -> Option<(usize, &Span)> {
 		match self {
-			Self::InMemory(s) => s.containing(layer, position),
-			Self::Mapped(s) => s.containing(layer, position),
+			Self::InMemory(s) => s.containing_with_index(layer, position),
+			Self::Mapped(s) => s.containing_with_index(layer, position),
 		}
 	}
 
@@ -261,6 +261,32 @@ mod tests {
 	}
 
 	#[test]
+	fn mapped_containing_with_index() {
+		let original = build_test_spans();
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("spans.bin");
+
+		write_flat_spans(&original, &path).unwrap();
+		let mapped = MappedSpans::open(&path).unwrap();
+		let spans = mapped.spans("sentence").unwrap();
+
+		let (idx, span) = mapped.containing_with_index("sentence", 0).unwrap();
+		assert_eq!(idx, 0);
+		assert_eq!(span, &spans[0]);
+
+		let (idx, span) = mapped.containing_with_index("sentence", 7).unwrap();
+		assert_eq!(idx, 1);
+		assert_eq!(span, &spans[1]);
+
+		let (idx, span) = mapped.containing_with_index("sentence", 15).unwrap();
+		assert_eq!(idx, 2);
+		assert_eq!(span, &spans[2]);
+
+		assert_eq!(mapped.containing_with_index("sentence", 100), None);
+		assert_eq!(mapped.containing_with_index("nonexistent", 0), None);
+	}
+
+	#[test]
 	fn mapped_layers() {
 		let original = build_test_spans();
 		let dir = tempfile::tempdir().unwrap();
@@ -382,6 +408,10 @@ mod proptests {
 			prop_assert_eq!(
 				index.containing("sentence", probe),
 				mapped.containing("sentence", probe),
+			);
+			prop_assert_eq!(
+				index.containing_with_index("sentence", probe),
+				mapped.containing_with_index("sentence", probe),
 			);
 		}
 	}
