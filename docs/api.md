@@ -9,16 +9,44 @@ use montre_index::Corpus;
 
 let corpus = montre_index::open("path/to/corpus")?;
 
-corpus.token_count()       // total tokens across all components
-corpus.layers()            // &[String]: ["word", "lemma", "pos", ...]
-corpus.document_names()    // &[String]
-corpus.document_at(pos)    // Option<&str>: document name for a position
-corpus.document_index_by_name("la-parure")   // Option<usize>
-corpus.document_indices_by_name(&names)      // Vec<usize>
+// Identity and stats
+corpus.name()              // &str: corpus name from corpus.json
+corpus.path()              // &Path: directory the corpus was opened from
+corpus.token_count()       // u64: total tokens across all components
+corpus.layers()            // &[String]: indexed layer names
+corpus.span_layers()       // &[String]: span layer names
+
+// Documents
+corpus.document_names()                     // &[String]
+corpus.document_at(pos)                     // Option<&str>: name for a position
+corpus.document_for_position(pos)           // Option<usize>: index for a position
+corpus.document_index_by_name("la-parure")  // Option<usize>
+corpus.document_indices_by_name(&names)     // Vec<usize>
+
+// Sentences
+corpus.document_for_sentence(sent_idx)      // Option<usize>: containing document
+corpus.first_sentence_of_document(doc_idx)  // Option<usize>
+corpus.last_sentence_of_document(doc_idx)   // Option<usize>
+corpus.sentences_in_document(doc_idx)       // Option<Vec<(usize, Span)>>
+
+// Components and alignments
 corpus.components()        // &[ComponentMeta]
+corpus.alignments()        // &[AlignmentMeta]
 ```
 
 `Corpus` is immutable after construction, `Send + Sync`, and safe to share across threads.
+
+### Trait imports
+
+Access to the forward, inverted, and span indexes goes through three traits — `ForwardIndex`, `InvertedIndex`, and `SpanIndex` — which must be in scope to call their methods. Pull them in individually or via the prelude:
+
+```rust
+use montre_index::prelude::*;   // ForwardIndex, InvertedIndex, SpanIndex
+```
+
+The examples below name traits explicitly for clarity; either form works.
+
+The foundational types `Span` and `Position` are re-exported from `montre_index` (originally defined in `montre_core`); `use montre_index::{Span, Position};` is the canonical import.
 
 ### Query pipeline
 
@@ -139,9 +167,14 @@ let documents: Option<&[Span]> = corpus.spans().spans("document");
 // Find the span containing a position
 let span: Option<&Span> = corpus.spans().containing("sentence", position);
 
+// Same, plus the span's index into corpus.spans().spans(layer)
+let located: Option<(usize, &Span)> = corpus.spans().containing_with_index("sentence", position);
+
 // Available span layers
 let layers: Vec<&str> = corpus.spans().layers();
 ```
+
+`containing_with_index` returns the span together with its position in the layer's `&[Span]`, suitable for next/prev navigation (`spans[idx + 1]`, `spans[idx - 1]`) without a second binary search. `containing` is a thin wrapper that discards the index.
 
 ### Sentence IDs
 
@@ -223,7 +256,8 @@ pub struct ComponentMeta {
 }
 
 // Alignments
-corpus.alignment_meta("labse")         // Option<&AlignmentMeta>
+corpus.alignments()                    // &[AlignmentMeta]: enumerate all
+corpus.alignment_meta("labse")         // Option<&AlignmentMeta>: lookup by name
 corpus.alignment_edges("labse")        // Option<&[(UnitId, UnitId)]>
 
 // AlignmentMeta
