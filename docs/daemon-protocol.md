@@ -208,7 +208,7 @@ String enum: `"Position" | "Span" | "Sentence" | "Hit" | "Results" | "Document"`
 
 String enum: `"reader" | "kwic" | "conllu" | "docs" | "vocab" | "results" | "external"`.
 
-`"external"` is used by non-TUI clients (Julia, Python, scripts).
+`"external"` is the kind used by non-TUI clients (Julia, Python, scripts). The kind is a tag for filtering (`session.roster --filter.kinds`); it does not gate participation. External processes register, publish interest, become masters or followers in anchors, and subscribe to topics on equal terms with TUI processes.
 
 ### `ProcessInfo`
 
@@ -238,6 +238,21 @@ Tagged union by `type` field:
 { "type": "ConlluView" }
 ```
 
+#### Transformation matrix
+
+Each anchor kind defines (a) which master `provides` `InterestKind`s it accepts, and (b) which follower `consumes` `InterestKind`s its transformation produces. `anchor.create` rejects with error `1400` when neither side overlaps the kind's row.
+
+| AnchorKind | Accepts (master provides) | Produces (follower consumes) | Notes |
+|---|---|---|---|
+| `SentenceMirror` | `Position` \| `Span` \| `Sentence` | `Sentence` | Position/Span are widened to their containing sentence. |
+| `Alignment { name }` | `Sentence` \| `Span` | `Span` | 1→many: one notification per target. |
+| `KwicSelection` | `Hit` | `Sentence` | Containing sentence of the hit. |
+| `DocPickerSelection` | `Document` | `Document` | Inert in v1 (see below). |
+| `NamedResultsSelection` | `Results` | `Results` | Inert in v1 (see below). |
+| `ConlluView` | `Sentence` | `Sentence` | Inert in v1 (see below). |
+
+**Inert kinds.** `DocPickerSelection`, `NamedResultsSelection`, and `ConlluView` compat-accept their self→self interest pair so `anchor.create` succeeds, but the daemon's transformation returns no notifications for them in v1. Their UX semantics will be defined alongside the corresponding TUI panes; clients can create these anchors today but must not depend on receiving updates.
+
 ### `Anchor`
 
 ```json
@@ -248,6 +263,8 @@ Tagged union by `type` field:
   "kind": { "type": "Alignment", "name": "labse" }
 }
 ```
+
+Note: `Anchor` uses `master` / `follower`; `anchor.create` params use `master_id` / `follower_id`. The names diverged historically. Clients should write one form and read the other.
 
 ### `Hit`
 
@@ -272,14 +289,19 @@ Tagged union by `type` field:
   "handle": "r-3a7f...",
   "query": "[pos=\"ADJ\"] [pos=\"NOUN\"]",
   "created_at": "2026-05-10T14:30:00Z",
+  "materialized_at": null,
   "hit_count": 30672,
-  "corpus_id": "<hash>",
+  "corpus_id": "9c2f8e3a4b1d7f06",
   "name": null,
   "form": "session"
 }
 ```
 
 `name` is `null` for unnamed results, or the chosen name string after `query.save`.
+
+`materialized_at` is `null` until `query.materialize` is invoked; thereafter an RFC 3339 timestamp.
+
+`corpus_id` is the same opaque value as `CorpusInfo.stable_key` — the names diverged historically and clients should treat both as the same identity token.
 
 `form` is one of:
 - `"session"` — unnamed, daemon-lifetime only
@@ -462,7 +484,7 @@ Run a query, return only the count. Avoids hit allocation; faster for sizing che
 
 #### `query.hits`
 
-Paginated retrieval. `offset` and `limit` are required.
+Paginated retrieval. `offset` and `limit` are required. Maximum `limit` per call is **1000**; larger values fail with error `1203`.
 
 **Params**: `{ "handle": "r-3a7f...", "offset": 0, "limit": 100 }`
 
@@ -476,7 +498,7 @@ Paginated retrieval. `offset` and `limit` are required.
 }
 ```
 
-**Errors**: `1200` (handle invalid), `1203` (limit too large — max 1000 per call), `1204` (stored query no longer valid — query-backed named results only).
+**Errors**: `1200` (handle invalid), `1203` (limit exceeds maximum), `1204` (stored query no longer valid — query-backed named results only).
 
 #### `query.metadata`
 
@@ -631,12 +653,13 @@ Fetch token-level annotation values at specific positions. Use for sparse lookup
   "values": [
     { "position": 1247, "layer": "upos",  "value": "DET" },
     { "position": 1247, "layer": "lemma", "value": "le" },
+    { "position": 1247, "layer": "head",  "value": 2 },
     ...
   ]
 }
 ```
 
-For positions/layers with no value, the entry is omitted.
+For positions/layers with no value, the entry is omitted. Value types reflect the underlying layer kind: string layers emit JSON strings, int layers (e.g. `head`) emit JSON numbers. Same shape as `text.annotations_range` rows below.
 
 #### `text.annotations_range`
 
@@ -660,9 +683,7 @@ Fetch annotation values for every token in a contiguous range, organized by toke
 }
 ```
 
-Tokens with no values for any requested layer still appear in `rows` with an empty `values` object — the row index reflects the contiguous range, so consumers can iterate without gaps.
-
-Value types in the JSON output reflect the underlying layer kind: string layers (`upos`, `lemma`, `feats`, etc.) emit JSON strings; int layers (`head`, future dense numerics) emit JSON numbers. Clients already know layer types from `corpus.layer_info` and can deserialize accordingly. The same applies to `text.annotations`.
+Tokens with no values for any requested layer still appear in `rows` with an empty `values` object — the row index reflects the contiguous range, so consumers can iterate without gaps. Value types follow the same string/int convention as `text.annotations`.
 
 ### `alignment`
 
@@ -713,7 +734,7 @@ Empty array if no edge exists from the source span (gap).
 
 **Result**: `{ "anchor_id": 7 }`
 
-**Errors**: `1400` (incompatible interest types — master's `provides` and follower's `consumes` don't match for any known transformation), `1403` (anchor kind not supported by daemon — kind not present in `capabilities.anchor_kinds`), `1500` (process not found), `1402` (anchor would create a cycle).
+**Errors**: `1400` (incompatible interest types — master's `provides` and follower's `consumes` don't overlap the kind's row in the transformation matrix above), `1403` (anchor kind not supported by daemon — kind not present in `capabilities.anchor_kinds`), `1500` (process not found), `1402` (anchor would create a cycle).
 
 Daemon side-effects:
 - Adds entry to anchor table.
@@ -784,7 +805,7 @@ Sent to followers when their master's interest changes. Daemon has already appli
 }
 ```
 
-For 1→many alignment cases, `interest.type` may be `Span` covering the union of targets, or the daemon may emit multiple notifications — final shape decided during implementation; document here when settled. **Open for implementation.**
+For 1→many transformations (e.g. `Alignment` projecting to multiple target sentences), the daemon emits **one `notification.anchor_update` per target**. Followers see them in source-order; each carries the same `anchor_id` and a single transformed `interest`.
 
 ### `notification.roster_changed`
 
@@ -824,7 +845,7 @@ Sent to all clients when daemon is shutting down. No subscription required.
 { "reason": "idle_timeout", "in_seconds": 0 }
 ```
 
-`reason` values: `"idle_timeout" | "signal" | "fatal_error"`. After this notification the daemon closes connections.
+`reason` values: `"idle_timeout" | "signal" | "fatal_error"`. `in_seconds` is a hint about how long the daemon will wait before closing connections: `0` means immediate close (current v1 behavior for all reasons), positive values reserved for a future graceful-shutdown window. Clients should not rely on `in_seconds > 0` for anything load-bearing.
 
 ---
 
@@ -1064,13 +1085,13 @@ Daemon responds with `anchor_id`. KWIC user navigates to a different hit; KWIC p
   "params": { "interest": { "type": "Hit", "result": "r-3a7f...", "hit_idx": 23 } } }
 ```
 
-Daemon transforms `Hit -> Span` (extracts the hit's containing sentence span) and pushes to the reader:
+Daemon transforms `Hit -> Sentence` (resolves the hit's containing sentence) and pushes to the reader:
 ```json
 { "jsonrpc": "2.0", "method": "notification.anchor_update",
-  "params": { "anchor_id": 7, "interest": { "type": "Span", "doc": 3, "start": 1247, "end": 1289 } } }
+  "params": { "anchor_id": 7, "interest": { "type": "Sentence", "doc": 3, "sent": 142 } } }
 ```
 
-Reader scrolls to the new span and highlights it.
+Reader scrolls to the new sentence and highlights it.
 
 ### Auto-spawn cold start
 
@@ -1089,9 +1110,8 @@ User sees the reader UI come up. From their perspective there was no "daemon" �
 
 ## Open items for implementation
 
-1. **1→many alignment notification shape** — single `Span` covering union, or multiple `notification.anchor_update` events, or a new `Interest` variant for span-list. Decide during anchor implementation.
-2. **Result handle UUID format** — UUID v4 vs counter-with-prefix. Lean UUID v4 for safe cross-process identity.
-3. **Idle timeout reset granularity** — does any operation reset the timer, or only registration changes? Lean any operation.
-4. **Subscription robustness** — what happens if a subscriber is slow / backpressured? v1: bounded queue per connection, drop newest on overflow with a warning. Drop-newest is what `mpsc::try_send` gives without requiring producer-side eviction, and the cost in practice is small (an in-flight burst that overflows the queue leaves the receiver one update stale; sustained motion drains the queue quickly enough that staleness doesn't compound). If interest updates ever feel laggy under sustained cursor motion, the right primitive for interest specifically is a watch-channel (always-latest, capacity 1) — different topics can use different backpressure strategies. Roster and named-result notifications stay drop-newest FIFO regardless.
-5. **Cross-corpus operations** — explicitly out of scope for v1. Each daemon serves one corpus; clients connecting to multiple corpora open multiple connections.
-6. **Request cancellation** — no in-flight cancellation in v1. Long-running queries run to completion. Downstream callers will eventually want this — likely shape: `request.cancel(id)` operation, with cancelled requests returning a dedicated error code. Defer until a real query lags noticeably.
+1. **Result handle UUID format** — UUID v4 vs counter-with-prefix. Lean UUID v4 for safe cross-process identity.
+2. **Idle timeout reset granularity** — does any operation reset the timer, or only registration changes? Lean any operation.
+3. **Subscription robustness** — what happens if a subscriber is slow / backpressured? v1: bounded queue per connection, drop newest on overflow with a warning. Drop-newest is what `mpsc::try_send` gives without requiring producer-side eviction, and the cost in practice is small (an in-flight burst that overflows the queue leaves the receiver one update stale; sustained motion drains the queue quickly enough that staleness doesn't compound). If interest updates ever feel laggy under sustained cursor motion, the right primitive for interest specifically is a watch-channel (always-latest, capacity 1) — different topics can use different backpressure strategies. Roster and named-result notifications stay drop-newest FIFO regardless.
+4. **Cross-corpus operations** — explicitly out of scope for v1. Each daemon serves one corpus; clients connecting to multiple corpora open multiple connections.
+5. **Request cancellation** — no in-flight cancellation in v1. Long-running queries run to completion. Downstream callers will eventually want this — likely shape: `request.cancel(id)` operation, with cancelled requests returning a dedicated error code. Defer until a real query lags noticeably.
