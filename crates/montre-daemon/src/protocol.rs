@@ -360,6 +360,42 @@ pub struct AlignmentProjectReply {
 	pub targets: Vec<AlignmentTarget>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryExecuteParams {
+	pub cql: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryExecuteReply {
+	pub handle: ResultHandle,
+	pub hit_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryExecuteCountReply {
+	pub count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryHitsParams {
+	pub handle: ResultHandle,
+	pub offset: u64,
+	pub limit: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryHitsReply {
+	pub hits: Vec<Hit>,
+	pub offset: u64,
+	pub limit: u64,
+	pub total_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryMetadataParams {
+	pub handle: ResultHandle,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Topic {
