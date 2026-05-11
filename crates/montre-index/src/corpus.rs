@@ -13,7 +13,7 @@ use crate::mwt::MappedMWTs;
 use crate::sentence_ids::MappedSentenceIds;
 use crate::spacing::SpacingIndex;
 use crate::spans_flat::{MappedSpans, SpanStore};
-use crate::{ForwardIndex, IndexError, Result, SpanIndex};
+use crate::{ForwardIndex, IndexError, InvertedIndex, Result, SpanIndex};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentMeta {
@@ -221,6 +221,10 @@ impl Corpus {
 	#[inline]
 	pub fn layers(&self) -> &[String] {
 		&self.meta.layers
+	}
+
+	pub fn indexed_layers(&self) -> Vec<&str> {
+		self.inverted.layers()
 	}
 
 	#[inline]

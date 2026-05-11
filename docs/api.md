@@ -13,7 +13,8 @@ let corpus = montre_index::open("path/to/corpus")?;
 corpus.name()              // &str: corpus name from corpus.json
 corpus.path()              // &Path: directory the corpus was opened from
 corpus.token_count()       // u64: total tokens across all components
-corpus.layers()            // &[String]: indexed layer names
+corpus.layers()            // &[String]: all annotation layer names (forward-stored; string or int)
+corpus.indexed_layers()    // Vec<&str>: subset with inverted-index entries (queryable via [layer=value])
 corpus.span_layers()       // &[String]: span layer names
 
 // Documents

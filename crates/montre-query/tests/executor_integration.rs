@@ -1350,3 +1350,22 @@ fn corpus_layer_kind() {
 	assert_eq!(corpus.layer_kind("deprel"), Some(LayerKind::String));
 	assert_eq!(corpus.layer_kind("nonexistent"), None);
 }
+
+#[test]
+fn corpus_indexed_layers() {
+	let conllu = "1\tle\tle\tDET\t_\t_\t2\tdet\t_\t_
+2\tchat\tchat\tNOUN\t_\t_\t0\troot\t_\t_
+";
+	let corpus = build_corpus(conllu);
+
+	let all = corpus.layers();
+	assert!(all.contains(&"head".to_string()));
+	assert!(all.contains(&"deps".to_string()));
+
+	let indexed = corpus.indexed_layers();
+	assert!(indexed.contains(&"word"));
+	assert!(indexed.contains(&"upos"));
+	assert!(indexed.contains(&"deprel"));
+	assert!(!indexed.contains(&"head"));
+	assert!(!indexed.contains(&"deps"));
+}
