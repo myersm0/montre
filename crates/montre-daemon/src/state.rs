@@ -17,15 +17,6 @@ use crate::CorpusHandle;
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-const SUPPORTED_ANCHOR_KINDS: &[&str] = &[
-	"SentenceMirror",
-	"Alignment",
-	"KwicSelection",
-	"DocPickerSelection",
-	"NamedResultsSelection",
-	"ConlluView",
-];
-
 pub(crate) type ResultsTable = HashMap<ResultHandle, Arc<ResultEntry>>;
 
 pub(crate) struct ResultEntry {
@@ -122,7 +113,7 @@ impl State {
 			capabilities: Capabilities {
 				observations: false,
 				workspaces: false,
-				anchor_kinds: SUPPORTED_ANCHOR_KINDS.iter().map(|s| s.to_string()).collect(),
+				anchor_kinds: all_anchor_kinds().map(|k| k.type_name().to_string()).collect(),
 			},
 		})
 	}
@@ -360,7 +351,7 @@ impl State {
 		follower: ProcessId,
 		kind: AnchorKind,
 	) -> Result<AnchorId, ProtocolError> {
-		if !SUPPORTED_ANCHOR_KINDS.contains(&kind.type_name()) {
+		if !all_anchor_kinds().any(|k| k.type_name() == kind.type_name()) {
 			return Err(ProtocolError::new(
 				error_codes::ANCHOR_KIND_UNSUPPORTED,
 				format!("anchor kind '{}' not supported by this daemon", kind.type_name()),
@@ -627,6 +618,31 @@ fn anchor_kind_signature(
 		AnchorKind::DocPickerSelection => (&[Document], &[Document]),
 		AnchorKind::NamedResultsSelection => (&[Results], &[Results]),
 		AnchorKind::ConlluView => (&[Sentence], &[Sentence]),
+	}
+}
+
+fn all_anchor_kinds() -> impl Iterator<Item = AnchorKind> {
+	[
+		AnchorKind::SentenceMirror,
+		AnchorKind::Alignment { name: String::new() },
+		AnchorKind::KwicSelection,
+		AnchorKind::DocPickerSelection,
+		AnchorKind::NamedResultsSelection,
+		AnchorKind::ConlluView,
+	]
+	.into_iter()
+}
+
+// Drift guard for all_anchor_kinds: forces a compile error if AnchorKind grows.
+#[allow(dead_code)]
+fn assert_anchor_kinds_covered(kind: &AnchorKind) {
+	match kind {
+		AnchorKind::SentenceMirror => {}
+		AnchorKind::Alignment { .. } => {}
+		AnchorKind::KwicSelection => {}
+		AnchorKind::DocPickerSelection => {}
+		AnchorKind::NamedResultsSelection => {}
+		AnchorKind::ConlluView => {}
 	}
 }
 
@@ -996,11 +1012,12 @@ mod tests {
 		let reply = state
 			.register(make_register_params(ProcessKind::External), dummy_outbound())
 			.unwrap();
-		for kind in SUPPORTED_ANCHOR_KINDS {
+		for kind in all_anchor_kinds() {
+			let name = kind.type_name();
 			assert!(
-				reply.capabilities.anchor_kinds.iter().any(|k| k == kind),
+				reply.capabilities.anchor_kinds.iter().any(|k| k == name),
 				"expected capability '{}' present",
-				kind,
+				name,
 			);
 		}
 	}
