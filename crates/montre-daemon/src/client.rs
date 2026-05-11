@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -239,15 +239,15 @@ impl DaemonClient {
 		}
 		let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 		let (reply_tx, reply_rx) = sync_channel(1);
-		self.pending.lock().expect("pending lock poisoned").insert(id, reply_tx);
+		lock_pending(&self.pending).insert(id, reply_tx);
 		if self.reader_closed.load(Ordering::SeqCst) {
-			self.pending.lock().expect("pending lock poisoned").remove(&id);
+			lock_pending(&self.pending).remove(&id);
 			return Err(DaemonClientError::ReaderClosed);
 		}
 
 		let write_result = self.write_request(id, method, params);
 		if let Err(e) = write_result {
-			self.pending.lock().expect("pending lock poisoned").remove(&id);
+			lock_pending(&self.pending).remove(&id);
 			return Err(e);
 		}
 
@@ -337,6 +337,11 @@ fn run_reader(
 	notifications_tx: SyncSender<NotificationEnvelope>,
 	reader_closed: Arc<AtomicBool>,
 ) {
+	let _guard = ReaderGuard {
+		reader_closed,
+		pending: Arc::clone(&pending),
+	};
+
 	loop {
 		let frame = match read_frame(&mut stream) {
 			Ok(frame) => frame,
@@ -363,8 +368,28 @@ fn run_reader(
 		}
 	}
 
-	reader_closed.store(true, Ordering::SeqCst);
-	pending.lock().expect("pending lock poisoned").clear();
+}
+
+struct ReaderGuard {
+	reader_closed: Arc<AtomicBool>,
+	pending: PendingMap,
+}
+
+impl Drop for ReaderGuard {
+	fn drop(&mut self) {
+		self.reader_closed.store(true, Ordering::SeqCst);
+		lock_pending(&self.pending).clear();
+	}
+}
+
+fn lock_pending(pending: &PendingMap) -> MutexGuard<'_, HashMap<u64, SyncSender<ResponseMessage>>> {
+	match pending.lock() {
+		Ok(guard) => guard,
+		Err(error) => {
+			tracing::warn!("client pending map lock poisoned; recovering");
+			error.into_inner()
+		}
+	}
 }
 
 fn dispatch_response(value: serde_json::Value, pending: &PendingMap) {
@@ -372,7 +397,7 @@ fn dispatch_response(value: serde_json::Value, pending: &PendingMap) {
 		tracing::warn!(message = %value, "client received response with non-u64 id");
 		return;
 	};
-	let Some(tx) = pending.lock().expect("pending lock poisoned").remove(&id) else {
+	let Some(tx) = lock_pending(pending).remove(&id) else {
 		tracing::debug!(id = id, "client received response for unknown request id");
 		return;
 	};
