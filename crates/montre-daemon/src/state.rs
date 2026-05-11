@@ -1016,7 +1016,7 @@ mod tests {
 		let h = state.insert_result("foo".to_string(), vec![]);
 		state.save_result(h.clone(), "named".to_string()).unwrap();
 
-		let created_at_before = state
+		let created_at_before = state.handle
 			.results
 			.read()
 			.unwrap()

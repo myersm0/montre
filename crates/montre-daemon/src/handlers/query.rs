@@ -158,7 +158,6 @@ mod tests {
 	use super::*;
 	use crate::dispatch::dispatch_request;
 	use crate::dispatch::test_support::with_registered_context;
-	use crate::protocol::ResultMetadata;
 
 	#[test]
 	fn query_execute_count_returns_count() {

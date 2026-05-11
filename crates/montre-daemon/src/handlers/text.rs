@@ -1,8 +1,7 @@
-use std::collections::HashMap;
-
 use montre_index::{Corpus, ForwardIndex, SpanIndex};
 
 use crate::dispatch::RpcContext;
+use crate::handlers::corpus::{document_component, document_sentence_count};
 use crate::protocol::{
 	AnnotationEntry, AnnotationRow, AnnotationValue, ProtocolError, SentenceEntry, Span,
 	TextAnnotationsParams, TextAnnotationsRangeParams, TextAnnotationsRangeReply,

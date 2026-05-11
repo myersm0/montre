@@ -72,14 +72,14 @@ pub(crate) fn handle_corpus_documents(
 		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
 }
 
-fn document_component(ctx: &RpcContext, document_index: usize) -> String {
+pub(crate) fn document_component(ctx: &RpcContext, document_index: usize) -> String {
 	ctx.handle.corpus
 		.component_for_document(document_index)
 		.map(|c| c.name.clone())
 		.unwrap_or_else(|| ctx.handle.corpus.name().to_string())
 }
 
-fn document_sentence_count(ctx: &RpcContext, document_index: usize) -> u32 {
+pub(crate) fn document_sentence_count(ctx: &RpcContext, document_index: usize) -> u32 {
 	match (
 		ctx.handle.corpus.first_sentence_of_document(document_index),
 		ctx.handle.corpus.last_sentence_of_document(document_index),
