@@ -2,14 +2,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::Arc;
 
+use montre_index::SpanIndex;
 use montre_query::executor::Hit;
 use uuid::Uuid;
 
+use crate::handlers::alignment::project_alignment;
 use crate::protocol::error_codes;
 use crate::protocol::{
-	Anchor, AnchorId, AnchorKind, Capabilities, Interest, InterestKind, ProcessId, ProcessInfo,
-	ProtocolError, RegisterParams, RegisterReply, ResultForm, ResultHandle, ResultMetadata,
-	RosterFilter, Topic, PROTOCOL_VERSION,
+	Anchor, AnchorId, AnchorKind, AlignmentSource, Capabilities, Interest, InterestKind, ProcessId,
+	ProcessInfo, ProtocolError, RegisterParams, RegisterReply, ResultForm, ResultHandle,
+	ResultMetadata, RosterFilter, Span, Topic, PROTOCOL_VERSION,
 };
 use crate::CorpusHandle;
 
@@ -186,21 +188,21 @@ impl State {
 			.collect();
 
 		for (anchor_id, follower, kind) in derivative_targets {
-			let Some(transformed) = transform_interest(&interest, &kind) else {
-				continue;
-			};
+			let transformed = transform_interest(&self.handle, &interest, &kind);
 			let Some(outbound) = self.roster.get(&follower).map(|c| c.outbound.clone()) else {
 				continue;
 			};
-			let payload = serde_json::json!({
-				"jsonrpc": "2.0",
-				"method": "notification.anchor_update",
-				"params": {
-					"anchor_id": anchor_id,
-					"interest": transformed,
-				},
-			});
-			let _ = try_send_outbound(&outbound, payload, follower);
+			for derived in transformed {
+				let payload = serde_json::json!({
+					"jsonrpc": "2.0",
+					"method": "notification.anchor_update",
+					"params": {
+						"anchor_id": anchor_id,
+						"interest": derived,
+					},
+				});
+				let _ = try_send_outbound(&outbound, payload, follower);
+			}
 		}
 	}
 
@@ -417,16 +419,15 @@ impl State {
 			.get(&master)
 			.and_then(|c| c.info.current_interest.clone());
 		if let Some(interest) = initial {
-			if let Some(transformed) = transform_interest(&interest, &kind) {
-				if let Some(outbound) =
-					self.roster.get(&follower).map(|c| c.outbound.clone())
-				{
+			let transformed = transform_interest(&self.handle, &interest, &kind);
+			if let Some(outbound) = self.roster.get(&follower).map(|c| c.outbound.clone()) {
+				for derived in transformed {
 					let payload = serde_json::json!({
 						"jsonrpc": "2.0",
 						"method": "notification.anchor_update",
 						"params": {
 							"anchor_id": anchor_id,
-							"interest": transformed,
+							"interest": derived,
 						},
 					});
 					let _ = try_send_outbound(&outbound, payload, follower);
@@ -629,8 +630,93 @@ fn anchor_kind_signature(
 	}
 }
 
-fn transform_interest(_interest: &Interest, _kind: &AnchorKind) -> Option<Interest> {
-	None
+fn transform_interest(
+	handle: &CorpusHandle,
+	interest: &Interest,
+	kind: &AnchorKind,
+) -> Vec<Interest> {
+	let (accepts, _) = anchor_kind_signature(kind);
+	if !accepts.contains(&interest.kind()) {
+		return Vec::new();
+	}
+	match kind {
+		AnchorKind::SentenceMirror => match interest {
+			Interest::Sentence { .. } => vec![interest.clone()],
+			Interest::Position { doc, position } => {
+				widen_position_to_sentence(handle, *doc, *position)
+			}
+			Interest::Span { doc, start, .. } => {
+				widen_position_to_sentence(handle, *doc, *start)
+			}
+			_ => Vec::new(),
+		},
+		AnchorKind::Alignment { name } => {
+			let source = match interest {
+				Interest::Sentence { doc, sent } => {
+					let Some(span) = sentence_to_span(handle, *doc, *sent) else {
+						return Vec::new();
+					};
+					AlignmentSource { doc: *doc, start: span.start, end: span.end }
+				}
+				Interest::Span { doc, start, end } => {
+					AlignmentSource { doc: *doc, start: *start, end: *end }
+				}
+				_ => return Vec::new(),
+			};
+			match project_alignment(&handle.corpus, name, source) {
+				Ok(targets) => targets
+					.into_iter()
+					.map(|t| Interest::Span { doc: t.doc, start: t.start, end: t.end })
+					.collect(),
+				Err(_) => Vec::new(),
+			}
+		}
+		AnchorKind::KwicSelection => match interest {
+			Interest::Hit { result, hit_idx } => {
+				let table = handle.results.read().expect("results lock poisoned");
+				let Some(entry) = table.get(result) else { return Vec::new(); };
+				let Some(hit) = entry.hits.get(*hit_idx as usize) else { return Vec::new(); };
+				let doc = hit.document_index;
+				let Some(first) = handle.corpus.first_sentence_of_document(doc as usize) else {
+					return Vec::new();
+				};
+				let global = hit.sentence_index as usize;
+				if global < first {
+					return Vec::new();
+				}
+				vec![Interest::Sentence { doc, sent: (global - first) as u32 }]
+			}
+			_ => Vec::new(),
+		},
+		AnchorKind::DocPickerSelection
+		| AnchorKind::NamedResultsSelection
+		| AnchorKind::ConlluView => Vec::new(),
+	}
+}
+
+fn widen_position_to_sentence(handle: &CorpusHandle, doc: u32, position: u64) -> Vec<Interest> {
+	let corpus = &handle.corpus;
+	if corpus.document_for_position(position) != Some(doc as usize) {
+		return Vec::new();
+	}
+	let Some((global_idx, _)) = corpus.spans().containing_with_index("sentence", position) else {
+		return Vec::new();
+	};
+	let Some(first) = corpus.first_sentence_of_document(doc as usize) else {
+		return Vec::new();
+	};
+	vec![Interest::Sentence { doc, sent: (global_idx - first) as u32 }]
+}
+
+fn sentence_to_span(handle: &CorpusHandle, doc: u32, sent: u32) -> Option<Span> {
+	let corpus = &handle.corpus;
+	let first = corpus.first_sentence_of_document(doc as usize)?;
+	let last = corpus.last_sentence_of_document(doc as usize)?;
+	let global_idx = first.checked_add(sent as usize)?;
+	if global_idx > last {
+		return None;
+	}
+	corpus.spans().spans("sentence")?.get(global_idx).cloned()
 }
 
 fn generate_handle() -> ResultHandle {
@@ -1304,5 +1390,205 @@ mod tests {
 			&[InterestKind::Sentence],
 			&[InterestKind::Sentence],
 		));
+	}
+
+	fn find_doc(corpus: &montre_index::Corpus, needle: &str) -> u32 {
+		corpus
+			.document_names()
+			.iter()
+			.position(|n| n.contains(needle))
+			.map(|i| i as u32)
+			.unwrap_or_else(|| panic!("no document containing '{}'", needle))
+	}
+
+	#[test]
+	fn transform_sentence_mirror_passes_sentence_through() {
+		let handle = fake_corpus();
+		let doc = find_doc(&handle.corpus, "la_maison");
+		let interest = Interest::Sentence { doc, sent: 0 };
+		let out = transform_interest(&handle, &interest, &AnchorKind::SentenceMirror);
+		assert_eq!(out.len(), 1);
+		match &out[0] {
+			Interest::Sentence { doc: d, sent: s } => {
+				assert_eq!(*d, doc);
+				assert_eq!(*s, 0);
+			}
+			other => panic!("expected Sentence, got {:?}", other),
+		}
+	}
+
+	#[test]
+	fn transform_sentence_mirror_widens_position_to_containing_sentence() {
+		let handle = fake_corpus();
+		let doc = find_doc(&handle.corpus, "la_maison");
+		let span = sentence_to_span(&handle, doc, 0).expect("sentence span");
+		let interest = Interest::Position { doc, position: span.start };
+		let out = transform_interest(&handle, &interest, &AnchorKind::SentenceMirror);
+		assert_eq!(out.len(), 1);
+		match &out[0] {
+			Interest::Sentence { doc: d, sent: s } => {
+				assert_eq!(*d, doc);
+				assert_eq!(*s, 0);
+			}
+			other => panic!("expected Sentence, got {:?}", other),
+		}
+	}
+
+	#[test]
+	fn transform_sentence_mirror_widens_span_to_sentence_containing_start() {
+		let handle = fake_corpus();
+		let doc = find_doc(&handle.corpus, "la_maison");
+		let span = sentence_to_span(&handle, doc, 0).expect("sentence span");
+		let interest = Interest::Span { doc, start: span.start, end: span.end };
+		let out = transform_interest(&handle, &interest, &AnchorKind::SentenceMirror);
+		assert_eq!(out.len(), 1);
+		match &out[0] {
+			Interest::Sentence { doc: d, sent: s } => {
+				assert_eq!(*d, doc);
+				assert_eq!(*s, 0);
+			}
+			other => panic!("expected Sentence, got {:?}", other),
+		}
+	}
+
+	#[test]
+	fn transform_sentence_mirror_position_outside_any_sentence_returns_empty() {
+		let handle = fake_corpus();
+		let doc = find_doc(&handle.corpus, "la_maison");
+		let interest = Interest::Position { doc, position: u64::MAX };
+		let out = transform_interest(&handle, &interest, &AnchorKind::SentenceMirror);
+		assert!(out.is_empty());
+	}
+
+	#[test]
+	fn transform_sentence_mirror_defensively_rejects_hit_input() {
+		let handle = fake_corpus();
+		let interest = Interest::Hit { result: "r-x".to_string(), hit_idx: 0 };
+		let out = transform_interest(&handle, &interest, &AnchorKind::SentenceMirror);
+		assert!(out.is_empty());
+	}
+
+	#[test]
+	fn transform_alignment_projects_sentence_to_target_doc() {
+		let handle = fake_corpus();
+		let source_doc = find_doc(&handle.corpus, "la_maison");
+		let target_doc = find_doc(&handle.corpus, "the_house");
+		let interest = Interest::Sentence { doc: source_doc, sent: 0 };
+		let kind = AnchorKind::Alignment { name: "sentence".to_string() };
+		let out = transform_interest(&handle, &interest, &kind);
+		assert!(!out.is_empty());
+		for derived in &out {
+			match derived {
+				Interest::Span { doc, start, end } => {
+					assert_eq!(*doc, target_doc);
+					assert!(end > start);
+				}
+				other => panic!("expected Span, got {:?}", other),
+			}
+		}
+	}
+
+	#[test]
+	fn transform_alignment_projects_span_to_target_doc() {
+		let handle = fake_corpus();
+		let source_doc = find_doc(&handle.corpus, "la_maison");
+		let target_doc = find_doc(&handle.corpus, "the_house");
+		let span = sentence_to_span(&handle, source_doc, 0).expect("sentence span");
+		let interest = Interest::Span { doc: source_doc, start: span.start, end: span.end };
+		let kind = AnchorKind::Alignment { name: "sentence".to_string() };
+		let out = transform_interest(&handle, &interest, &kind);
+		assert!(!out.is_empty());
+		for derived in &out {
+			match derived {
+				Interest::Span { doc, .. } => assert_eq!(*doc, target_doc),
+				other => panic!("expected Span, got {:?}", other),
+			}
+		}
+	}
+
+	#[test]
+	fn transform_alignment_unknown_name_returns_empty() {
+		let handle = fake_corpus();
+		let doc = find_doc(&handle.corpus, "la_maison");
+		let interest = Interest::Span { doc, start: 0, end: 5 };
+		let kind = AnchorKind::Alignment { name: "totally-not-an-alignment".to_string() };
+		let out = transform_interest(&handle, &interest, &kind);
+		assert!(out.is_empty());
+	}
+
+	#[test]
+	fn transform_alignment_defensively_rejects_position_input() {
+		let handle = fake_corpus();
+		let doc = find_doc(&handle.corpus, "la_maison");
+		let interest = Interest::Position { doc, position: 0 };
+		let kind = AnchorKind::Alignment { name: "sentence".to_string() };
+		let out = transform_interest(&handle, &interest, &kind);
+		assert!(out.is_empty());
+	}
+
+	#[test]
+	fn transform_kwic_extracts_containing_sentence_from_hit() {
+		let mut state = make_state();
+		let doc = find_doc(&state.handle.corpus, "la_maison");
+		let first_global =
+			state.handle.corpus.first_sentence_of_document(doc as usize).expect("first sent");
+		let executor_hit = Hit {
+			span: Span { start: 0, end: 1 },
+			document_index: doc,
+			sentence_index: first_global as u32,
+			captures: vec![],
+		};
+		let result_handle = state.insert_result("test".to_string(), vec![executor_hit]);
+		let interest = Interest::Hit { result: result_handle, hit_idx: 0 };
+		let out = transform_interest(&state.handle, &interest, &AnchorKind::KwicSelection);
+		assert_eq!(out.len(), 1);
+		match &out[0] {
+			Interest::Sentence { doc: d, sent: s } => {
+				assert_eq!(*d, doc);
+				assert_eq!(*s, 0);
+			}
+			other => panic!("expected Sentence, got {:?}", other),
+		}
+	}
+
+	#[test]
+	fn transform_kwic_unknown_result_returns_empty() {
+		let handle = fake_corpus();
+		let interest = Interest::Hit { result: "r-bogus".to_string(), hit_idx: 0 };
+		let out = transform_interest(&handle, &interest, &AnchorKind::KwicSelection);
+		assert!(out.is_empty());
+	}
+
+	#[test]
+	fn transform_kwic_hit_idx_out_of_range_returns_empty() {
+		let mut state = make_state();
+		let result_handle = state.insert_result("test".to_string(), vec![]);
+		let interest = Interest::Hit { result: result_handle, hit_idx: 99 };
+		let out = transform_interest(&state.handle, &interest, &AnchorKind::KwicSelection);
+		assert!(out.is_empty());
+	}
+
+	#[test]
+	fn transform_inert_kinds_return_empty() {
+		let handle = fake_corpus();
+		let doc = find_doc(&handle.corpus, "la_maison");
+		assert!(transform_interest(
+			&handle,
+			&Interest::Document { doc },
+			&AnchorKind::DocPickerSelection,
+		)
+		.is_empty());
+		assert!(transform_interest(
+			&handle,
+			&Interest::Results { handle: "r-x".to_string() },
+			&AnchorKind::NamedResultsSelection,
+		)
+		.is_empty());
+		assert!(transform_interest(
+			&handle,
+			&Interest::Sentence { doc, sent: 0 },
+			&AnchorKind::ConlluView,
+		)
+		.is_empty());
 	}
 }
