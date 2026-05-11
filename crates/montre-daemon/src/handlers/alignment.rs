@@ -1,10 +1,10 @@
-use montre_index::SpanIndex;
+use montre_index::{Corpus, SpanIndex};
 
 use crate::dispatch::RpcContext;
 use crate::protocol::error_codes;
 use crate::protocol::{
 	AlignmentInfo, AlignmentListReply, AlignmentProjectParams, AlignmentProjectReply,
-	AlignmentTarget, ProtocolError,
+	AlignmentSource, AlignmentTarget, ProtocolError,
 };
 
 pub(crate) fn handle_alignment_list(ctx: &RpcContext) -> Result<serde_json::Value, ProtocolError> {
@@ -39,54 +39,57 @@ pub(crate) fn handle_alignment_project(
 		return Err(ProtocolError::new(-32602, "source.start must be <= source.end"));
 	}
 
-	let alignment = ctx.handle.corpus.alignment_meta(&parsed.alignment_name).ok_or_else(|| {
+	let targets = project_alignment(&ctx.handle.corpus, &parsed.alignment_name, parsed.source)?;
+
+	let reply = AlignmentProjectReply { targets };
+	serde_json::to_value(reply)
+		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+}
+
+pub(crate) fn project_alignment(
+	corpus: &Corpus,
+	alignment_name: &str,
+	source: AlignmentSource,
+) -> Result<Vec<AlignmentTarget>, ProtocolError> {
+	let alignment = corpus.alignment_meta(alignment_name).ok_or_else(|| {
 		ProtocolError::new(
 			error_codes::ALIGNMENT_NOT_FOUND,
-			format!("alignment '{}' not found", parsed.alignment_name),
+			format!("alignment '{}' not found", alignment_name),
 		)
 	})?;
 
-	let source_comp = ctx.handle
-		.corpus
-		.component(&alignment.source_component)
-		.ok_or_else(|| {
-			ProtocolError::new(
-				-32603,
-				format!("source component '{}' not found", alignment.source_component),
-			)
-		})?;
-	let target_comp = ctx.handle
-		.corpus
-		.component(&alignment.target_component)
-		.ok_or_else(|| {
-			ProtocolError::new(
-				-32603,
-				format!("target component '{}' not found", alignment.target_component),
-			)
-		})?;
+	let source_comp = corpus.component(&alignment.source_component).ok_or_else(|| {
+		ProtocolError::new(
+			-32603,
+			format!("source component '{}' not found", alignment.source_component),
+		)
+	})?;
+	let target_comp = corpus.component(&alignment.target_component).ok_or_else(|| {
+		ProtocolError::new(
+			-32603,
+			format!("target component '{}' not found", alignment.target_component),
+		)
+	})?;
 
-	let doc = parsed.source.doc as usize;
+	let doc = source.doc as usize;
 	let (src_first_doc, src_last_doc) = source_comp.document_range;
 	if doc < src_first_doc || doc >= src_last_doc {
 		return Err(ProtocolError::new(
 			error_codes::SPAN_OUTSIDE_ALIGNMENT,
 			format!(
 				"document {} not in alignment source component '{}'",
-				parsed.source.doc, alignment.source_component
+				source.doc, alignment.source_component
 			),
 		));
 	}
 
-	let first_sent = ctx.handle
-		.corpus
+	let first_sent = corpus
 		.first_sentence_of_document(doc)
 		.ok_or_else(|| ProtocolError::new(-32603, "source document has no sentences"))?;
-	let last_sent = ctx.handle
-		.corpus
+	let last_sent = corpus
 		.last_sentence_of_document(doc)
 		.ok_or_else(|| ProtocolError::new(-32603, "source document has no sentences"))?;
-	let sentence_spans = ctx.handle
-		.corpus
+	let sentence_spans = corpus
 		.spans()
 		.spans("sentence")
 		.ok_or_else(|| ProtocolError::new(-32603, "sentence span layer missing"))?;
@@ -96,15 +99,12 @@ pub(crate) fn handle_alignment_project(
 		let sent_span = sentence_spans
 			.get(global_idx)
 			.ok_or_else(|| ProtocolError::new(-32603, "sentence span lookup failed"))?;
-		if sent_span.end > parsed.source.start && sent_span.start < parsed.source.end {
+		if sent_span.end > source.start && sent_span.start < source.end {
 			overlapping_sents.push((global_idx - first_sent) as u32);
 		}
 	}
 
-	let edges = ctx.handle
-		.corpus
-		.alignment_edges(&parsed.alignment_name)
-		.unwrap_or(&[]);
+	let edges = corpus.alignment_edges(alignment_name).unwrap_or(&[]);
 	let doc_within_source = (doc - src_first_doc) as u32;
 
 	let mut targets: Vec<AlignmentTarget> = Vec::new();
@@ -115,10 +115,8 @@ pub(crate) fn handle_alignment_project(
 			if src != source_unit {
 				continue;
 			}
-			let target_global_doc =
-				(target_comp.document_range.0 as u32).saturating_add(tgt.0);
-			let target_first_sent = ctx.handle
-				.corpus
+			let target_global_doc = (target_comp.document_range.0 as u32).saturating_add(tgt.0);
+			let target_first_sent = corpus
 				.first_sentence_of_document(target_global_doc as usize)
 				.ok_or_else(|| ProtocolError::new(-32603, "target document has no sentences"))?;
 			let target_global_sent_idx = target_first_sent + tgt.1 as usize;
@@ -137,9 +135,7 @@ pub(crate) fn handle_alignment_project(
 		}
 	}
 
-	let reply = AlignmentProjectReply { targets };
-	serde_json::to_value(reply)
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	Ok(targets)
 }
 
 
