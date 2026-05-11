@@ -8,6 +8,7 @@ members = [
 	"crates/montre-cli",
 	"crates/montre-ffi",
 	"crates/montre-bench",
+	"crates/montre-daemon",
 ]
 exclude = ["crates/montre-py",]
 
@@ -23,6 +24,7 @@ montre-core = { path = "crates/montre-core" }
 montre-index = { path = "crates/montre-index" }
 montre-query = { path = "crates/montre-query" }
 montre-build = { path = "crates/montre-build" }
+montre-daemon = { path = "crates/montre-daemon" }
 
 # Core dependencies
 roaring = { version = "0.10", features = ["serde"] }

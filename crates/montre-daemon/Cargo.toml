@@ -1,0 +1,22 @@
+[package]
+name = "montre-daemon"
+description = "Session daemon for the Montre corpus query engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+blake3 = "1"
+montre-core = { workspace = true }
+montre-index = { workspace = true }
+montre-query = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+time = { version = "0.3", features = ["formatting"] }
+tracing = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+montre-build = { workspace = true }
+tempfile = "3.14"
