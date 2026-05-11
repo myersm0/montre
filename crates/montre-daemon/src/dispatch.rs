@@ -5,7 +5,7 @@ use std::sync::mpsc::{sync_channel, Receiver, Sender, SyncSender};
 use std::sync::Arc;
 use std::thread;
 
-use crate::handlers::{alignment, corpus, query, text};
+use crate::handlers::{alignment, anchor, corpus, query, session, subscription, text};
 use crate::protocol::error_codes;
 use crate::protocol::{ProcessId, ProtocolError, RegisterParams, RegisterReply};
 use crate::state::{Command, Outbound};
@@ -112,6 +112,7 @@ pub(crate) fn build_error_response(
 		"error": err,
 	})
 }
+
 pub(crate) struct RpcContext {
 	pub process_id: Option<ProcessId>,
 	pub state_tx: Sender<Command>,
@@ -256,6 +257,9 @@ pub(crate) fn dispatch_request(
 
 	match method {
 		"session.register" => handle_register(params, ctx),
+		"session.unregister" => session::handle_session_unregister(ctx),
+		"session.update_label" => session::handle_session_update_label(params, ctx),
+		"session.roster" => session::handle_session_roster(params, ctx),
 		"corpus.info" => corpus::handle_corpus_info(ctx),
 		"corpus.documents" => corpus::handle_corpus_documents(params, ctx),
 		"corpus.layer_info" => corpus::handle_corpus_layer_info(params, ctx),
@@ -271,6 +275,17 @@ pub(crate) fn dispatch_request(
 		"query.execute_count" => query::handle_query_execute_count(params, ctx),
 		"query.hits" => query::handle_query_hits(params, ctx),
 		"query.metadata" => query::handle_query_metadata(params, ctx),
+		"query.save" => query::handle_query_save(params, ctx),
+		"query.materialize" => query::handle_query_materialize(params, ctx),
+		"query.load" => query::handle_query_load(params, ctx),
+		"query.list_named" => query::handle_query_list_named(ctx),
+		"query.delete_named" => query::handle_query_delete_named(params, ctx),
+		"query.discard" => query::handle_query_discard(params, ctx),
+		"anchor.create" => anchor::handle_anchor_create(params, ctx),
+		"anchor.remove" => anchor::handle_anchor_remove(params, ctx),
+		"anchor.list" => anchor::handle_anchor_list(params, ctx),
+		"subscription.subscribe" => subscription::handle_subscription_subscribe(params, ctx),
+		"subscription.unsubscribe" => subscription::handle_subscription_unsubscribe(params, ctx),
 		_ => Err(ProtocolError::new(
 			-32601,
 			format!("Method not found: {}", method),
@@ -328,13 +343,14 @@ fn handle_register(
 #[cfg(test)]
 pub(crate) mod test_support {
 	use super::{RpcContext, OUTBOUND_QUEUE_DEPTH};
+	use crate::protocol::ProcessKind;
 	use crate::state;
 	use crate::state::{Command, Outbound};
 	use crate::CorpusHandle;
 	use montre_index::Corpus;
 	use std::collections::HashMap;
 	use std::path::{Path, PathBuf};
-	use std::sync::mpsc::{channel, sync_channel, Sender, SyncSender};
+	use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
 	use std::sync::{Arc, OnceLock, RwLock};
 	use std::thread;
 	use tempfile::TempDir;
@@ -409,6 +425,38 @@ pub(crate) mod test_support {
 		}
 		drop(state_tx);
 		let _ = state_handle.join();
+	}
+
+	pub fn with_state_thread<F>(body: F)
+	where
+		F: FnOnce(Sender<Command>, Arc<CorpusHandle>),
+	{
+		let handle = make_handle();
+		let st = state::State::new(1, Arc::clone(&handle));
+		let (state_tx, state_rx) = channel();
+		let state_handle = thread::spawn(move || state::run(st, state_rx));
+		body(state_tx.clone(), handle);
+		drop(state_tx);
+		let _ = state_handle.join();
+	}
+
+	pub fn register_context(
+		state_tx: Sender<Command>,
+		handle: Arc<CorpusHandle>,
+		kind: ProcessKind,
+		provides: &[&str],
+		consumes: &[&str],
+	) -> (RpcContext, Receiver<Outbound>) {
+		let (outbound_tx, outbound_rx) = sync_channel(OUTBOUND_QUEUE_DEPTH);
+		let mut ctx = make_context(state_tx, outbound_tx, handle);
+		let params = serde_json::json!({
+			"protocol_version": 1,
+			"kind": kind,
+			"provides": provides,
+			"consumes": consumes,
+		});
+		super::dispatch_request("session.register", Some(params), &mut ctx).expect("register");
+		(ctx, outbound_rx)
 	}
 
 	pub fn find_doc_index(corpus: &Corpus, needle: &str) -> u32 {

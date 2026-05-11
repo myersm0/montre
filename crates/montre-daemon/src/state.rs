@@ -7,9 +7,9 @@ use uuid::Uuid;
 
 use crate::protocol::error_codes;
 use crate::protocol::{
-	Anchor, AnchorId, AnchorKind, Capabilities, Interest, ProcessId, ProcessInfo, ProtocolError,
-	RegisterParams, RegisterReply, ResultForm, ResultHandle, ResultMetadata, RosterFilter, Topic,
-	PROTOCOL_VERSION,
+	Anchor, AnchorId, AnchorKind, Capabilities, Interest, InterestKind, ProcessId, ProcessInfo,
+	ProtocolError, RegisterParams, RegisterReply, ResultForm, ResultHandle, ResultMetadata,
+	RosterFilter, Topic, PROTOCOL_VERSION,
 };
 use crate::CorpusHandle;
 
@@ -382,6 +382,26 @@ impl State {
 				"anchor would create a cycle in the dependency graph",
 			));
 		}
+		let compat_ok = anchor_kind_compat(
+			&kind,
+			&self.roster[&master].info.provides,
+			&self.roster[&follower].info.consumes,
+		);
+		if !compat_ok {
+			let master_provides = self.roster[&master].info.provides.clone();
+			let follower_consumes = self.roster[&follower].info.consumes.clone();
+			return Err(ProtocolError::new(
+				error_codes::ANCHOR_INCOMPATIBLE,
+				format!(
+					"anchor kind '{}' incompatible with master provides / follower consumes",
+					kind.type_name(),
+				),
+			)
+			.with_data(serde_json::json!({
+				"master_provides": master_provides,
+				"follower_consumes": follower_consumes,
+			})));
+		}
 
 		let anchor_id = self.allocate_anchor_id();
 		let anchor = Anchor {
@@ -583,6 +603,30 @@ fn roster_filter_matches(filter: &RosterFilter, info: &ProcessInfo) -> bool {
 		return false;
 	}
 	true
+}
+
+pub(crate) fn anchor_kind_compat(
+	kind: &AnchorKind,
+	master_provides: &[InterestKind],
+	follower_consumes: &[InterestKind],
+) -> bool {
+	let (accepted_in, produced_out) = anchor_kind_signature(kind);
+	accepted_in.iter().any(|k| master_provides.contains(k))
+		&& produced_out.iter().any(|k| follower_consumes.contains(k))
+}
+
+fn anchor_kind_signature(
+	kind: &AnchorKind,
+) -> (&'static [InterestKind], &'static [InterestKind]) {
+	use InterestKind::*;
+	match kind {
+		AnchorKind::SentenceMirror => (&[Position, Span, Sentence], &[Sentence]),
+		AnchorKind::Alignment { .. } => (&[Sentence, Span], &[Sentence, Span]),
+		AnchorKind::KwicSelection => (&[Hit], &[Sentence]),
+		AnchorKind::DocPickerSelection => (&[Document], &[Document]),
+		AnchorKind::NamedResultsSelection => (&[Results], &[Results]),
+		AnchorKind::ConlluView => (&[Sentence], &[Sentence]),
+	}
 }
 
 fn transform_interest(_interest: &Interest, _kind: &AnchorKind) -> Option<Interest> {
@@ -820,6 +864,17 @@ mod tests {
 			.process_id
 	}
 
+	fn register_compatible(state: &mut State) -> ProcessId {
+		let params = RegisterParams {
+			protocol_version: PROTOCOL_VERSION,
+			kind: ProcessKind::External,
+			label: None,
+			provides: vec![InterestKind::Position, InterestKind::Span, InterestKind::Sentence],
+			consumes: vec![InterestKind::Sentence],
+		};
+		state.register(params, dummy_outbound()).unwrap().process_id
+	}
+
 	#[test]
 	fn register_happy_path() {
 		let mut state = make_state();
@@ -867,8 +922,8 @@ mod tests {
 	#[test]
 	fn unregister_drops_anchors_involving_process() {
 		let mut state = make_state();
-		let p1 = register(&mut state);
-		let p2 = register(&mut state);
+		let p1 = register_compatible(&mut state);
+		let p2 = register_compatible(&mut state);
 		let anchor_id = state
 			.anchor_create(p1, p2, AnchorKind::SentenceMirror)
 			.unwrap();
@@ -922,8 +977,8 @@ mod tests {
 	#[test]
 	fn anchor_create_two_node_cycle_rejected() {
 		let mut state = make_state();
-		let p1 = register(&mut state);
-		let p2 = register(&mut state);
+		let p1 = register_compatible(&mut state);
+		let p2 = register_compatible(&mut state);
 		state
 			.anchor_create(p1, p2, AnchorKind::SentenceMirror)
 			.unwrap();
@@ -936,9 +991,9 @@ mod tests {
 	#[test]
 	fn anchor_create_three_node_cycle_rejected() {
 		let mut state = make_state();
-		let p1 = register(&mut state);
-		let p2 = register(&mut state);
-		let p3 = register(&mut state);
+		let p1 = register_compatible(&mut state);
+		let p2 = register_compatible(&mut state);
+		let p3 = register_compatible(&mut state);
 		state
 			.anchor_create(p1, p2, AnchorKind::SentenceMirror)
 			.unwrap();
@@ -949,6 +1004,42 @@ mod tests {
 			.anchor_create(p3, p1, AnchorKind::SentenceMirror)
 			.unwrap_err();
 		assert_eq!(err.code, error_codes::ANCHOR_CYCLE);
+	}
+
+	#[test]
+	fn anchor_create_incompatible_rejected() {
+		let mut state = make_state();
+		let p_master = state
+			.register(
+				RegisterParams {
+					protocol_version: PROTOCOL_VERSION,
+					kind: ProcessKind::External,
+					label: None,
+					provides: vec![InterestKind::Hit],
+					consumes: vec![],
+				},
+				dummy_outbound(),
+			)
+			.unwrap()
+			.process_id;
+		let p_follower = state
+			.register(
+				RegisterParams {
+					protocol_version: PROTOCOL_VERSION,
+					kind: ProcessKind::External,
+					label: None,
+					provides: vec![],
+					consumes: vec![InterestKind::Sentence],
+				},
+				dummy_outbound(),
+			)
+			.unwrap()
+			.process_id;
+		let err = state
+			.anchor_create(p_master, p_follower, AnchorKind::SentenceMirror)
+			.unwrap_err();
+		assert_eq!(err.code, error_codes::ANCHOR_INCOMPATIBLE);
+		assert!(err.data.is_some());
 	}
 
 	#[test]
@@ -1135,5 +1226,83 @@ mod tests {
 			..Default::default()
 		};
 		assert!(!roster_filter_matches(&filter, &info));
+	}
+
+	#[test]
+	fn anchor_kind_compat_sentence_mirror_accepts_position_to_sentence() {
+		assert!(anchor_kind_compat(
+			&AnchorKind::SentenceMirror,
+			&[InterestKind::Position],
+			&[InterestKind::Sentence],
+		));
+	}
+
+	#[test]
+	fn anchor_kind_compat_sentence_mirror_rejects_hit_provider() {
+		assert!(!anchor_kind_compat(
+			&AnchorKind::SentenceMirror,
+			&[InterestKind::Hit],
+			&[InterestKind::Sentence],
+		));
+	}
+
+	#[test]
+	fn anchor_kind_compat_alignment_accepts_span_to_span() {
+		assert!(anchor_kind_compat(
+			&AnchorKind::Alignment { name: "labse".to_string() },
+			&[InterestKind::Span],
+			&[InterestKind::Span],
+		));
+	}
+
+	#[test]
+	fn anchor_kind_compat_kwic_requires_hit_provider() {
+		assert!(anchor_kind_compat(
+			&AnchorKind::KwicSelection,
+			&[InterestKind::Hit],
+			&[InterestKind::Sentence],
+		));
+		assert!(!anchor_kind_compat(
+			&AnchorKind::KwicSelection,
+			&[InterestKind::Sentence],
+			&[InterestKind::Sentence],
+		));
+	}
+
+	#[test]
+	fn anchor_kind_compat_rejects_empty_master_provides() {
+		assert!(!anchor_kind_compat(
+			&AnchorKind::SentenceMirror,
+			&[],
+			&[InterestKind::Sentence],
+		));
+	}
+
+	#[test]
+	fn anchor_kind_compat_rejects_empty_follower_consumes() {
+		assert!(!anchor_kind_compat(
+			&AnchorKind::SentenceMirror,
+			&[InterestKind::Position],
+			&[],
+		));
+	}
+
+	#[test]
+	fn anchor_kind_compat_tbd_kinds_self_to_self() {
+		assert!(anchor_kind_compat(
+			&AnchorKind::DocPickerSelection,
+			&[InterestKind::Document],
+			&[InterestKind::Document],
+		));
+		assert!(anchor_kind_compat(
+			&AnchorKind::NamedResultsSelection,
+			&[InterestKind::Results],
+			&[InterestKind::Results],
+		));
+		assert!(anchor_kind_compat(
+			&AnchorKind::ConlluView,
+			&[InterestKind::Sentence],
+			&[InterestKind::Sentence],
+		));
 	}
 }

@@ -5,8 +5,11 @@ use montre_query::QueryError;
 use crate::dispatch::{RpcContext, STATE_DISPATCH_FAILURE, STATE_REPLY_FAILURE};
 use crate::protocol::error_codes;
 use crate::protocol::{
-	Hit, ProtocolError, QueryExecuteCountReply, QueryExecuteParams, QueryExecuteReply,
-	QueryHitsParams, QueryHitsReply, QueryMetadataParams,
+	Hit, NamedResultEntry, OkReply, ProtocolError, QueryDeleteNamedParams, QueryDiscardParams,
+	QueryExecuteCountReply, QueryExecuteParams, QueryExecuteReply, QueryHitsParams,
+	QueryHitsReply, QueryListNamedReply, QueryLoadParams, QueryLoadReply,
+	QueryMaterializeParams, QueryMaterializeReply, QueryMetadataParams, QuerySaveParams,
+	QuerySaveReply, ResultForm,
 };
 use crate::state::Command;
 
@@ -153,11 +156,180 @@ pub(crate) fn handle_query_metadata(
 		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
 }
 
+pub(crate) fn handle_query_save(
+	params: Option<serde_json::Value>,
+	ctx: &RpcContext,
+) -> Result<serde_json::Value, ProtocolError> {
+	let raw = params.ok_or_else(|| ProtocolError::new(-32602, "query.save requires params"))?;
+	let parsed: QuerySaveParams = serde_json::from_value(raw)
+		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+
+	let (reply_tx, reply_rx) = sync_channel(1);
+	ctx.state_tx
+		.send(Command::SaveResult {
+			handle: parsed.handle,
+			name: parsed.name,
+			reply: reply_tx,
+		})
+		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
+	reply_rx
+		.recv()
+		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))??;
+
+	let reply = QuerySaveReply {
+		ok: true,
+		form: ResultForm::QueryBacked,
+	};
+	serde_json::to_value(reply)
+		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+}
+
+pub(crate) fn handle_query_materialize(
+	params: Option<serde_json::Value>,
+	ctx: &RpcContext,
+) -> Result<serde_json::Value, ProtocolError> {
+	let raw = params
+		.ok_or_else(|| ProtocolError::new(-32602, "query.materialize requires params"))?;
+	let parsed: QueryMaterializeParams = serde_json::from_value(raw)
+		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+
+	let (reply_tx, reply_rx) = sync_channel(1);
+	ctx.state_tx
+		.send(Command::MaterializeResult {
+			name: parsed.name,
+			reply: reply_tx,
+		})
+		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
+	let metadata = reply_rx
+		.recv()
+		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))??;
+
+	let materialized_at = metadata
+		.materialized_at
+		.expect("state guarantees materialized_at after MaterializeResult");
+	let reply = QueryMaterializeReply {
+		ok: true,
+		hit_count: metadata.hit_count,
+		materialized_at,
+	};
+	serde_json::to_value(reply)
+		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+}
+
+pub(crate) fn handle_query_load(
+	params: Option<serde_json::Value>,
+	ctx: &RpcContext,
+) -> Result<serde_json::Value, ProtocolError> {
+	let raw = params.ok_or_else(|| ProtocolError::new(-32602, "query.load requires params"))?;
+	let parsed: QueryLoadParams = serde_json::from_value(raw)
+		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+
+	let (reply_tx, reply_rx) = sync_channel(1);
+	ctx.state_tx
+		.send(Command::LoadNamed {
+			name: parsed.name,
+			reply: reply_tx,
+		})
+		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
+	let metadata = reply_rx
+		.recv()
+		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))??;
+
+	let reply = QueryLoadReply {
+		handle: metadata.handle,
+		hit_count: metadata.hit_count,
+		form: metadata.form,
+	};
+	serde_json::to_value(reply)
+		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+}
+
+pub(crate) fn handle_query_list_named(
+	ctx: &RpcContext,
+) -> Result<serde_json::Value, ProtocolError> {
+	let (reply_tx, reply_rx) = sync_channel(1);
+	ctx.state_tx
+		.send(Command::ListNamed { reply: reply_tx })
+		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
+	let entries = reply_rx
+		.recv()
+		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))?;
+
+	let names: Vec<NamedResultEntry> = entries
+		.into_iter()
+		.filter_map(|m| {
+			m.name.map(|name| NamedResultEntry {
+				name,
+				hit_count: m.hit_count,
+				created_at: m.created_at,
+			})
+		})
+		.collect();
+
+	serde_json::to_value(QueryListNamedReply { names })
+		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+}
+
+pub(crate) fn handle_query_delete_named(
+	params: Option<serde_json::Value>,
+	ctx: &RpcContext,
+) -> Result<serde_json::Value, ProtocolError> {
+	let raw = params
+		.ok_or_else(|| ProtocolError::new(-32602, "query.delete_named requires params"))?;
+	let parsed: QueryDeleteNamedParams = serde_json::from_value(raw)
+		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+
+	let (reply_tx, reply_rx) = sync_channel(1);
+	ctx.state_tx
+		.send(Command::DeleteNamed {
+			name: parsed.name,
+			reply: reply_tx,
+		})
+		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
+	reply_rx
+		.recv()
+		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))??;
+
+	serde_json::to_value(OkReply { ok: true })
+		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+}
+
+pub(crate) fn handle_query_discard(
+	params: Option<serde_json::Value>,
+	ctx: &RpcContext,
+) -> Result<serde_json::Value, ProtocolError> {
+	let raw = params
+		.ok_or_else(|| ProtocolError::new(-32602, "query.discard requires params"))?;
+	let parsed: QueryDiscardParams = serde_json::from_value(raw)
+		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+
+	let (reply_tx, reply_rx) = sync_channel(1);
+	ctx.state_tx
+		.send(Command::DiscardHandle {
+			handle: parsed.handle,
+			reply: reply_tx,
+		})
+		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
+	reply_rx
+		.recv()
+		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))?;
+
+	serde_json::to_value(OkReply { ok: true })
+		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
 	use crate::dispatch::dispatch_request;
 	use crate::dispatch::test_support::with_registered_context;
+
+	fn execute_and_get_handle(ctx: &mut crate::dispatch::RpcContext) -> String {
+		let params = serde_json::json!({ "cql": "[pos=\"NOUN\"]" });
+		let result = dispatch_request("query.execute", Some(params), ctx).unwrap();
+		let reply: QueryExecuteReply = serde_json::from_value(result).unwrap();
+		reply.handle
+	}
 
 	#[test]
 	fn query_execute_count_returns_count() {
@@ -306,6 +478,186 @@ mod tests {
 			let params = serde_json::json!({ "handle": "r-nonexistent" });
 			let err = dispatch_request("query.metadata", Some(params), ctx).unwrap_err();
 			assert_eq!(err.code, error_codes::RESULT_HANDLE_INVALID);
+		});
+	}
+
+	#[test]
+	fn query_save_succeeds_and_returns_query_backed_form() {
+		with_registered_context(|ctx| {
+			let handle = execute_and_get_handle(ctx);
+			let params = serde_json::json!({ "handle": handle, "name": "saved-nouns" });
+			let result = dispatch_request("query.save", Some(params), ctx).unwrap();
+			let reply: QuerySaveReply = serde_json::from_value(result).unwrap();
+			assert!(reply.ok);
+			assert!(matches!(reply.form, ResultForm::QueryBacked));
+		});
+	}
+
+	#[test]
+	fn query_save_duplicate_name_returns_1201() {
+		with_registered_context(|ctx| {
+			let h1 = execute_and_get_handle(ctx);
+			let h2 = execute_and_get_handle(ctx);
+			let params = serde_json::json!({ "handle": h1, "name": "dup" });
+			dispatch_request("query.save", Some(params), ctx).unwrap();
+			let params2 = serde_json::json!({ "handle": h2, "name": "dup" });
+			let err = dispatch_request("query.save", Some(params2), ctx).unwrap_err();
+			assert_eq!(err.code, error_codes::NAMED_RESULT_ALREADY_EXISTS);
+		});
+	}
+
+	#[test]
+	fn query_save_invalid_handle_returns_1200() {
+		with_registered_context(|ctx| {
+			let params =
+				serde_json::json!({ "handle": "r-nonexistent", "name": "whatever" });
+			let err = dispatch_request("query.save", Some(params), ctx).unwrap_err();
+			assert_eq!(err.code, error_codes::RESULT_HANDLE_INVALID);
+		});
+	}
+
+	#[test]
+	fn query_materialize_succeeds_and_populates_materialized_at() {
+		with_registered_context(|ctx| {
+			let handle = execute_and_get_handle(ctx);
+			let save_params = serde_json::json!({ "handle": handle, "name": "to-mat" });
+			dispatch_request("query.save", Some(save_params), ctx).unwrap();
+
+			let params = serde_json::json!({ "name": "to-mat" });
+			let result = dispatch_request("query.materialize", Some(params), ctx).unwrap();
+			let reply: QueryMaterializeReply = serde_json::from_value(result).unwrap();
+			assert!(reply.ok);
+			assert!(!reply.materialized_at.is_empty());
+		});
+	}
+
+	#[test]
+	fn query_materialize_unknown_name_returns_1202() {
+		with_registered_context(|ctx| {
+			let params = serde_json::json!({ "name": "never-saved" });
+			let err = dispatch_request("query.materialize", Some(params), ctx).unwrap_err();
+			assert_eq!(err.code, error_codes::NAMED_RESULT_NOT_FOUND);
+		});
+	}
+
+	#[test]
+	fn query_materialize_already_materialized_returns_1205() {
+		with_registered_context(|ctx| {
+			let handle = execute_and_get_handle(ctx);
+			let save_params = serde_json::json!({ "handle": handle, "name": "twice" });
+			dispatch_request("query.save", Some(save_params), ctx).unwrap();
+			let mat_params = serde_json::json!({ "name": "twice" });
+			dispatch_request("query.materialize", Some(mat_params.clone()), ctx).unwrap();
+			let err = dispatch_request("query.materialize", Some(mat_params), ctx).unwrap_err();
+			assert_eq!(err.code, error_codes::RESULT_ALREADY_MATERIALIZED);
+		});
+	}
+
+	#[test]
+	fn query_load_returns_handle_and_form() {
+		with_registered_context(|ctx| {
+			let handle = execute_and_get_handle(ctx);
+			let save_params = serde_json::json!({ "handle": handle.clone(), "name": "loadable" });
+			dispatch_request("query.save", Some(save_params), ctx).unwrap();
+
+			let params = serde_json::json!({ "name": "loadable" });
+			let result = dispatch_request("query.load", Some(params), ctx).unwrap();
+			let reply: QueryLoadReply = serde_json::from_value(result).unwrap();
+			assert_eq!(reply.handle, handle);
+			assert!(matches!(reply.form, ResultForm::QueryBacked));
+		});
+	}
+
+	#[test]
+	fn query_load_unknown_name_returns_1202() {
+		with_registered_context(|ctx| {
+			let params = serde_json::json!({ "name": "nope" });
+			let err = dispatch_request("query.load", Some(params), ctx).unwrap_err();
+			assert_eq!(err.code, error_codes::NAMED_RESULT_NOT_FOUND);
+		});
+	}
+
+	#[test]
+	fn query_list_named_empty() {
+		with_registered_context(|ctx| {
+			let result = dispatch_request("query.list_named", None, ctx).unwrap();
+			let reply: QueryListNamedReply = serde_json::from_value(result).unwrap();
+			assert!(reply.names.is_empty());
+		});
+	}
+
+	#[test]
+	fn query_list_named_includes_saved() {
+		with_registered_context(|ctx| {
+			let handle = execute_and_get_handle(ctx);
+			let save_params = serde_json::json!({ "handle": handle, "name": "listed" });
+			dispatch_request("query.save", Some(save_params), ctx).unwrap();
+
+			let result = dispatch_request("query.list_named", None, ctx).unwrap();
+			let reply: QueryListNamedReply = serde_json::from_value(result).unwrap();
+			assert_eq!(reply.names.len(), 1);
+			assert_eq!(reply.names[0].name, "listed");
+			assert!(reply.names[0].hit_count > 0);
+		});
+	}
+
+	#[test]
+	fn query_delete_named_succeeds() {
+		with_registered_context(|ctx| {
+			let handle = execute_and_get_handle(ctx);
+			let save_params = serde_json::json!({ "handle": handle, "name": "doomed" });
+			dispatch_request("query.save", Some(save_params), ctx).unwrap();
+
+			let params = serde_json::json!({ "name": "doomed" });
+			let result = dispatch_request("query.delete_named", Some(params), ctx).unwrap();
+			let reply: OkReply = serde_json::from_value(result).unwrap();
+			assert!(reply.ok);
+
+			let load_params = serde_json::json!({ "name": "doomed" });
+			let err = dispatch_request("query.load", Some(load_params), ctx).unwrap_err();
+			assert_eq!(err.code, error_codes::NAMED_RESULT_NOT_FOUND);
+		});
+	}
+
+	#[test]
+	fn query_delete_named_unknown_returns_1202() {
+		with_registered_context(|ctx| {
+			let params = serde_json::json!({ "name": "ghost" });
+			let err = dispatch_request("query.delete_named", Some(params), ctx).unwrap_err();
+			assert_eq!(err.code, error_codes::NAMED_RESULT_NOT_FOUND);
+		});
+	}
+
+	#[test]
+	fn query_discard_session_handle_removes_entry() {
+		with_registered_context(|ctx| {
+			let handle = execute_and_get_handle(ctx);
+			let params = serde_json::json!({ "handle": handle.clone() });
+			let result = dispatch_request("query.discard", Some(params), ctx).unwrap();
+			let reply: OkReply = serde_json::from_value(result).unwrap();
+			assert!(reply.ok);
+
+			let meta_params = serde_json::json!({ "handle": handle });
+			let err = dispatch_request("query.metadata", Some(meta_params), ctx).unwrap_err();
+			assert_eq!(err.code, error_codes::RESULT_HANDLE_INVALID);
+		});
+	}
+
+	#[test]
+	fn query_discard_named_handle_is_no_op() {
+		with_registered_context(|ctx| {
+			let handle = execute_and_get_handle(ctx);
+			let save_params =
+				serde_json::json!({ "handle": handle.clone(), "name": "persistent" });
+			dispatch_request("query.save", Some(save_params), ctx).unwrap();
+
+			let params = serde_json::json!({ "handle": handle.clone() });
+			let result = dispatch_request("query.discard", Some(params), ctx).unwrap();
+			let reply: OkReply = serde_json::from_value(result).unwrap();
+			assert!(reply.ok);
+
+			let meta_params = serde_json::json!({ "handle": handle });
+			dispatch_request("query.metadata", Some(meta_params), ctx).unwrap();
 		});
 	}
 }
