@@ -159,7 +159,7 @@ impl State {
 			.values()
 			.filter(|c| match &filter {
 				None => true,
-				Some(f) => roster_filter_matches(f, &c.info),
+				Some(f) => f.matches(&c.info),
 			})
 			.map(|c| c.info.clone())
 			.collect()
@@ -574,29 +574,6 @@ impl NamedResultsEvent {
 	}
 }
 
-fn roster_filter_matches(filter: &RosterFilter, info: &ProcessInfo) -> bool {
-	if !filter.kinds.is_empty() && !filter.kinds.contains(&info.kind) {
-		return false;
-	}
-	if !filter.provides_any_of.is_empty()
-		&& !filter
-			.provides_any_of
-			.iter()
-			.any(|k| info.provides.contains(k))
-	{
-		return false;
-	}
-	if !filter.consumes_any_of.is_empty()
-		&& !filter
-			.consumes_any_of
-			.iter()
-			.any(|k| info.consumes.contains(k))
-	{
-		return false;
-	}
-	true
-}
-
 pub(crate) fn anchor_kind_compat(
 	kind: &AnchorKind,
 	master_provides: &[InterestKind],
@@ -763,7 +740,6 @@ fn try_send_outbound(
 	}
 }
 
-#[allow(dead_code)]
 pub(crate) enum Command {
 	Register {
 		params: RegisterParams,
@@ -1255,13 +1231,13 @@ mod tests {
 			kinds: vec![ProcessKind::Reader],
 			..Default::default()
 		};
-		assert!(roster_filter_matches(&filter, &info));
+		assert!(filter.matches(&info));
 
 		let filter = RosterFilter {
 			kinds: vec![ProcessKind::Kwic],
 			..Default::default()
 		};
-		assert!(!roster_filter_matches(&filter, &info));
+		assert!(!filter.matches(&info));
 	}
 
 	#[test]
@@ -1274,13 +1250,13 @@ mod tests {
 			provides_any_of: vec![InterestKind::Sentence],
 			..Default::default()
 		};
-		assert!(roster_filter_matches(&filter, &info));
+		assert!(filter.matches(&info));
 
 		let filter = RosterFilter {
 			provides_any_of: vec![InterestKind::Hit],
 			..Default::default()
 		};
-		assert!(!roster_filter_matches(&filter, &info));
+		assert!(!filter.matches(&info));
 	}
 
 	#[test]
@@ -1291,14 +1267,14 @@ mod tests {
 			provides_any_of: vec![InterestKind::Sentence],
 			..Default::default()
 		};
-		assert!(roster_filter_matches(&filter, &info));
+		assert!(filter.matches(&info));
 
 		let filter = RosterFilter {
 			kinds: vec![ProcessKind::Reader],
 			provides_any_of: vec![InterestKind::Hit],
 			..Default::default()
 		};
-		assert!(!roster_filter_matches(&filter, &info));
+		assert!(!filter.matches(&info));
 	}
 
 	#[test]
