@@ -209,6 +209,29 @@ pub struct CorpusLayerInfoParams {
 pub enum LayerKind {
 	String,
 	Int,
+	#[serde(other)]
+	Unknown,
+}
+
+impl From<montre_index::LayerKind> for LayerKind {
+	fn from(kind: montre_index::LayerKind) -> Self {
+		match kind {
+			montre_index::LayerKind::String => Self::String,
+			montre_index::LayerKind::Int => Self::Int,
+			_ => {
+				tracing::error!(
+					?kind,
+					"unknown montre_index::LayerKind variant; mapping to wire Unknown",
+				);
+				debug_assert!(
+					false,
+					"unknown montre_index::LayerKind variant: {:?}",
+					kind,
+				);
+				Self::Unknown
+			}
+		}
+	}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

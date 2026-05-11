@@ -473,27 +473,38 @@ fn handle_corpus_layer_info(
 }
 
 fn classify_layer(corpus: &Corpus, name: &str) -> Option<(LayerKind, u32)> {
-	if let Some(values) = corpus.inverted().values(name) {
-		return Some((LayerKind::String, values.len() as u32));
-	}
-	match name {
-		"head" => Some((LayerKind::Int, 0)),
-		"deps" => Some((LayerKind::String, 0)),
-		_ => None,
-	}
+	let kind = corpus.layer_kind(name)?;
+	let value_count = corpus
+		.inverted()
+		.values(name)
+		.map(|v| v.len() as u32)
+		.unwrap_or(0);
+	Some((kind.into(), value_count))
 }
 
 fn fetch_annotation(corpus: &Corpus, position: u64, layer: &str) -> Option<AnnotationValue> {
-	let (kind, _) = classify_layer(corpus, layer)?;
-	match kind {
-		LayerKind::String => corpus
+	match corpus.layer_kind(layer)? {
+		montre_index::LayerKind::String => corpus
 			.forward()
 			.get_str(position, layer)
 			.map(|s| AnnotationValue::String(s.to_string())),
-		LayerKind::Int => corpus
+		montre_index::LayerKind::Int => corpus
 			.forward()
 			.get_int(position, layer)
 			.map(AnnotationValue::Int),
+		other => {
+			tracing::error!(
+				layer,
+				?other,
+				"unknown montre_index::LayerKind variant in fetch_annotation",
+			);
+			debug_assert!(
+				false,
+				"unknown montre_index::LayerKind variant {:?} for layer {}",
+				other, layer,
+			);
+			None
+		}
 	}
 }
 
