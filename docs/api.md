@@ -13,8 +13,8 @@ let corpus = montre_index::open("path/to/corpus")?;
 corpus.name()              // &str: corpus name from corpus.json
 corpus.path()              // &Path: directory the corpus was opened from
 corpus.token_count()       // u64: total tokens across all components
-corpus.layers()            // &[String]: all annotation layer names (forward-stored; string or int)
-corpus.indexed_layers()    // Vec<&str>: subset with inverted-index entries (queryable via [layer=value])
+corpus.layers()            // &[String]: every annotation layer in the corpus, including forward-only layers like `head` and `deps`
+corpus.indexed_layers()    // Vec<&str>: subset queryable via [layer=value] in CQL (string layers with inverted-index entries — excludes `head` because it's int and `deps` because it's forward-only)
 corpus.layer_kind(name)    // Option<LayerKind>: String or Int classification (None if no such layer)
 corpus.span_layers()       // &[String]: span layer names
 
