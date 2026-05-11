@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, SyncSender};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use montre_query::executor::Hit;
 use uuid::Uuid;
@@ -11,6 +11,7 @@ use crate::protocol::{
 	RegisterParams, RegisterReply, ResultForm, ResultHandle, ResultMetadata, RosterFilter, Topic,
 	PROTOCOL_VERSION,
 };
+use crate::CorpusHandle;
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -41,9 +42,8 @@ pub(crate) struct Connection {
 }
 
 pub(crate) struct State {
-	corpus_id: String,
 	daemon_epoch: u64,
-	results: Arc<RwLock<ResultsTable>>,
+	handle: Arc<CorpusHandle>,
 	roster: HashMap<ProcessId, Connection>,
 	anchors: HashMap<AnchorId, Anchor>,
 	subscriptions: HashMap<Topic, HashSet<ProcessId>>,
@@ -53,11 +53,10 @@ pub(crate) struct State {
 }
 
 impl State {
-	pub(crate) fn new(corpus_id: String, daemon_epoch: u64) -> Self {
+	pub(crate) fn new(daemon_epoch: u64, handle: Arc<CorpusHandle>) -> Self {
 		Self {
-			corpus_id,
 			daemon_epoch,
-			results: Arc::new(RwLock::new(HashMap::new())),
+			handle,
 			roster: HashMap::new(),
 			anchors: HashMap::new(),
 			subscriptions: HashMap::new(),
@@ -65,15 +64,6 @@ impl State {
 			next_process_id: 1,
 			next_anchor_id: 1,
 		}
-	}
-
-	pub(crate) fn results(&self) -> Arc<RwLock<ResultsTable>> {
-		Arc::clone(&self.results)
-	}
-
-	#[allow(dead_code)]
-	pub(crate) fn corpus_id(&self) -> &str {
-		&self.corpus_id
 	}
 
 	fn allocate_process_id(&mut self) -> ProcessId {
@@ -222,7 +212,7 @@ impl State {
 			created_at: now_rfc3339(),
 			materialized_at: None,
 			hit_count: hits.len() as u64,
-			corpus_id: self.corpus_id.clone(),
+			corpus_id: self.handle.corpus_id.clone(),
 			name: None,
 			form: ResultForm::Session,
 		};
@@ -231,7 +221,7 @@ impl State {
 			hits,
 			metadata,
 		});
-		self.results
+		self.handle.results
 			.write()
 			.expect("results lock poisoned")
 			.insert(handle.clone(), entry);
@@ -251,7 +241,7 @@ impl State {
 		}
 
 		let promoted = {
-			let table = self.results.read().expect("results lock poisoned");
+			let table = self.handle.results.read().expect("results lock poisoned");
 			let existing = table.get(&handle).cloned().ok_or_else(|| {
 				ProtocolError::new(error_codes::RESULT_HANDLE_INVALID, "handle not found")
 			})?;
@@ -266,7 +256,7 @@ impl State {
 		};
 
 		let metadata = promoted.metadata.clone();
-		self.results
+		self.handle.results
 			.write()
 			.expect("results lock poisoned")
 			.insert(handle.clone(), promoted);
@@ -285,7 +275,7 @@ impl State {
 		})?;
 
 		let promoted = {
-			let table = self.results.read().expect("results lock poisoned");
+			let table = self.handle.results.read().expect("results lock poisoned");
 			let existing = table.get(&handle).cloned().ok_or_else(|| {
 				ProtocolError::new(error_codes::RESULT_HANDLE_INVALID, "handle not found")
 			})?;
@@ -306,7 +296,7 @@ impl State {
 		};
 
 		let metadata = promoted.metadata.clone();
-		self.results
+		self.handle.results
 			.write()
 			.expect("results lock poisoned")
 			.insert(handle, promoted);
@@ -322,7 +312,7 @@ impl State {
 				format!("name '{}' not found", name),
 			)
 		})?;
-		let table = self.results.read().expect("results lock poisoned");
+		let table = self.handle.results.read().expect("results lock poisoned");
 		let entry = table.get(handle).ok_or_else(|| {
 			ProtocolError::new(error_codes::RESULT_HANDLE_INVALID, "handle not found")
 		})?;
@@ -330,7 +320,7 @@ impl State {
 	}
 
 	fn list_named(&self) -> Vec<ResultMetadata> {
-		let table = self.results.read().expect("results lock poisoned");
+		let table = self.handle.results.read().expect("results lock poisoned");
 		self.named_results
 			.values()
 			.filter_map(|h| table.get(h).map(|e| e.metadata.clone()))
@@ -344,7 +334,7 @@ impl State {
 				format!("name '{}' not found", name),
 			)
 		})?;
-		self.results
+		self.handle.results
 			.write()
 			.expect("results lock poisoned")
 			.remove(&handle);
@@ -353,7 +343,7 @@ impl State {
 	}
 
 	fn discard_handle(&mut self, handle: ResultHandle) {
-		let mut table = self.results.write().expect("results lock poisoned");
+		let mut table = self.handle.results.write().expect("results lock poisoned");
 		let Some(entry) = table.get(&handle) else {
 			return;
 		};
@@ -771,10 +761,41 @@ pub(crate) fn run(mut state: State, commands: Receiver<Command>) {
 mod tests {
 	use super::*;
 	use crate::protocol::{InterestKind, ProcessKind};
+	use std::path::{Path, PathBuf};
 	use std::sync::mpsc::sync_channel;
+	use std::sync::{OnceLock, RwLock};
+	use tempfile::TempDir;
+
+	fn corpus_fixture() -> &'static Path {
+		static FIXTURE: OnceLock<(TempDir, PathBuf)> = OnceLock::new();
+		let (_keep, path) = FIXTURE.get_or_init(|| {
+			let temp = TempDir::new().expect("tempdir");
+			let out = temp.path().join("corpus");
+			let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+				.join("../../testdata/parallel/corpus.toml");
+			montre_build::MultiCorpusBuilder::from_manifest(&manifest)
+				.expect("manifest load")
+				.build(&out)
+				.expect("corpus build");
+			(temp, out)
+		});
+		path.as_path()
+	}
+
+	fn fake_corpus() -> Arc<CorpusHandle> {
+		let path = corpus_fixture();
+		let corpus = Arc::new(montre_index::open(path).expect("corpus open"));
+		let canonical_path = std::fs::canonicalize(path).expect("canonicalize");
+		Arc::new(CorpusHandle {
+			corpus,
+			corpus_id: "test-corpus".to_string(),
+			canonical_path,
+			results: Arc::new(RwLock::new(HashMap::new())),
+		})
+	}
 
 	fn make_state() -> State {
-		State::new("test-corpus".to_string(), 1)
+		State::new(1, fake_corpus())
 	}
 
 	fn dummy_outbound() -> SyncSender<Outbound> {
@@ -1004,7 +1025,7 @@ mod tests {
 			.metadata
 			.created_at
 			.clone();
-		assert!(state.results.read().unwrap().get(&h).unwrap().metadata.materialized_at.is_none());
+		assert!(state.handle.results.read().unwrap().get(&h).unwrap().metadata.materialized_at.is_none());
 
 		let metadata = state.materialize_result("named".to_string()).unwrap();
 		assert_eq!(metadata.created_at, created_at_before);
@@ -1017,10 +1038,10 @@ mod tests {
 		let mut state = make_state();
 		let h = state.insert_result("foo".to_string(), vec![]);
 		state.save_result(h.clone(), "named".to_string()).unwrap();
-		assert!(state.results.read().unwrap().contains_key(&h));
+		assert!(state.handle.results.read().unwrap().contains_key(&h));
 
 		state.delete_named("named".to_string()).unwrap();
-		assert!(!state.results.read().unwrap().contains_key(&h));
+		assert!(!state.handle.results.read().unwrap().contains_key(&h));
 		assert!(!state.named_results.contains_key("named"));
 	}
 
@@ -1035,10 +1056,10 @@ mod tests {
 	fn discard_handle_session_form_removed() {
 		let mut state = make_state();
 		let h = state.insert_result("foo".to_string(), vec![]);
-		assert!(state.results.read().unwrap().contains_key(&h));
+		assert!(state.handle.results.read().unwrap().contains_key(&h));
 
 		state.discard_handle(h.clone());
-		assert!(!state.results.read().unwrap().contains_key(&h));
+		assert!(!state.handle.results.read().unwrap().contains_key(&h));
 	}
 
 	#[test]
@@ -1048,7 +1069,7 @@ mod tests {
 		state.save_result(h.clone(), "named".to_string()).unwrap();
 
 		state.discard_handle(h.clone());
-		assert!(state.results.read().unwrap().contains_key(&h));
+		assert!(state.handle.results.read().unwrap().contains_key(&h));
 		assert!(state.named_results.contains_key("named"));
 	}
 
