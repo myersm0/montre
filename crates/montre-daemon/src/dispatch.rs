@@ -7,7 +7,9 @@ use std::thread;
 
 use crate::handlers::{alignment, anchor, corpus, query, session, subscription, text};
 use crate::protocol::error_codes;
-use crate::protocol::{ProcessId, ProtocolError, RegisterParams, RegisterReply};
+use crate::protocol::{
+	ProcessId, ProtocolError, PublishInterestParams, RegisterParams, RegisterReply,
+};
 use crate::state::{Command, Outbound};
 use crate::CorpusHandle;
 
@@ -295,14 +297,38 @@ pub(crate) fn dispatch_request(
 
 fn dispatch_notification(
 	method: &str,
-	_params: Option<serde_json::Value>,
+	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) {
-	if ctx.process_id.is_none() {
+	let Some(process_id) = ctx.process_id else {
 		tracing::warn!(method = method, "notification before registration; ignored");
 		return;
+	};
+	match method {
+		"session.publish_interest" => {
+			let Some(raw) = params else {
+				tracing::warn!(method = method, "publish_interest missing params; ignored");
+				return;
+			};
+			let parsed: PublishInterestParams = match serde_json::from_value(raw) {
+				Ok(p) => p,
+				Err(e) => {
+					tracing::warn!(method = method, error = %e, "publish_interest invalid params; ignored");
+					return;
+				}
+			};
+			if ctx
+				.state_tx
+				.send(Command::PublishInterest { process_id, interest: parsed.interest })
+				.is_err()
+			{
+				tracing::warn!(method = method, "state dispatch failed; notification dropped");
+			}
+		}
+		_ => {
+			tracing::debug!(method = method, "unknown notification method; ignored");
+		}
 	}
-	tracing::debug!(method = method, "notification handler not yet wired");
 }
 
 fn handle_register(
@@ -694,5 +720,187 @@ mod tests {
 
 		drop(state_tx);
 		let _ = state_handle.join();
+	}
+
+	#[test]
+	fn notification_before_registration_silently_dropped() {
+		let handle = make_handle();
+		let (state_tx, state_rx) = channel::<Command>();
+		let (outbound_tx, _outbound_rx) = sync_channel(OUTBOUND_QUEUE_DEPTH);
+		let ctx = make_context(state_tx, outbound_tx, handle);
+
+		let params = serde_json::json!({
+			"interest": { "type": "Sentence", "doc": 0, "sent": 0 }
+		});
+		dispatch_notification("session.publish_interest", Some(params), &ctx);
+
+		assert!(state_rx.try_recv().is_err(), "no command should reach state when unregistered");
+	}
+
+	#[test]
+	fn notification_unknown_method_silently_dropped() {
+		let handle = make_handle();
+		let (state_tx, state_rx) = channel::<Command>();
+		let (outbound_tx, _outbound_rx) = sync_channel(OUTBOUND_QUEUE_DEPTH);
+		let mut ctx = make_context(state_tx, outbound_tx, handle);
+		ctx.process_id = Some(42);
+
+		dispatch_notification("session.totally_bogus", Some(serde_json::json!({})), &ctx);
+
+		assert!(state_rx.try_recv().is_err(), "no command should be dispatched for unknown method");
+	}
+
+	#[test]
+	fn publish_interest_sentence_mirror_widens_position_for_follower() {
+		use crate::dispatch::test_support::{register_context, with_state_thread};
+		use crate::protocol::ProcessKind;
+		use crate::state::Outbound;
+		use std::time::Duration;
+
+		with_state_thread(|state_tx, handle| {
+			let (mut master_ctx, _master_outbound) = register_context(
+				state_tx.clone(),
+				Arc::clone(&handle),
+				ProcessKind::External,
+				&["Position", "Span", "Sentence"],
+				&[],
+			);
+			let (follower_ctx, follower_outbound) = register_context(
+				state_tx.clone(),
+				Arc::clone(&handle),
+				ProcessKind::External,
+				&[],
+				&["Sentence"],
+			);
+
+			let master_pid = master_ctx.process_id.unwrap();
+			let follower_pid = follower_ctx.process_id.unwrap();
+
+			let anchor_params = serde_json::json!({
+				"master_id": master_pid,
+				"follower_id": follower_pid,
+				"kind": { "type": "SentenceMirror" }
+			});
+			let reply = dispatch_request("anchor.create", Some(anchor_params), &mut master_ctx)
+				.expect("anchor.create");
+			let anchor_id = reply["anchor_id"].as_u64().expect("anchor_id");
+
+			let source_doc = crate::dispatch::test_support::find_doc_index(
+				&handle.corpus,
+				"la_maison",
+			);
+			let sent_params = serde_json::json!({ "doc": source_doc, "sent": 0 });
+			let sent_reply = dispatch_request("text.sentence", Some(sent_params), &mut master_ctx)
+				.expect("text.sentence");
+			let position = sent_reply["span"]["start"].as_u64().expect("span.start");
+
+			let publish_params = serde_json::json!({
+				"interest": { "type": "Position", "doc": source_doc, "position": position }
+			});
+			dispatch_notification("session.publish_interest", Some(publish_params), &master_ctx);
+
+			let Outbound::Message(payload) = follower_outbound
+				.recv_timeout(Duration::from_millis(500))
+				.expect("follower should receive a notification");
+			assert_eq!(payload["jsonrpc"], "2.0");
+			assert_eq!(payload["method"], "notification.anchor_update");
+			assert_eq!(payload["params"]["anchor_id"], anchor_id);
+			assert_eq!(payload["params"]["interest"]["type"], "Sentence");
+			assert_eq!(payload["params"]["interest"]["doc"], source_doc);
+			assert_eq!(payload["params"]["interest"]["sent"], 0);
+		});
+	}
+
+	#[test]
+	fn publish_interest_alignment_fans_out_to_follower() {
+		use crate::dispatch::test_support::{register_context, with_state_thread};
+		use crate::protocol::ProcessKind;
+		use crate::state::Outbound;
+		use std::time::Duration;
+
+		with_state_thread(|state_tx, handle| {
+			let (mut master_ctx, _master_outbound) = register_context(
+				state_tx.clone(),
+				Arc::clone(&handle),
+				ProcessKind::External,
+				&["Sentence", "Span"],
+				&[],
+			);
+			let (follower_ctx, follower_outbound) = register_context(
+				state_tx.clone(),
+				Arc::clone(&handle),
+				ProcessKind::External,
+				&[],
+				&["Span"],
+			);
+
+			let master_pid = master_ctx.process_id.unwrap();
+			let follower_pid = follower_ctx.process_id.unwrap();
+
+			let anchor_params = serde_json::json!({
+				"master_id": master_pid,
+				"follower_id": follower_pid,
+				"kind": { "type": "Alignment", "name": "sentence" }
+			});
+			let reply = dispatch_request("anchor.create", Some(anchor_params), &mut master_ctx)
+				.expect("anchor.create");
+			let anchor_id = reply["anchor_id"].as_u64().expect("anchor_id");
+
+			let source_doc = crate::dispatch::test_support::find_doc_index(
+				&handle.corpus,
+				"la_maison",
+			);
+			let target_doc = crate::dispatch::test_support::find_doc_index(
+				&handle.corpus,
+				"the_house",
+			);
+
+			let sent_params = serde_json::json!({ "doc": source_doc, "sent": 0 });
+			let sent_reply = dispatch_request("text.sentence", Some(sent_params), &mut master_ctx)
+				.expect("text.sentence");
+			let span_start = sent_reply["span"]["start"].as_u64().expect("span.start");
+			let span_end = sent_reply["span"]["end"].as_u64().expect("span.end");
+
+			let project_params = serde_json::json!({
+				"source": { "doc": source_doc, "start": span_start, "end": span_end },
+				"alignment_name": "sentence",
+			});
+			let project_reply =
+				dispatch_request("alignment.project", Some(project_params), &mut master_ctx)
+					.expect("alignment.project");
+			let expected_count = project_reply["targets"]
+				.as_array()
+				.expect("targets array")
+				.len();
+			assert!(expected_count > 0, "test corpus must align this sentence to at least one target");
+
+			let publish_params = serde_json::json!({
+				"interest": { "type": "Sentence", "doc": source_doc, "sent": 0 }
+			});
+			dispatch_notification("session.publish_interest", Some(publish_params), &master_ctx);
+
+			let mut received = Vec::new();
+			let first = follower_outbound
+				.recv_timeout(Duration::from_millis(500))
+				.expect("follower should receive at least one notification");
+			received.push(first);
+			while let Ok(msg) = follower_outbound.recv_timeout(Duration::from_millis(50)) {
+				received.push(msg);
+			}
+
+			assert_eq!(
+				received.len(),
+				expected_count,
+				"one notification per projected target",
+			);
+			for outbound in &received {
+				let Outbound::Message(payload) = outbound;
+				assert_eq!(payload["jsonrpc"], "2.0");
+				assert_eq!(payload["method"], "notification.anchor_update");
+				assert_eq!(payload["params"]["anchor_id"], anchor_id);
+				assert_eq!(payload["params"]["interest"]["type"], "Span");
+				assert_eq!(payload["params"]["interest"]["doc"], target_doc);
+			}
+		});
 	}
 }

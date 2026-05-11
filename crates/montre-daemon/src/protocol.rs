@@ -193,6 +193,11 @@ pub struct SessionRosterReply {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishInterestParams {
+	pub interest: Interest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorpusInfo {
 	pub name: String,
 	pub canonical_path: String,
