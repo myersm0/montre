@@ -38,7 +38,7 @@ The corpus itself lives behind `Arc<CorpusHandle>`, shared by the state thread a
 
 These hold across all phases. Code review and new handlers should preserve them.
 
-**Corpus identity is the BLAKE3-16-hex of the canonical corpus path.** The same value appears as the socket filename stem (`<hash>.sock`), as `CorpusHandle::corpus_id`, and on the wire as `stable_key` in `CorpusInfo` and `corpus_id` in `ResultMetadata`. (The two wire names are historical drift, resolved in the spec pass.) Clients treat it as opaque. When the engine adopts UUID-stamped corpora (v2 of the spec), this value evolves to the UUID without changing any client code that doesn't parse it.
+**Corpus identity is the BLAKE3-16-hex of the canonical corpus path.** The same value appears as the socket filename stem (`<hash>.sock`), as `CorpusHandle::corpus_id`, and on the wire as `stable_key` in `CorpusInfo` and `corpus_id` in `ResultMetadata`. The two wire names diverged historically; `daemon-protocol.md` documents the equivalence, and the rename will happen alongside the v2 UUID transition. Clients treat the value as opaque. When the engine adopts UUID-stamped corpora (v2 of the spec), this value evolves to the UUID without changing any client code that doesn't parse it.
 
 **Hits move through the state thread exactly once.** `query.execute` parses, plans, and executes against the immutable corpus directly on its connection thread, then sends `Command::InsertResult { cql, hits }` through the channel. The `Vec<Hit>` traverses the channel by move, never by clone. This is what keeps a 70ms quantifier query from serializing all other clients. Any future code that touches stored hits must preserve the move-once invariant — for example, metadata mutations on `ResultEntry` should not re-clone the hits vector.
 
@@ -76,27 +76,40 @@ Cross-handler helpers (e.g. `document_component`, `document_sentence_count` in `
 
 ## Adding a handler
 
-Until the parse/serialize boilerplate is extracted (post-c3 cleanup), every handler follows this shape:
+Handlers live in `src/handlers/<namespace>.rs`. The standard shape uses helpers from `dispatch`:
 
 ```rust
+use crate::dispatch::{parse_params, serialize_reply, state_roundtrip, RpcContext};
+use crate::state::Command;
+
 pub(crate) fn handle_namespace_method(
     params: Option<serde_json::Value>,
     ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-    let raw = params.ok_or_else(|| {
-        ProtocolError::new(-32602, "namespace.method requires params")
+    let parsed: NamespaceMethodParams = parse_params("namespace.method", params)?;
+
+    // Read-only against the corpus:
+    let result = ctx.handle.corpus.something(&parsed);
+
+    // ...or mutate shared state via the state thread:
+    let result = state_roundtrip(ctx, |reply| Command::SomeAction {
+        field: parsed.field,
+        reply,
     })?;
-    let parsed: NamespaceMethodParams = serde_json::from_value(raw)
-        .map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
 
-    // ... do the thing, possibly via Command::Foo and reply_rx ...
-
-    serde_json::to_value(reply)
-        .map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+    serialize_reply(SomeReply { result })
 }
 ```
 
-Handlers that mutate shared state send a `Command::Foo { ..., reply: reply_tx }` to `ctx.state_tx` and block on `reply_rx.recv()`. Handlers that only read corpus data can work off `ctx.handle.corpus` directly without touching the state thread. Wire the new method into `dispatch_request` in `dispatch.rs`.
+Three parse/serialize helpers, all in `dispatch.rs`:
+
+- `parse_params::<T>(method, params)` for required-params handlers.
+- `parse_params_or_default::<T>(params)` for handlers that tolerate `None` and want `T::default()`.
+- `serialize_reply(value)` for the response.
+
+For state-thread roundtrips, `state_roundtrip(ctx, |reply| Command::Foo { ..., reply })` takes care of allocating the oneshot channel, sending the command, and waiting for the reply. It returns the bare reply value; for `Command` variants whose reply is itself `Result<R, ProtocolError>`, the call site uses `??` to flatten.
+
+Read-only handlers work directly off `ctx.handle.corpus` without touching the state thread. Wire the new method into `dispatch_request` in `dispatch.rs`.
 
 ## Test infrastructure
 
