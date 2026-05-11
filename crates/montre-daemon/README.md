@@ -48,6 +48,14 @@ These hold across all phases. Code review and new handlers should preserve them.
 
 **Notifications carry no ID.** Strict JSON-RPC 2.0. `session.publish_interest` is a client-to-daemon notification (fire-and-forget). `notification.anchor_update`, `notification.roster_changed`, `notification.named_results_changed`, and `notification.shutdown` are daemon-to-client notifications.
 
+### DaemonClient reader-thread invariant
+
+`DaemonClient` owns one background reader thread per connection. The reader is the only code path that receives frames, routes responses to pending request waiters, and forwards notifications.
+
+If the reader exits for any reason — EOF, framing error, protocol error, or panic during unwinding — it must mark the client as closed and release all pending response waiters. Request methods must never be able to enqueue a waiter and then block forever because the reader died without setting the closed flag.
+
+This is enforced with a drop guard in the reader thread rather than relying on normal loop exit.
+
 ## File layout
 
 ```
