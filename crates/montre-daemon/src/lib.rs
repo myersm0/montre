@@ -99,6 +99,11 @@ fn hex_prefix(canonical: &Path, hex_chars: usize) -> String {
 	out
 }
 
+pub(crate) fn socket_path_for(corpus_path: &Path) -> io::Result<PathBuf> {
+	let canonical = std::fs::canonicalize(corpus_path)?;
+	default_socket_path(&canonical)
+}
+
 fn default_socket_path(canonical: &Path) -> io::Result<PathBuf> {
 	let dir = data_dir().ok_or_else(|| {
 		io::Error::new(
