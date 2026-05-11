@@ -1,6 +1,6 @@
 use montre_index::{Corpus, InvertedIndex};
 
-use crate::dispatch::RpcContext;
+use crate::dispatch::{parse_params, parse_params_or_default, serialize_reply, RpcContext};
 use crate::protocol::{
 	CorpusDocumentsParams, CorpusDocumentsReply, CorpusInfo, CorpusLayerInfoParams,
 	DocumentEntry, LayerInfo, LayerKind, ProtocolError,
@@ -27,19 +27,14 @@ pub(crate) fn handle_corpus_info(ctx: &RpcContext) -> Result<serde_json::Value, 
 		layers: ctx.handle.corpus.layers().to_vec(),
 		alignments,
 	};
-	serde_json::to_value(info)
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	serialize_reply(info)
 }
 
 pub(crate) fn handle_corpus_documents(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let parsed: CorpusDocumentsParams = match params {
-		None => CorpusDocumentsParams::default(),
-		Some(v) => serde_json::from_value(v)
-			.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?,
-	};
+	let parsed: CorpusDocumentsParams = parse_params_or_default(params)?;
 
 	let allowed_range = match parsed.component.as_deref() {
 		None => None,
@@ -67,9 +62,7 @@ pub(crate) fn handle_corpus_documents(
 		});
 	}
 
-	let reply = CorpusDocumentsReply { documents };
-	serde_json::to_value(reply)
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	serialize_reply(CorpusDocumentsReply { documents })
 }
 
 pub(crate) fn document_component(ctx: &RpcContext, document_index: usize) -> String {
@@ -93,22 +86,17 @@ pub(crate) fn handle_corpus_layer_info(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let raw = params
-		.ok_or_else(|| ProtocolError::new(-32602, "corpus.layer_info requires params"))?;
-	let parsed: CorpusLayerInfoParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+	let parsed: CorpusLayerInfoParams = parse_params("corpus.layer_info", params)?;
 
 	let (kind, value_count) = classify_layer(&ctx.handle.corpus, &parsed.layer).ok_or_else(|| {
 		ProtocolError::new(-32602, format!("unknown layer '{}'", parsed.layer))
 	})?;
 
-	let info = LayerInfo {
+	serialize_reply(LayerInfo {
 		name: parsed.layer,
 		kind,
 		value_count,
-	};
-	serde_json::to_value(info)
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	})
 }
 
 fn classify_layer(corpus: &Corpus, name: &str) -> Option<(LayerKind, u32)> {

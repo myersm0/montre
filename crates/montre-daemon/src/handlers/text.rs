@@ -1,6 +1,6 @@
 use montre_index::{Corpus, ForwardIndex, SpanIndex};
 
-use crate::dispatch::RpcContext;
+use crate::dispatch::{parse_params, serialize_reply, RpcContext};
 use crate::handlers::corpus::{document_component, document_sentence_count};
 use crate::protocol::{
 	AnnotationEntry, AnnotationRow, AnnotationValue, ProtocolError, SentenceEntry, Span,
@@ -57,10 +57,7 @@ pub(crate) fn handle_text_surface(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let raw = params
-		.ok_or_else(|| ProtocolError::new(-32602, "text.surface requires params"))?;
-	let parsed: TextSurfaceParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+	let parsed: TextSurfaceParams = parse_params("text.surface", params)?;
 
 	if parsed.start > parsed.end {
 		return Err(ProtocolError::new(-32602, "start must be <= end"));
@@ -72,21 +69,16 @@ pub(crate) fn handle_text_surface(
 		));
 	}
 
-	let reply = TextSurfaceReply {
+	serialize_reply(TextSurfaceReply {
 		surface: ctx.handle.corpus.surface_text(parsed.start, parsed.end),
-	};
-	serde_json::to_value(reply)
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	})
 }
 
 pub(crate) fn handle_text_sentence(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let raw = params
-		.ok_or_else(|| ProtocolError::new(-32602, "text.sentence requires params"))?;
-	let parsed: TextSentenceParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+	let parsed: TextSentenceParams = parse_params("text.sentence", params)?;
 
 	let (global_idx, span) =
 		sentence_span_in_doc(&ctx.handle.corpus, parsed.doc, parsed.sent).ok_or_else(|| {
@@ -99,7 +91,7 @@ pub(crate) fn handle_text_sentence(
 			)
 		})?;
 
-	let reply = TextSentenceReply {
+	serialize_reply(TextSentenceReply {
 		surface: ctx.handle.corpus.surface_text(span.start, span.end),
 		sentence_id: ctx.handle
 			.corpus
@@ -107,19 +99,14 @@ pub(crate) fn handle_text_sentence(
 			.map(String::from)
 			.unwrap_or_default(),
 		span,
-	};
-	serde_json::to_value(reply)
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	})
 }
 
 pub(crate) fn handle_text_sentences(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let raw = params
-		.ok_or_else(|| ProtocolError::new(-32602, "text.sentences requires params"))?;
-	let parsed: TextSentencesParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+	let parsed: TextSentencesParams = parse_params("text.sentences", params)?;
 
 	if parsed.sent_start > parsed.sent_end {
 		return Err(ProtocolError::new(-32602, "sent_start must be <= sent_end"));
@@ -177,19 +164,14 @@ pub(crate) fn handle_text_sentences(
 		});
 	}
 
-	let reply = TextSentencesReply { sentences };
-	serde_json::to_value(reply)
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	serialize_reply(TextSentencesReply { sentences })
 }
 
 pub(crate) fn handle_text_document(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let raw = params
-		.ok_or_else(|| ProtocolError::new(-32602, "text.document requires params"))?;
-	let parsed: TextDocumentParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+	let parsed: TextDocumentParams = parse_params("text.document", params)?;
 
 	let doc_idx = parsed.doc as usize;
 	let names = ctx.handle.corpus.document_names();
@@ -207,25 +189,20 @@ pub(crate) fn handle_text_document(
 		.cloned()
 		.ok_or_else(|| ProtocolError::new(-32603, "document span lookup failed"))?;
 
-	let reply = TextDocumentReply {
+	serialize_reply(TextDocumentReply {
 		index: parsed.doc,
 		name,
 		component: document_component(ctx, doc_idx),
 		span,
 		sentence_count: document_sentence_count(ctx, doc_idx),
-	};
-	serde_json::to_value(reply)
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	})
 }
 
 pub(crate) fn handle_text_annotations(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let raw = params
-		.ok_or_else(|| ProtocolError::new(-32602, "text.annotations requires params"))?;
-	let parsed: TextAnnotationsParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+	let parsed: TextAnnotationsParams = parse_params("text.annotations", params)?;
 
 	let mut values = Vec::new();
 	for &position in &parsed.positions {
@@ -240,19 +217,14 @@ pub(crate) fn handle_text_annotations(
 		}
 	}
 
-	let reply = TextAnnotationsReply { values };
-	serde_json::to_value(reply)
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	serialize_reply(TextAnnotationsReply { values })
 }
 
 pub(crate) fn handle_text_annotations_range(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let raw = params
-		.ok_or_else(|| ProtocolError::new(-32602, "text.annotations_range requires params"))?;
-	let parsed: TextAnnotationsRangeParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+	let parsed: TextAnnotationsRangeParams = parse_params("text.annotations_range", params)?;
 
 	if parsed.start > parsed.end {
 		return Err(ProtocolError::new(-32602, "start must be <= end"));
@@ -280,9 +252,7 @@ pub(crate) fn handle_text_annotations_range(
 		rows.push(AnnotationRow { position, values });
 	}
 
-	let reply = TextAnnotationsRangeReply { rows };
-	serde_json::to_value(reply)
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	serialize_reply(TextAnnotationsRangeReply { rows })
 }
 
 

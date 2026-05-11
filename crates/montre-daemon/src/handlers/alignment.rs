@@ -1,6 +1,6 @@
 use montre_index::{Corpus, SpanIndex};
 
-use crate::dispatch::RpcContext;
+use crate::dispatch::{parse_params, serialize_reply, RpcContext};
 use crate::protocol::error_codes;
 use crate::protocol::{
 	AlignmentInfo, AlignmentListReply, AlignmentProjectParams, AlignmentProjectReply,
@@ -21,19 +21,14 @@ pub(crate) fn handle_alignment_list(ctx: &RpcContext) -> Result<serde_json::Valu
 			edge_count: a.edge_count as u32,
 		})
 		.collect();
-	let reply = AlignmentListReply { alignments };
-	serde_json::to_value(reply)
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	serialize_reply(AlignmentListReply { alignments })
 }
 
 pub(crate) fn handle_alignment_project(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let raw = params
-		.ok_or_else(|| ProtocolError::new(-32602, "alignment.project requires params"))?;
-	let parsed: AlignmentProjectParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+	let parsed: AlignmentProjectParams = parse_params("alignment.project", params)?;
 
 	if parsed.source.start > parsed.source.end {
 		return Err(ProtocolError::new(-32602, "source.start must be <= source.end"));
@@ -41,9 +36,7 @@ pub(crate) fn handle_alignment_project(
 
 	let targets = project_alignment(&ctx.handle.corpus, &parsed.alignment_name, parsed.source)?;
 
-	let reply = AlignmentProjectReply { targets };
-	serde_json::to_value(reply)
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	serialize_reply(AlignmentProjectReply { targets })
 }
 
 pub(crate) fn project_alignment(
