@@ -320,6 +320,46 @@ pub struct TextAnnotationsRangeReply {
 	pub rows: Vec<AnnotationRow>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlignmentInfo {
+	pub name: String,
+	pub source_component: String,
+	pub target_component: String,
+	pub source_layer: String,
+	pub target_layer: String,
+	pub edge_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlignmentListReply {
+	pub alignments: Vec<AlignmentInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlignmentSource {
+	pub doc: u32,
+	pub start: u64,
+	pub end: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlignmentProjectParams {
+	pub source: AlignmentSource,
+	pub alignment_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlignmentTarget {
+	pub doc: u32,
+	pub start: u64,
+	pub end: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlignmentProjectReply {
+	pub targets: Vec<AlignmentTarget>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Topic {
