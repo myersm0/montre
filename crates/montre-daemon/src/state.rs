@@ -590,7 +590,7 @@ fn anchor_kind_signature(
 	use InterestKind::*;
 	match kind {
 		AnchorKind::SentenceMirror => (&[Position, Span, Sentence], &[Sentence]),
-		AnchorKind::Alignment { .. } => (&[Sentence, Span], &[Sentence, Span]),
+		AnchorKind::Alignment { .. } => (&[Sentence, Span], &[Span]),
 		AnchorKind::KwicSelection => (&[Hit], &[Sentence]),
 		AnchorKind::DocPickerSelection => (&[Document], &[Document]),
 		AnchorKind::NamedResultsSelection => (&[Results], &[Results]),
