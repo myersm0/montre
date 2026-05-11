@@ -1,10 +1,11 @@
-use montre_core::{Position, Value};
+use montre_core::{LayerKind, Position, Value};
 use serde::{Deserialize, Serialize};
 
 pub trait ForwardIndex {
 	fn token_count(&self) -> u64;
 	fn get_str(&self, position: Position, layer: &str) -> Option<&str>;
 	fn get_int(&self, position: Position, layer: &str) -> Option<i64>;
+	fn layer_kind(&self, layer: &str) -> Option<LayerKind>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +99,16 @@ impl ForwardIndex for InMemoryForward {
 			Value::Str(_) => None,
 		}
 	}
+
+	fn layer_kind(&self, layer: &str) -> Option<LayerKind> {
+		let layer_idx = self.layer_index(layer)?;
+		let kind = if self.data[layer_idx].iter().any(|v| matches!(v, Value::Int(_))) {
+			LayerKind::Int
+		} else {
+			LayerKind::String
+		};
+		Some(kind)
+	}
 }
 
 #[cfg(test)]
@@ -163,5 +174,21 @@ mod tests {
 		index.set(word_layer, 0, "the".into());
 
 		assert_eq!(index.get_int(0, "word"), None);
+	}
+
+	#[test]
+	fn layer_kind_classifies_str_and_int() {
+		let mut index = InMemoryForward::new();
+		let word_layer = index.add_layer("word");
+		let head_layer = index.add_layer("head");
+		let empty_layer = index.add_layer("empty");
+
+		index.set(word_layer, 0, "the".into());
+		index.set(head_layer, 0, Value::Int(2));
+
+		assert_eq!(index.layer_kind("word"), Some(LayerKind::String));
+		assert_eq!(index.layer_kind("head"), Some(LayerKind::Int));
+		assert_eq!(index.layer_kind("empty"), Some(LayerKind::String));
+		assert_eq!(index.layer_kind("nonexistent"), None);
 	}
 }

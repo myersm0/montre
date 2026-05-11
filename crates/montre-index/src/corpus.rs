@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use montre_core::{Span, UnitId, span_containing};
+use montre_core::{LayerKind, Span, UnitId, span_containing};
 use rayon;
 use serde::{Deserialize, Serialize};
 
@@ -13,7 +13,7 @@ use crate::mwt::MappedMWTs;
 use crate::sentence_ids::MappedSentenceIds;
 use crate::spacing::SpacingIndex;
 use crate::spans_flat::{MappedSpans, SpanStore};
-use crate::{IndexError, Result, SpanIndex};
+use crate::{ForwardIndex, IndexError, Result, SpanIndex};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentMeta {
@@ -226,6 +226,10 @@ impl Corpus {
 	#[inline]
 	pub fn span_layers(&self) -> &[String] {
 		&self.meta.span_layers
+	}
+
+	pub fn layer_kind(&self, layer: &str) -> Option<LayerKind> {
+		self.forward.layer_kind(layer)
 	}
 
 	#[inline]
