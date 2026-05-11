@@ -21,7 +21,7 @@ pub(crate) type ResultsTable = HashMap<ResultHandle, Arc<ResultEntry>>;
 
 pub(crate) struct ResultEntry {
 	pub cql: String,
-	pub hits: Vec<Hit>,
+	pub hits: Arc<Vec<Hit>>,
 	pub metadata: ResultMetadata,
 }
 
@@ -211,7 +211,7 @@ impl State {
 		};
 		let entry = Arc::new(ResultEntry {
 			cql,
-			hits,
+			hits: Arc::new(hits),
 			metadata,
 		});
 		self.handle.results
