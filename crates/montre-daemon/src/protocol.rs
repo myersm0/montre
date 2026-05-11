@@ -573,7 +573,7 @@ impl RosterFilter {
 	}
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProtocolError {
 	pub code: i32,
 	pub message: String,
