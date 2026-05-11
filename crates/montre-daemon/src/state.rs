@@ -726,7 +726,7 @@ fn generate_handle() -> ResultHandle {
 fn now_rfc3339() -> String {
 	time::OffsetDateTime::now_utc()
 		.format(&time::format_description::well_known::Rfc3339)
-		.unwrap_or_default()
+		.expect("RFC 3339 format of OffsetDateTime::now_utc() is total")
 }
 
 fn try_send_outbound(
