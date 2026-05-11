@@ -7,6 +7,10 @@ pub trait InvertedIndex {
 	fn get(&self, layer: &str, value: &str) -> Option<&RoaringBitmap>;
 	fn layers(&self) -> Vec<&str>;
 	fn values(&self, layer: &str) -> Option<Vec<&str>>;
+
+	fn value_count(&self, layer: &str) -> Option<usize> {
+		self.values(layer).map(|v| v.len())
+	}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +73,10 @@ impl InvertedIndex for InMemoryInverted {
 		self.data.get(layer).map(|values| {
 			values.keys().map(|s| s.as_str()).collect()
 		})
+	}
+
+	fn value_count(&self, layer: &str) -> Option<usize> {
+		self.data.get(layer).map(|values| values.len())
 	}
 }
 
@@ -134,6 +142,19 @@ mod tests {
 	fn values_missing_layer() {
 		let index = InMemoryInverted::new();
 		assert!(index.values("nonexistent").is_none());
+	}
+
+	#[test]
+	fn value_count_matches_values_len() {
+		let mut index = InMemoryInverted::new();
+		index.insert("pos", "DET", [0, 5]);
+		index.insert("pos", "NOUN", [3, 8]);
+		index.insert("pos", "VERB", [4]);
+		index.insert("word", "the", [0]);
+
+		assert_eq!(index.value_count("pos"), Some(3));
+		assert_eq!(index.value_count("word"), Some(1));
+		assert_eq!(index.value_count("nonexistent"), None);
 	}
 
 	#[test]

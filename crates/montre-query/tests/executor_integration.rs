@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use montre_build::builder::CorpusBuilder;
 use montre_build::format::conllu::ConllUReader;
 use montre_build::format::CorpusReader;
-use montre_index::{Corpus, ForwardIndex, InvertedIndex, SpanIndex};
+use montre_index::{Corpus, ForwardIndex, InvertedIndex, LayerKind, SpanIndex};
 
 static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -1300,8 +1300,7 @@ fn deps_with_empty_node_references() {
 }
 
 #[test]
-fn document_navigation_helpers() {
-	let doc_a = "\
+fn document_navigation_helpers() {	let doc_a = "\
 1\tle\tle\tDET\t_\t_\t0\troot\t_\t_
 2\tchat\tchat\tNOUN\t_\t_\t0\troot\t_\t_
 
@@ -1334,4 +1333,39 @@ fn document_navigation_helpers() {
 	assert_eq!(corpus.last_sentence_of_document(1), Some(2));
 	assert_eq!(corpus.first_sentence_of_document(99), None);
 	assert_eq!(corpus.last_sentence_of_document(99), None);
+}
+
+#[test]
+fn corpus_layer_kind() {
+	let conllu = "1\tle\tle\tDET\t_\t_\t2\tdet\t_\t_
+2\tchat\tchat\tNOUN\t_\t_\t0\troot\t_\t_
+";
+	let corpus = build_corpus(conllu);
+
+	assert_eq!(corpus.layer_kind("word"), Some(LayerKind::String));
+	assert_eq!(corpus.layer_kind("lemma"), Some(LayerKind::String));
+	assert_eq!(corpus.layer_kind("upos"), Some(LayerKind::String));
+	assert_eq!(corpus.layer_kind("head"), Some(LayerKind::Int));
+	assert_eq!(corpus.layer_kind("deps"), Some(LayerKind::String));
+	assert_eq!(corpus.layer_kind("deprel"), Some(LayerKind::String));
+	assert_eq!(corpus.layer_kind("nonexistent"), None);
+}
+
+#[test]
+fn corpus_indexed_layers() {
+	let conllu = "1\tle\tle\tDET\t_\t_\t2\tdet\t_\t_
+2\tchat\tchat\tNOUN\t_\t_\t0\troot\t_\t_
+";
+	let corpus = build_corpus(conllu);
+
+	let all = corpus.layers();
+	assert!(all.contains(&"head".to_string()));
+	assert!(all.contains(&"deps".to_string()));
+
+	let indexed = corpus.indexed_layers();
+	assert!(indexed.contains(&"word"));
+	assert!(indexed.contains(&"upos"));
+	assert!(indexed.contains(&"deprel"));
+	assert!(!indexed.contains(&"head"));
+	assert!(!indexed.contains(&"deps"));
 }

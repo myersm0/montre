@@ -413,7 +413,7 @@ fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
 
 			for hit in &source_hits {
 				let Some((src_doc, src_sent)) = find_doc_and_sent(
-					hit, doc_spans, sent_spans, source_comp,
+					hit.span, doc_spans, sent_spans, source_comp,
 				) else {
 					continue;
 				};
@@ -1094,17 +1094,17 @@ pub fn build_edge_map(edges: &[(UnitId, UnitId)]) -> HashMap<(u32, u32), Vec<(u3
 }
 
 pub fn find_doc_and_sent(
-	hit: &Hit,
+	span: Span,
 	doc_spans: &[Span],
 	sent_spans: &[Span],
 	comp: &ComponentMeta,
 ) -> Option<(u32, u32)> {
-	let doc_idx = span_containing(doc_spans, hit.span.start)?;
+	let doc_idx = span_containing(doc_spans, span.start)?;
 	if doc_idx < comp.document_range.0 || doc_idx >= comp.document_range.1 {
 		return None;
 	}
 	let doc_span = &doc_spans[doc_idx];
-	if hit.span.end > doc_span.end {
+	if span.end > doc_span.end {
 		return None;
 	}
 	let doc_within_comp = (doc_idx - comp.document_range.0) as u32;
@@ -1116,7 +1116,7 @@ pub fn find_doc_and_sent(
 		if sent_span.start >= doc_span.end {
 			break;
 		}
-		if hit.span.start >= sent_span.start && hit.span.end <= sent_span.end {
+		if span.start >= sent_span.start && span.end <= sent_span.end {
 			return Some((doc_within_comp, sent_within_doc));
 		}
 		if sent_span.end <= doc_span.end {

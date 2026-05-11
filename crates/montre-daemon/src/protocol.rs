@@ -171,6 +171,33 @@ pub struct Capabilities {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OkReply {
+	pub ok: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionUpdateLabelParams {
+	#[serde(default)]
+	pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionRosterParams {
+	#[serde(default)]
+	pub filter: Option<RosterFilter>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRosterReply {
+	pub processes: Vec<ProcessInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishInterestParams {
+	pub interest: Interest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorpusInfo {
 	pub name: String,
 	pub canonical_path: String,
@@ -209,6 +236,29 @@ pub struct CorpusLayerInfoParams {
 pub enum LayerKind {
 	String,
 	Int,
+	#[serde(other)]
+	Unknown,
+}
+
+impl From<montre_index::LayerKind> for LayerKind {
+	fn from(kind: montre_index::LayerKind) -> Self {
+		match kind {
+			montre_index::LayerKind::String => Self::String,
+			montre_index::LayerKind::Int => Self::Int,
+			_ => {
+				tracing::error!(
+					?kind,
+					"unknown montre_index::LayerKind variant; mapping to wire Unknown",
+				);
+				debug_assert!(
+					false,
+					"unknown montre_index::LayerKind variant: {:?}",
+					kind,
+				);
+				Self::Unknown
+			}
+		}
+	}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -394,6 +444,97 @@ pub struct QueryHitsReply {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryMetadataParams {
 	pub handle: ResultHandle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuerySaveParams {
+	pub handle: ResultHandle,
+	pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuerySaveReply {
+	pub ok: bool,
+	pub form: ResultForm,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryMaterializeParams {
+	pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryMaterializeReply {
+	pub ok: bool,
+	pub hit_count: u64,
+	pub materialized_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryLoadParams {
+	pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryLoadReply {
+	pub handle: ResultHandle,
+	pub hit_count: u64,
+	pub form: ResultForm,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamedResultEntry {
+	pub name: String,
+	pub hit_count: u64,
+	pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryListNamedReply {
+	pub names: Vec<NamedResultEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryDeleteNamedParams {
+	pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryDiscardParams {
+	pub handle: ResultHandle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnchorCreateParams {
+	pub master_id: ProcessId,
+	pub follower_id: ProcessId,
+	pub kind: AnchorKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnchorCreateReply {
+	pub anchor_id: AnchorId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnchorRemoveParams {
+	pub anchor_id: AnchorId,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AnchorListParams {
+	#[serde(default)]
+	pub process_id: Option<ProcessId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnchorListReply {
+	pub anchors: Vec<Anchor>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionParams {
+	pub topic: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

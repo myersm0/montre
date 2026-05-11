@@ -16,7 +16,7 @@ use std::path::Path;
 use thiserror::Error;
 
 // Re-exports from montre-core (foundational types used throughout the API surface)
-pub use montre_core::{Position, Span};
+pub use montre_core::{LayerKind, Position, Span};
 
 // Reading API
 pub use corpus::{Corpus, CorpusMeta, ComponentMeta, AlignmentMeta, AlignmentIndex};

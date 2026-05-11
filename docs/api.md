@@ -13,7 +13,9 @@ let corpus = montre_index::open("path/to/corpus")?;
 corpus.name()              // &str: corpus name from corpus.json
 corpus.path()              // &Path: directory the corpus was opened from
 corpus.token_count()       // u64: total tokens across all components
-corpus.layers()            // &[String]: indexed layer names
+corpus.layers()            // &[String]: every annotation layer in the corpus, including forward-only layers like `head` and `deps`
+corpus.indexed_layers()    // Vec<&str>: subset queryable via [layer=value] in CQL (string layers with inverted-index entries — excludes `head` because it's int and `deps` because it's forward-only)
+corpus.layer_kind(name)    // Option<LayerKind>: String or Int classification (None if no such layer)
 corpus.span_layers()       // &[String]: span layer names
 
 // Documents
@@ -46,7 +48,17 @@ use montre_index::prelude::*;   // ForwardIndex, InvertedIndex, SpanIndex
 
 The examples below name traits explicitly for clarity; either form works.
 
-The foundational types `Span` and `Position` are re-exported from `montre_index` (originally defined in `montre_core`); `use montre_index::{Span, Position};` is the canonical import.
+The foundational types `Span`, `Position`, and `LayerKind` are re-exported from `montre_index` (originally defined in `montre_core`); `use montre_index::{Span, Position, LayerKind};` is the canonical import.
+
+```rust
+#[non_exhaustive]
+pub enum LayerKind {
+    String,
+    Int,
+}
+```
+
+Returned by `Corpus::layer_kind` and produced by `Value::kind()`. Marked `#[non_exhaustive]` to allow future variants without a breaking change.
 
 ### Query pipeline
 
@@ -146,6 +158,9 @@ let bitmap = corpus.inverted().get("pos", "NOUN");
 
 // All values for a layer
 let values: Option<Vec<&str>> = corpus.inverted().values("upos");
+
+// Cardinality only (cheaper than values().len() — no allocation)
+let count: Option<usize> = corpus.inverted().value_count("upos");
 
 // All indexed layer names
 let layers: Vec<&str> = corpus.inverted().layers();

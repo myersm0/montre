@@ -1,16 +1,19 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, SyncSender};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
+use montre_index::SpanIndex;
 use montre_query::executor::Hit;
 use uuid::Uuid;
 
+use crate::handlers::alignment::project_alignment;
 use crate::protocol::error_codes;
 use crate::protocol::{
-	Anchor, AnchorId, AnchorKind, Capabilities, Interest, ProcessId, ProcessInfo, ProtocolError,
-	RegisterParams, RegisterReply, ResultForm, ResultHandle, ResultMetadata, RosterFilter, Topic,
-	PROTOCOL_VERSION,
+	Anchor, AnchorId, AnchorKind, AlignmentSource, Capabilities, Interest, InterestKind, ProcessId,
+	ProcessInfo, ProtocolError, RegisterParams, RegisterReply, ResultForm, ResultHandle,
+	ResultMetadata, RosterFilter, Span, Topic, PROTOCOL_VERSION,
 };
+use crate::CorpusHandle;
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -41,9 +44,8 @@ pub(crate) struct Connection {
 }
 
 pub(crate) struct State {
-	corpus_id: String,
 	daemon_epoch: u64,
-	results: Arc<RwLock<ResultsTable>>,
+	handle: Arc<CorpusHandle>,
 	roster: HashMap<ProcessId, Connection>,
 	anchors: HashMap<AnchorId, Anchor>,
 	subscriptions: HashMap<Topic, HashSet<ProcessId>>,
@@ -53,11 +55,10 @@ pub(crate) struct State {
 }
 
 impl State {
-	pub(crate) fn new(corpus_id: String, daemon_epoch: u64) -> Self {
+	pub(crate) fn new(daemon_epoch: u64, handle: Arc<CorpusHandle>) -> Self {
 		Self {
-			corpus_id,
 			daemon_epoch,
-			results: Arc::new(RwLock::new(HashMap::new())),
+			handle,
 			roster: HashMap::new(),
 			anchors: HashMap::new(),
 			subscriptions: HashMap::new(),
@@ -65,15 +66,6 @@ impl State {
 			next_process_id: 1,
 			next_anchor_id: 1,
 		}
-	}
-
-	pub(crate) fn results(&self) -> Arc<RwLock<ResultsTable>> {
-		Arc::clone(&self.results)
-	}
-
-	#[allow(dead_code)]
-	pub(crate) fn corpus_id(&self) -> &str {
-		&self.corpus_id
 	}
 
 	fn allocate_process_id(&mut self) -> ProcessId {
@@ -196,21 +188,21 @@ impl State {
 			.collect();
 
 		for (anchor_id, follower, kind) in derivative_targets {
-			let Some(transformed) = transform_interest(&interest, &kind) else {
-				continue;
-			};
+			let transformed = transform_interest(&self.handle, &interest, &kind);
 			let Some(outbound) = self.roster.get(&follower).map(|c| c.outbound.clone()) else {
 				continue;
 			};
-			let payload = serde_json::json!({
-				"jsonrpc": "2.0",
-				"method": "notification.anchor_update",
-				"params": {
-					"anchor_id": anchor_id,
-					"interest": transformed,
-				},
-			});
-			let _ = try_send_outbound(&outbound, payload, follower);
+			for derived in transformed {
+				let payload = serde_json::json!({
+					"jsonrpc": "2.0",
+					"method": "notification.anchor_update",
+					"params": {
+						"anchor_id": anchor_id,
+						"interest": derived,
+					},
+				});
+				let _ = try_send_outbound(&outbound, payload, follower);
+			}
 		}
 	}
 
@@ -222,7 +214,7 @@ impl State {
 			created_at: now_rfc3339(),
 			materialized_at: None,
 			hit_count: hits.len() as u64,
-			corpus_id: self.corpus_id.clone(),
+			corpus_id: self.handle.corpus_id.clone(),
 			name: None,
 			form: ResultForm::Session,
 		};
@@ -231,7 +223,7 @@ impl State {
 			hits,
 			metadata,
 		});
-		self.results
+		self.handle.results
 			.write()
 			.expect("results lock poisoned")
 			.insert(handle.clone(), entry);
@@ -251,7 +243,7 @@ impl State {
 		}
 
 		let promoted = {
-			let table = self.results.read().expect("results lock poisoned");
+			let table = self.handle.results.read().expect("results lock poisoned");
 			let existing = table.get(&handle).cloned().ok_or_else(|| {
 				ProtocolError::new(error_codes::RESULT_HANDLE_INVALID, "handle not found")
 			})?;
@@ -266,7 +258,7 @@ impl State {
 		};
 
 		let metadata = promoted.metadata.clone();
-		self.results
+		self.handle.results
 			.write()
 			.expect("results lock poisoned")
 			.insert(handle.clone(), promoted);
@@ -285,7 +277,7 @@ impl State {
 		})?;
 
 		let promoted = {
-			let table = self.results.read().expect("results lock poisoned");
+			let table = self.handle.results.read().expect("results lock poisoned");
 			let existing = table.get(&handle).cloned().ok_or_else(|| {
 				ProtocolError::new(error_codes::RESULT_HANDLE_INVALID, "handle not found")
 			})?;
@@ -306,7 +298,7 @@ impl State {
 		};
 
 		let metadata = promoted.metadata.clone();
-		self.results
+		self.handle.results
 			.write()
 			.expect("results lock poisoned")
 			.insert(handle, promoted);
@@ -322,7 +314,7 @@ impl State {
 				format!("name '{}' not found", name),
 			)
 		})?;
-		let table = self.results.read().expect("results lock poisoned");
+		let table = self.handle.results.read().expect("results lock poisoned");
 		let entry = table.get(handle).ok_or_else(|| {
 			ProtocolError::new(error_codes::RESULT_HANDLE_INVALID, "handle not found")
 		})?;
@@ -330,7 +322,7 @@ impl State {
 	}
 
 	fn list_named(&self) -> Vec<ResultMetadata> {
-		let table = self.results.read().expect("results lock poisoned");
+		let table = self.handle.results.read().expect("results lock poisoned");
 		self.named_results
 			.values()
 			.filter_map(|h| table.get(h).map(|e| e.metadata.clone()))
@@ -344,7 +336,7 @@ impl State {
 				format!("name '{}' not found", name),
 			)
 		})?;
-		self.results
+		self.handle.results
 			.write()
 			.expect("results lock poisoned")
 			.remove(&handle);
@@ -353,7 +345,7 @@ impl State {
 	}
 
 	fn discard_handle(&mut self, handle: ResultHandle) {
-		let mut table = self.results.write().expect("results lock poisoned");
+		let mut table = self.handle.results.write().expect("results lock poisoned");
 		let Some(entry) = table.get(&handle) else {
 			return;
 		};
@@ -392,6 +384,26 @@ impl State {
 				"anchor would create a cycle in the dependency graph",
 			));
 		}
+		let compat_ok = anchor_kind_compat(
+			&kind,
+			&self.roster[&master].info.provides,
+			&self.roster[&follower].info.consumes,
+		);
+		if !compat_ok {
+			let master_provides = self.roster[&master].info.provides.clone();
+			let follower_consumes = self.roster[&follower].info.consumes.clone();
+			return Err(ProtocolError::new(
+				error_codes::ANCHOR_INCOMPATIBLE,
+				format!(
+					"anchor kind '{}' incompatible with master provides / follower consumes",
+					kind.type_name(),
+				),
+			)
+			.with_data(serde_json::json!({
+				"master_provides": master_provides,
+				"follower_consumes": follower_consumes,
+			})));
+		}
 
 		let anchor_id = self.allocate_anchor_id();
 		let anchor = Anchor {
@@ -407,16 +419,15 @@ impl State {
 			.get(&master)
 			.and_then(|c| c.info.current_interest.clone());
 		if let Some(interest) = initial {
-			if let Some(transformed) = transform_interest(&interest, &kind) {
-				if let Some(outbound) =
-					self.roster.get(&follower).map(|c| c.outbound.clone())
-				{
+			let transformed = transform_interest(&self.handle, &interest, &kind);
+			if let Some(outbound) = self.roster.get(&follower).map(|c| c.outbound.clone()) {
+				for derived in transformed {
 					let payload = serde_json::json!({
 						"jsonrpc": "2.0",
 						"method": "notification.anchor_update",
 						"params": {
 							"anchor_id": anchor_id,
-							"interest": transformed,
+							"interest": derived,
 						},
 					});
 					let _ = try_send_outbound(&outbound, payload, follower);
@@ -595,8 +606,117 @@ fn roster_filter_matches(filter: &RosterFilter, info: &ProcessInfo) -> bool {
 	true
 }
 
-fn transform_interest(_interest: &Interest, _kind: &AnchorKind) -> Option<Interest> {
-	None
+pub(crate) fn anchor_kind_compat(
+	kind: &AnchorKind,
+	master_provides: &[InterestKind],
+	follower_consumes: &[InterestKind],
+) -> bool {
+	let (accepted_in, produced_out) = anchor_kind_signature(kind);
+	accepted_in.iter().any(|k| master_provides.contains(k))
+		&& produced_out.iter().any(|k| follower_consumes.contains(k))
+}
+
+fn anchor_kind_signature(
+	kind: &AnchorKind,
+) -> (&'static [InterestKind], &'static [InterestKind]) {
+	use InterestKind::*;
+	match kind {
+		AnchorKind::SentenceMirror => (&[Position, Span, Sentence], &[Sentence]),
+		AnchorKind::Alignment { .. } => (&[Sentence, Span], &[Sentence, Span]),
+		AnchorKind::KwicSelection => (&[Hit], &[Sentence]),
+		AnchorKind::DocPickerSelection => (&[Document], &[Document]),
+		AnchorKind::NamedResultsSelection => (&[Results], &[Results]),
+		AnchorKind::ConlluView => (&[Sentence], &[Sentence]),
+	}
+}
+
+fn transform_interest(
+	handle: &CorpusHandle,
+	interest: &Interest,
+	kind: &AnchorKind,
+) -> Vec<Interest> {
+	let (accepts, _) = anchor_kind_signature(kind);
+	if !accepts.contains(&interest.kind()) {
+		return Vec::new();
+	}
+	match kind {
+		AnchorKind::SentenceMirror => match interest {
+			Interest::Sentence { .. } => vec![interest.clone()],
+			Interest::Position { doc, position } => {
+				widen_position_to_sentence(handle, *doc, *position)
+			}
+			Interest::Span { doc, start, .. } => {
+				widen_position_to_sentence(handle, *doc, *start)
+			}
+			_ => Vec::new(),
+		},
+		AnchorKind::Alignment { name } => {
+			let source = match interest {
+				Interest::Sentence { doc, sent } => {
+					let Some(span) = sentence_to_span(handle, *doc, *sent) else {
+						return Vec::new();
+					};
+					AlignmentSource { doc: *doc, start: span.start, end: span.end }
+				}
+				Interest::Span { doc, start, end } => {
+					AlignmentSource { doc: *doc, start: *start, end: *end }
+				}
+				_ => return Vec::new(),
+			};
+			match project_alignment(&handle.corpus, name, source) {
+				Ok(targets) => targets
+					.into_iter()
+					.map(|t| Interest::Span { doc: t.doc, start: t.start, end: t.end })
+					.collect(),
+				Err(_) => Vec::new(),
+			}
+		}
+		AnchorKind::KwicSelection => match interest {
+			Interest::Hit { result, hit_idx } => {
+				let table = handle.results.read().expect("results lock poisoned");
+				let Some(entry) = table.get(result) else { return Vec::new(); };
+				let Some(hit) = entry.hits.get(*hit_idx as usize) else { return Vec::new(); };
+				let doc = hit.document_index;
+				let Some(first) = handle.corpus.first_sentence_of_document(doc as usize) else {
+					return Vec::new();
+				};
+				let global = hit.sentence_index as usize;
+				if global < first {
+					return Vec::new();
+				}
+				vec![Interest::Sentence { doc, sent: (global - first) as u32 }]
+			}
+			_ => Vec::new(),
+		},
+		AnchorKind::DocPickerSelection
+		| AnchorKind::NamedResultsSelection
+		| AnchorKind::ConlluView => Vec::new(),
+	}
+}
+
+fn widen_position_to_sentence(handle: &CorpusHandle, doc: u32, position: u64) -> Vec<Interest> {
+	let corpus = &handle.corpus;
+	if corpus.document_for_position(position) != Some(doc as usize) {
+		return Vec::new();
+	}
+	let Some((global_idx, _)) = corpus.spans().containing_with_index("sentence", position) else {
+		return Vec::new();
+	};
+	let Some(first) = corpus.first_sentence_of_document(doc as usize) else {
+		return Vec::new();
+	};
+	vec![Interest::Sentence { doc, sent: (global_idx - first) as u32 }]
+}
+
+fn sentence_to_span(handle: &CorpusHandle, doc: u32, sent: u32) -> Option<Span> {
+	let corpus = &handle.corpus;
+	let first = corpus.first_sentence_of_document(doc as usize)?;
+	let last = corpus.last_sentence_of_document(doc as usize)?;
+	let global_idx = first.checked_add(sent as usize)?;
+	if global_idx > last {
+		return None;
+	}
+	corpus.spans().spans("sentence")?.get(global_idx).cloned()
 }
 
 fn generate_handle() -> ResultHandle {
@@ -771,10 +891,41 @@ pub(crate) fn run(mut state: State, commands: Receiver<Command>) {
 mod tests {
 	use super::*;
 	use crate::protocol::{InterestKind, ProcessKind};
+	use std::path::{Path, PathBuf};
 	use std::sync::mpsc::sync_channel;
+	use std::sync::{OnceLock, RwLock};
+	use tempfile::TempDir;
+
+	fn corpus_fixture() -> &'static Path {
+		static FIXTURE: OnceLock<(TempDir, PathBuf)> = OnceLock::new();
+		let (_keep, path) = FIXTURE.get_or_init(|| {
+			let temp = TempDir::new().expect("tempdir");
+			let out = temp.path().join("corpus");
+			let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+				.join("../../testdata/parallel/corpus.toml");
+			montre_build::MultiCorpusBuilder::from_manifest(&manifest)
+				.expect("manifest load")
+				.build(&out)
+				.expect("corpus build");
+			(temp, out)
+		});
+		path.as_path()
+	}
+
+	fn fake_corpus() -> Arc<CorpusHandle> {
+		let path = corpus_fixture();
+		let corpus = Arc::new(montre_index::open(path).expect("corpus open"));
+		let canonical_path = std::fs::canonicalize(path).expect("canonicalize");
+		Arc::new(CorpusHandle {
+			corpus,
+			corpus_id: "test-corpus".to_string(),
+			canonical_path,
+			results: Arc::new(RwLock::new(HashMap::new())),
+		})
+	}
 
 	fn make_state() -> State {
-		State::new("test-corpus".to_string(), 1)
+		State::new(1, fake_corpus())
 	}
 
 	fn dummy_outbound() -> SyncSender<Outbound> {
@@ -797,6 +948,17 @@ mod tests {
 			.register(make_register_params(ProcessKind::External), dummy_outbound())
 			.unwrap()
 			.process_id
+	}
+
+	fn register_compatible(state: &mut State) -> ProcessId {
+		let params = RegisterParams {
+			protocol_version: PROTOCOL_VERSION,
+			kind: ProcessKind::External,
+			label: None,
+			provides: vec![InterestKind::Position, InterestKind::Span, InterestKind::Sentence],
+			consumes: vec![InterestKind::Sentence],
+		};
+		state.register(params, dummy_outbound()).unwrap().process_id
 	}
 
 	#[test]
@@ -846,8 +1008,8 @@ mod tests {
 	#[test]
 	fn unregister_drops_anchors_involving_process() {
 		let mut state = make_state();
-		let p1 = register(&mut state);
-		let p2 = register(&mut state);
+		let p1 = register_compatible(&mut state);
+		let p2 = register_compatible(&mut state);
 		let anchor_id = state
 			.anchor_create(p1, p2, AnchorKind::SentenceMirror)
 			.unwrap();
@@ -901,8 +1063,8 @@ mod tests {
 	#[test]
 	fn anchor_create_two_node_cycle_rejected() {
 		let mut state = make_state();
-		let p1 = register(&mut state);
-		let p2 = register(&mut state);
+		let p1 = register_compatible(&mut state);
+		let p2 = register_compatible(&mut state);
 		state
 			.anchor_create(p1, p2, AnchorKind::SentenceMirror)
 			.unwrap();
@@ -915,9 +1077,9 @@ mod tests {
 	#[test]
 	fn anchor_create_three_node_cycle_rejected() {
 		let mut state = make_state();
-		let p1 = register(&mut state);
-		let p2 = register(&mut state);
-		let p3 = register(&mut state);
+		let p1 = register_compatible(&mut state);
+		let p2 = register_compatible(&mut state);
+		let p3 = register_compatible(&mut state);
 		state
 			.anchor_create(p1, p2, AnchorKind::SentenceMirror)
 			.unwrap();
@@ -928,6 +1090,42 @@ mod tests {
 			.anchor_create(p3, p1, AnchorKind::SentenceMirror)
 			.unwrap_err();
 		assert_eq!(err.code, error_codes::ANCHOR_CYCLE);
+	}
+
+	#[test]
+	fn anchor_create_incompatible_rejected() {
+		let mut state = make_state();
+		let p_master = state
+			.register(
+				RegisterParams {
+					protocol_version: PROTOCOL_VERSION,
+					kind: ProcessKind::External,
+					label: None,
+					provides: vec![InterestKind::Hit],
+					consumes: vec![],
+				},
+				dummy_outbound(),
+			)
+			.unwrap()
+			.process_id;
+		let p_follower = state
+			.register(
+				RegisterParams {
+					protocol_version: PROTOCOL_VERSION,
+					kind: ProcessKind::External,
+					label: None,
+					provides: vec![],
+					consumes: vec![InterestKind::Sentence],
+				},
+				dummy_outbound(),
+			)
+			.unwrap()
+			.process_id;
+		let err = state
+			.anchor_create(p_master, p_follower, AnchorKind::SentenceMirror)
+			.unwrap_err();
+		assert_eq!(err.code, error_codes::ANCHOR_INCOMPATIBLE);
+		assert!(err.data.is_some());
 	}
 
 	#[test]
@@ -995,7 +1193,7 @@ mod tests {
 		let h = state.insert_result("foo".to_string(), vec![]);
 		state.save_result(h.clone(), "named".to_string()).unwrap();
 
-		let created_at_before = state
+		let created_at_before = state.handle
 			.results
 			.read()
 			.unwrap()
@@ -1004,7 +1202,7 @@ mod tests {
 			.metadata
 			.created_at
 			.clone();
-		assert!(state.results.read().unwrap().get(&h).unwrap().metadata.materialized_at.is_none());
+		assert!(state.handle.results.read().unwrap().get(&h).unwrap().metadata.materialized_at.is_none());
 
 		let metadata = state.materialize_result("named".to_string()).unwrap();
 		assert_eq!(metadata.created_at, created_at_before);
@@ -1017,10 +1215,10 @@ mod tests {
 		let mut state = make_state();
 		let h = state.insert_result("foo".to_string(), vec![]);
 		state.save_result(h.clone(), "named".to_string()).unwrap();
-		assert!(state.results.read().unwrap().contains_key(&h));
+		assert!(state.handle.results.read().unwrap().contains_key(&h));
 
 		state.delete_named("named".to_string()).unwrap();
-		assert!(!state.results.read().unwrap().contains_key(&h));
+		assert!(!state.handle.results.read().unwrap().contains_key(&h));
 		assert!(!state.named_results.contains_key("named"));
 	}
 
@@ -1035,10 +1233,10 @@ mod tests {
 	fn discard_handle_session_form_removed() {
 		let mut state = make_state();
 		let h = state.insert_result("foo".to_string(), vec![]);
-		assert!(state.results.read().unwrap().contains_key(&h));
+		assert!(state.handle.results.read().unwrap().contains_key(&h));
 
 		state.discard_handle(h.clone());
-		assert!(!state.results.read().unwrap().contains_key(&h));
+		assert!(!state.handle.results.read().unwrap().contains_key(&h));
 	}
 
 	#[test]
@@ -1048,7 +1246,7 @@ mod tests {
 		state.save_result(h.clone(), "named".to_string()).unwrap();
 
 		state.discard_handle(h.clone());
-		assert!(state.results.read().unwrap().contains_key(&h));
+		assert!(state.handle.results.read().unwrap().contains_key(&h));
 		assert!(state.named_results.contains_key("named"));
 	}
 
@@ -1114,5 +1312,283 @@ mod tests {
 			..Default::default()
 		};
 		assert!(!roster_filter_matches(&filter, &info));
+	}
+
+	#[test]
+	fn anchor_kind_compat_sentence_mirror_accepts_position_to_sentence() {
+		assert!(anchor_kind_compat(
+			&AnchorKind::SentenceMirror,
+			&[InterestKind::Position],
+			&[InterestKind::Sentence],
+		));
+	}
+
+	#[test]
+	fn anchor_kind_compat_sentence_mirror_rejects_hit_provider() {
+		assert!(!anchor_kind_compat(
+			&AnchorKind::SentenceMirror,
+			&[InterestKind::Hit],
+			&[InterestKind::Sentence],
+		));
+	}
+
+	#[test]
+	fn anchor_kind_compat_alignment_accepts_span_to_span() {
+		assert!(anchor_kind_compat(
+			&AnchorKind::Alignment { name: "labse".to_string() },
+			&[InterestKind::Span],
+			&[InterestKind::Span],
+		));
+	}
+
+	#[test]
+	fn anchor_kind_compat_kwic_requires_hit_provider() {
+		assert!(anchor_kind_compat(
+			&AnchorKind::KwicSelection,
+			&[InterestKind::Hit],
+			&[InterestKind::Sentence],
+		));
+		assert!(!anchor_kind_compat(
+			&AnchorKind::KwicSelection,
+			&[InterestKind::Sentence],
+			&[InterestKind::Sentence],
+		));
+	}
+
+	#[test]
+	fn anchor_kind_compat_rejects_empty_master_provides() {
+		assert!(!anchor_kind_compat(
+			&AnchorKind::SentenceMirror,
+			&[],
+			&[InterestKind::Sentence],
+		));
+	}
+
+	#[test]
+	fn anchor_kind_compat_rejects_empty_follower_consumes() {
+		assert!(!anchor_kind_compat(
+			&AnchorKind::SentenceMirror,
+			&[InterestKind::Position],
+			&[],
+		));
+	}
+
+	#[test]
+	fn anchor_kind_compat_tbd_kinds_self_to_self() {
+		assert!(anchor_kind_compat(
+			&AnchorKind::DocPickerSelection,
+			&[InterestKind::Document],
+			&[InterestKind::Document],
+		));
+		assert!(anchor_kind_compat(
+			&AnchorKind::NamedResultsSelection,
+			&[InterestKind::Results],
+			&[InterestKind::Results],
+		));
+		assert!(anchor_kind_compat(
+			&AnchorKind::ConlluView,
+			&[InterestKind::Sentence],
+			&[InterestKind::Sentence],
+		));
+	}
+
+	fn find_doc(corpus: &montre_index::Corpus, needle: &str) -> u32 {
+		corpus
+			.document_names()
+			.iter()
+			.position(|n| n.contains(needle))
+			.map(|i| i as u32)
+			.unwrap_or_else(|| panic!("no document containing '{}'", needle))
+	}
+
+	#[test]
+	fn transform_sentence_mirror_passes_sentence_through() {
+		let handle = fake_corpus();
+		let doc = find_doc(&handle.corpus, "la_maison");
+		let interest = Interest::Sentence { doc, sent: 0 };
+		let out = transform_interest(&handle, &interest, &AnchorKind::SentenceMirror);
+		assert_eq!(out.len(), 1);
+		match &out[0] {
+			Interest::Sentence { doc: d, sent: s } => {
+				assert_eq!(*d, doc);
+				assert_eq!(*s, 0);
+			}
+			other => panic!("expected Sentence, got {:?}", other),
+		}
+	}
+
+	#[test]
+	fn transform_sentence_mirror_widens_position_to_containing_sentence() {
+		let handle = fake_corpus();
+		let doc = find_doc(&handle.corpus, "la_maison");
+		let span = sentence_to_span(&handle, doc, 0).expect("sentence span");
+		let interest = Interest::Position { doc, position: span.start };
+		let out = transform_interest(&handle, &interest, &AnchorKind::SentenceMirror);
+		assert_eq!(out.len(), 1);
+		match &out[0] {
+			Interest::Sentence { doc: d, sent: s } => {
+				assert_eq!(*d, doc);
+				assert_eq!(*s, 0);
+			}
+			other => panic!("expected Sentence, got {:?}", other),
+		}
+	}
+
+	#[test]
+	fn transform_sentence_mirror_widens_span_to_sentence_containing_start() {
+		let handle = fake_corpus();
+		let doc = find_doc(&handle.corpus, "la_maison");
+		let span = sentence_to_span(&handle, doc, 0).expect("sentence span");
+		let interest = Interest::Span { doc, start: span.start, end: span.end };
+		let out = transform_interest(&handle, &interest, &AnchorKind::SentenceMirror);
+		assert_eq!(out.len(), 1);
+		match &out[0] {
+			Interest::Sentence { doc: d, sent: s } => {
+				assert_eq!(*d, doc);
+				assert_eq!(*s, 0);
+			}
+			other => panic!("expected Sentence, got {:?}", other),
+		}
+	}
+
+	#[test]
+	fn transform_sentence_mirror_position_outside_any_sentence_returns_empty() {
+		let handle = fake_corpus();
+		let doc = find_doc(&handle.corpus, "la_maison");
+		let interest = Interest::Position { doc, position: u64::MAX };
+		let out = transform_interest(&handle, &interest, &AnchorKind::SentenceMirror);
+		assert!(out.is_empty());
+	}
+
+	#[test]
+	fn transform_sentence_mirror_defensively_rejects_hit_input() {
+		let handle = fake_corpus();
+		let interest = Interest::Hit { result: "r-x".to_string(), hit_idx: 0 };
+		let out = transform_interest(&handle, &interest, &AnchorKind::SentenceMirror);
+		assert!(out.is_empty());
+	}
+
+	#[test]
+	fn transform_alignment_projects_sentence_to_target_doc() {
+		let handle = fake_corpus();
+		let source_doc = find_doc(&handle.corpus, "la_maison");
+		let target_doc = find_doc(&handle.corpus, "the_house");
+		let interest = Interest::Sentence { doc: source_doc, sent: 0 };
+		let kind = AnchorKind::Alignment { name: "sentence".to_string() };
+		let out = transform_interest(&handle, &interest, &kind);
+		assert!(!out.is_empty());
+		for derived in &out {
+			match derived {
+				Interest::Span { doc, start, end } => {
+					assert_eq!(*doc, target_doc);
+					assert!(end > start);
+				}
+				other => panic!("expected Span, got {:?}", other),
+			}
+		}
+	}
+
+	#[test]
+	fn transform_alignment_projects_span_to_target_doc() {
+		let handle = fake_corpus();
+		let source_doc = find_doc(&handle.corpus, "la_maison");
+		let target_doc = find_doc(&handle.corpus, "the_house");
+		let span = sentence_to_span(&handle, source_doc, 0).expect("sentence span");
+		let interest = Interest::Span { doc: source_doc, start: span.start, end: span.end };
+		let kind = AnchorKind::Alignment { name: "sentence".to_string() };
+		let out = transform_interest(&handle, &interest, &kind);
+		assert!(!out.is_empty());
+		for derived in &out {
+			match derived {
+				Interest::Span { doc, .. } => assert_eq!(*doc, target_doc),
+				other => panic!("expected Span, got {:?}", other),
+			}
+		}
+	}
+
+	#[test]
+	fn transform_alignment_unknown_name_returns_empty() {
+		let handle = fake_corpus();
+		let doc = find_doc(&handle.corpus, "la_maison");
+		let interest = Interest::Span { doc, start: 0, end: 5 };
+		let kind = AnchorKind::Alignment { name: "totally-not-an-alignment".to_string() };
+		let out = transform_interest(&handle, &interest, &kind);
+		assert!(out.is_empty());
+	}
+
+	#[test]
+	fn transform_alignment_defensively_rejects_position_input() {
+		let handle = fake_corpus();
+		let doc = find_doc(&handle.corpus, "la_maison");
+		let interest = Interest::Position { doc, position: 0 };
+		let kind = AnchorKind::Alignment { name: "sentence".to_string() };
+		let out = transform_interest(&handle, &interest, &kind);
+		assert!(out.is_empty());
+	}
+
+	#[test]
+	fn transform_kwic_extracts_containing_sentence_from_hit() {
+		let mut state = make_state();
+		let doc = find_doc(&state.handle.corpus, "la_maison");
+		let first_global =
+			state.handle.corpus.first_sentence_of_document(doc as usize).expect("first sent");
+		let executor_hit = Hit {
+			span: Span { start: 0, end: 1 },
+			document_index: doc,
+			sentence_index: first_global as u32,
+			captures: vec![],
+		};
+		let result_handle = state.insert_result("test".to_string(), vec![executor_hit]);
+		let interest = Interest::Hit { result: result_handle, hit_idx: 0 };
+		let out = transform_interest(&state.handle, &interest, &AnchorKind::KwicSelection);
+		assert_eq!(out.len(), 1);
+		match &out[0] {
+			Interest::Sentence { doc: d, sent: s } => {
+				assert_eq!(*d, doc);
+				assert_eq!(*s, 0);
+			}
+			other => panic!("expected Sentence, got {:?}", other),
+		}
+	}
+
+	#[test]
+	fn transform_kwic_unknown_result_returns_empty() {
+		let handle = fake_corpus();
+		let interest = Interest::Hit { result: "r-bogus".to_string(), hit_idx: 0 };
+		let out = transform_interest(&handle, &interest, &AnchorKind::KwicSelection);
+		assert!(out.is_empty());
+	}
+
+	#[test]
+	fn transform_kwic_hit_idx_out_of_range_returns_empty() {
+		let mut state = make_state();
+		let result_handle = state.insert_result("test".to_string(), vec![]);
+		let interest = Interest::Hit { result: result_handle, hit_idx: 99 };
+		let out = transform_interest(&state.handle, &interest, &AnchorKind::KwicSelection);
+		assert!(out.is_empty());
+	}
+
+	#[test]
+	fn transform_inert_kinds_return_empty() {
+		let handle = fake_corpus();
+		let doc = find_doc(&handle.corpus, "la_maison");
+		assert!(transform_interest(
+			&handle,
+			&Interest::Document { doc },
+			&AnchorKind::DocPickerSelection,
+		)
+		.is_empty());
+		assert!(transform_interest(
+			&handle,
+			&Interest::Results { handle: "r-x".to_string() },
+			&AnchorKind::NamedResultsSelection,
+		)
+		.is_empty());
+		assert!(transform_interest(
+			&handle,
+			&Interest::Sentence { doc, sent: 0 },
+			&AnchorKind::ConlluView,
+		)
+		.is_empty());
 	}
 }

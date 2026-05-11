@@ -1,17 +1,23 @@
 pub mod client;
 pub mod protocol;
-mod rpc;
+mod dispatch;
+mod handlers;
 mod state;
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 
+use montre_index::Corpus;
+
 pub use client::DaemonClient;
+
+use state::ResultsTable;
 
 #[derive(Debug, Clone)]
 pub struct ServeOptions {
@@ -30,28 +36,40 @@ pub enum DaemonError {
 	Io(#[from] std::io::Error),
 }
 
+pub(crate) struct CorpusHandle {
+	pub corpus: Arc<Corpus>,
+	pub corpus_id: String,
+	pub canonical_path: PathBuf,
+	pub results: Arc<RwLock<ResultsTable>>,
+}
+
 pub fn serve(options: ServeOptions) -> Result<(), DaemonError> {
 	tracing::info!(corpus = %options.corpus_path.display(), "opening corpus");
 	let corpus = Arc::new(montre_index::open(&options.corpus_path)?);
 
-	let canonical = std::fs::canonicalize(&options.corpus_path)?;
-	let corpus_id = derive_corpus_id(&canonical);
+	let canonical_path = std::fs::canonicalize(&options.corpus_path)?;
+	let corpus_id = derive_corpus_id(&canonical_path);
 
 	let socket_path = match &options.socket_path {
 		Some(p) => p.clone(),
-		None => default_socket_path(&canonical)?,
+		None => default_socket_path(&canonical_path)?,
 	};
 
+	let handle = Arc::new(CorpusHandle {
+		corpus,
+		corpus_id,
+		canonical_path,
+		results: Arc::new(RwLock::new(HashMap::new())),
+	});
+
 	let daemon_epoch = 1;
-	let state = state::State::new(corpus_id.clone(), daemon_epoch);
-	let results = state.results();
+	let state = state::State::new(daemon_epoch, Arc::clone(&handle));
 
 	let (state_tx, state_rx) = channel();
 
 	let state_thread = thread::spawn(move || state::run(state, state_rx));
 
-	let listener_result =
-		rpc::run_listener(&socket_path, state_tx, corpus, results, corpus_id, canonical);
+	let listener_result = dispatch::run_listener(&socket_path, state_tx, handle);
 
 	let _ = state_thread.join();
 

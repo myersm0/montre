@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
-use montre_core::{Position, Value};
+use montre_core::{LayerKind, Position, Value};
 use roaring::RoaringBitmap;
 
 use crate::forward::{ForwardIndex, InMemoryForward};
@@ -484,6 +484,15 @@ impl ForwardIndex for MappedForward {
 			MappedLayer::DictEncoded { .. } => None,
 		}
 	}
+
+	fn layer_kind(&self, layer: &str) -> Option<LayerKind> {
+		let &layer_idx = self.layer_map.get(layer)?;
+		let kind = match &self.layers[layer_idx] {
+			MappedLayer::DictEncoded { .. } => LayerKind::String,
+			MappedLayer::DenseNumeric { .. } => LayerKind::Int,
+		};
+		Some(kind)
+	}
 }
 
 pub enum ForwardStore {
@@ -510,6 +519,13 @@ impl ForwardIndex for ForwardStore {
 		match self {
 			Self::InMemory(f) => f.get_int(position, layer),
 			Self::Mapped(f) => f.get_int(position, layer),
+		}
+	}
+
+	fn layer_kind(&self, layer: &str) -> Option<LayerKind> {
+		match self {
+			Self::InMemory(f) => f.layer_kind(layer),
+			Self::Mapped(f) => f.layer_kind(layer),
 		}
 	}
 }
@@ -948,5 +964,27 @@ mod tests {
 		assert_eq!(store.get_str(0, "word"), Some("hello"));
 		assert_eq!(store.get_str(1, "word"), Some("world"));
 		assert_eq!(store.token_count(), 2);
+	}
+
+	#[test]
+	fn mapped_layer_kind() {
+		let mut fwd = InMemoryForward::new();
+		let word = fwd.add_layer("word");
+		let head = fwd.add_layer("head");
+		fwd.set(word, 0, "le".into());
+		fwd.set(head, 0, Value::Int(1));
+
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("forward.bin");
+		write_flat_forward(&fwd, &path).unwrap();
+
+		let mapped = MappedForward::open(&path).unwrap();
+		assert_eq!(mapped.layer_kind("word"), Some(LayerKind::String));
+		assert_eq!(mapped.layer_kind("head"), Some(LayerKind::Int));
+		assert_eq!(mapped.layer_kind("nonexistent"), None);
+
+		let store = ForwardStore::Mapped(mapped);
+		assert_eq!(store.layer_kind("word"), Some(LayerKind::String));
+		assert_eq!(store.layer_kind("head"), Some(LayerKind::Int));
 	}
 }

@@ -75,6 +75,22 @@ impl From<i64> for Value {
 	}
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum LayerKind {
+	String,
+	Int,
+}
+
+impl Value {
+	pub fn kind(&self) -> LayerKind {
+		match self {
+			Value::Str(_) => LayerKind::String,
+			Value::Int(_) => LayerKind::Int,
+		}
+	}
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Relation {
 	pub source: Span,
