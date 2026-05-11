@@ -250,7 +250,7 @@ pub unsafe extern "C" fn montre_project(
 
 	for hit in &source.hits {
 		let Some((src_doc, src_sent)) = executor::find_doc_and_sent(
-			hit, doc_spans, source_sent_spans, source_comp,
+			hit.span, doc_spans, source_sent_spans, source_comp,
 		) else {
 			unmapped += 1;
 			continue;
