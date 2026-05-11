@@ -8,7 +8,7 @@ use std::thread;
 use crate::handlers::{alignment, anchor, corpus, query, session, subscription, text};
 use crate::protocol::error_codes;
 use crate::protocol::{
-	ProcessId, ProtocolError, PublishInterestParams, RegisterParams, RegisterReply,
+	ProcessId, ProtocolError, PublishInterestParams, RegisterParams,
 };
 use crate::state::{Command, Outbound};
 use crate::CorpusHandle;
@@ -113,6 +113,46 @@ pub(crate) fn build_error_response(
 		"id": id,
 		"error": err,
 	})
+}
+
+pub(crate) fn parse_params<T: serde::de::DeserializeOwned>(
+	method: &str,
+	params: Option<serde_json::Value>,
+) -> Result<T, ProtocolError> {
+	let raw = params
+		.ok_or_else(|| ProtocolError::new(-32602, format!("{} requires params", method)))?;
+	serde_json::from_value(raw)
+		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))
+}
+
+pub(crate) fn parse_params_or_default<T: serde::de::DeserializeOwned + Default>(
+	params: Option<serde_json::Value>,
+) -> Result<T, ProtocolError> {
+	match params {
+		None => Ok(T::default()),
+		Some(v) => serde_json::from_value(v)
+			.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e))),
+	}
+}
+
+pub(crate) fn serialize_reply<T: serde::Serialize>(
+	value: T,
+) -> Result<serde_json::Value, ProtocolError> {
+	serde_json::to_value(value)
+		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+}
+
+pub(crate) fn state_roundtrip<R>(
+	ctx: &RpcContext,
+	build: impl FnOnce(SyncSender<R>) -> Command,
+) -> Result<R, ProtocolError> {
+	let (reply_tx, reply_rx) = sync_channel(1);
+	ctx.state_tx
+		.send(build(reply_tx))
+		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
+	reply_rx
+		.recv()
+		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))
 }
 
 pub(crate) struct RpcContext {
@@ -342,28 +382,17 @@ fn handle_register(
 		));
 	}
 
-	let raw = params
-		.ok_or_else(|| ProtocolError::new(-32602, "session.register requires params"))?;
-	let parsed: RegisterParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+	let parsed: RegisterParams = parse_params("session.register", params)?;
 
-	let (reply_tx, reply_rx) = sync_channel(1);
-	ctx.state_tx
-		.send(Command::Register {
-			params: parsed,
-			outbound: ctx.outbound_tx.clone(),
-			reply: reply_tx,
-		})
-		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
-
-	let outcome: Result<RegisterReply, ProtocolError> = reply_rx
-		.recv()
-		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))?;
-	let reply = outcome?;
+	let outbound = ctx.outbound_tx.clone();
+	let reply = state_roundtrip(ctx, |tx| Command::Register {
+		params: parsed,
+		outbound,
+		reply: tx,
+	})??;
 	ctx.process_id = Some(reply.process_id);
 
-	serde_json::to_value(reply)
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	serialize_reply(reply)
 }
 
 #[cfg(test)]
@@ -499,6 +528,7 @@ pub(crate) mod test_support {
 mod tests {
 	use super::*;
 	use crate::dispatch::test_support::{make_context, make_handle};
+	use crate::protocol::RegisterReply;
 	use crate::state;
 	use std::io::Cursor;
 	use std::sync::mpsc::{channel, sync_channel};

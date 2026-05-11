@@ -554,6 +554,25 @@ pub struct RosterFilter {
 	pub kinds: Vec<ProcessKind>,
 }
 
+impl RosterFilter {
+	pub(crate) fn matches(&self, info: &ProcessInfo) -> bool {
+		if !self.kinds.is_empty() && !self.kinds.contains(&info.kind) {
+			return false;
+		}
+		if !self.provides_any_of.is_empty()
+			&& !self.provides_any_of.iter().any(|k| info.provides.contains(k))
+		{
+			return false;
+		}
+		if !self.consumes_any_of.is_empty()
+			&& !self.consumes_any_of.iter().any(|k| info.consumes.contains(k))
+		{
+			return false;
+		}
+		true
+	}
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProtocolError {
 	pub code: i32,

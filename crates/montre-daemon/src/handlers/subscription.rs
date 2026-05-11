@@ -1,6 +1,4 @@
-use std::sync::mpsc::sync_channel;
-
-use crate::dispatch::{RpcContext, STATE_DISPATCH_FAILURE, STATE_REPLY_FAILURE};
+use crate::dispatch::{parse_params, serialize_reply, state_roundtrip, RpcContext};
 use crate::protocol::error_codes;
 use crate::protocol::{OkReply, ProcessId, ProtocolError, SubscriptionParams, Topic};
 use crate::state::Command;
@@ -11,20 +9,13 @@ pub(crate) fn handle_subscription_subscribe(
 ) -> Result<serde_json::Value, ProtocolError> {
 	let (process_id, topic) = parse_subscription(params, ctx, "subscription.subscribe")?;
 
-	let (reply_tx, reply_rx) = sync_channel(1);
-	ctx.state_tx
-		.send(Command::Subscribe {
-			process_id,
-			topic,
-			reply: reply_tx,
-		})
-		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
-	reply_rx
-		.recv()
-		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))??;
+	state_roundtrip(ctx, |reply| Command::Subscribe {
+		process_id,
+		topic,
+		reply,
+	})??;
 
-	serde_json::to_value(OkReply { ok: true })
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	serialize_reply(OkReply { ok: true })
 }
 
 pub(crate) fn handle_subscription_unsubscribe(
@@ -33,20 +24,13 @@ pub(crate) fn handle_subscription_unsubscribe(
 ) -> Result<serde_json::Value, ProtocolError> {
 	let (process_id, topic) = parse_subscription(params, ctx, "subscription.unsubscribe")?;
 
-	let (reply_tx, reply_rx) = sync_channel(1);
-	ctx.state_tx
-		.send(Command::Unsubscribe {
-			process_id,
-			topic,
-			reply: reply_tx,
-		})
-		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
-	reply_rx
-		.recv()
-		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))?;
+	state_roundtrip(ctx, |reply| Command::Unsubscribe {
+		process_id,
+		topic,
+		reply,
+	})?;
 
-	serde_json::to_value(OkReply { ok: true })
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	serialize_reply(OkReply { ok: true })
 }
 
 fn parse_subscription(
@@ -54,11 +38,7 @@ fn parse_subscription(
 	ctx: &RpcContext,
 	method: &str,
 ) -> Result<(ProcessId, Topic), ProtocolError> {
-	let raw = params
-		.ok_or_else(|| ProtocolError::new(-32602, format!("{} requires params", method)))?;
-	let parsed: SubscriptionParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
-
+	let parsed: SubscriptionParams = parse_params(method, params)?;
 	let topic = parse_topic(&parsed.topic)?;
 	let process_id = ctx.process_id.ok_or_else(|| {
 		ProtocolError::new(-32603, format!("internal: {} without process_id", method))

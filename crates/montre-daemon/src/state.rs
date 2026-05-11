@@ -17,20 +17,11 @@ use crate::CorpusHandle;
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-const SUPPORTED_ANCHOR_KINDS: &[&str] = &[
-	"SentenceMirror",
-	"Alignment",
-	"KwicSelection",
-	"DocPickerSelection",
-	"NamedResultsSelection",
-	"ConlluView",
-];
-
 pub(crate) type ResultsTable = HashMap<ResultHandle, Arc<ResultEntry>>;
 
 pub(crate) struct ResultEntry {
 	pub cql: String,
-	pub hits: Vec<Hit>,
+	pub hits: Arc<Vec<Hit>>,
 	pub metadata: ResultMetadata,
 }
 
@@ -122,7 +113,7 @@ impl State {
 			capabilities: Capabilities {
 				observations: false,
 				workspaces: false,
-				anchor_kinds: SUPPORTED_ANCHOR_KINDS.iter().map(|s| s.to_string()).collect(),
+				anchor_kinds: all_anchor_kinds().map(|k| k.type_name().to_string()).collect(),
 			},
 		})
 	}
@@ -168,7 +159,7 @@ impl State {
 			.values()
 			.filter(|c| match &filter {
 				None => true,
-				Some(f) => roster_filter_matches(f, &c.info),
+				Some(f) => f.matches(&c.info),
 			})
 			.map(|c| c.info.clone())
 			.collect()
@@ -220,7 +211,7 @@ impl State {
 		};
 		let entry = Arc::new(ResultEntry {
 			cql,
-			hits,
+			hits: Arc::new(hits),
 			metadata,
 		});
 		self.handle.results
@@ -360,7 +351,7 @@ impl State {
 		follower: ProcessId,
 		kind: AnchorKind,
 	) -> Result<AnchorId, ProtocolError> {
-		if !SUPPORTED_ANCHOR_KINDS.contains(&kind.type_name()) {
+		if !all_anchor_kinds().any(|k| k.type_name() == kind.type_name()) {
 			return Err(ProtocolError::new(
 				error_codes::ANCHOR_KIND_UNSUPPORTED,
 				format!("anchor kind '{}' not supported by this daemon", kind.type_name()),
@@ -583,29 +574,6 @@ impl NamedResultsEvent {
 	}
 }
 
-fn roster_filter_matches(filter: &RosterFilter, info: &ProcessInfo) -> bool {
-	if !filter.kinds.is_empty() && !filter.kinds.contains(&info.kind) {
-		return false;
-	}
-	if !filter.provides_any_of.is_empty()
-		&& !filter
-			.provides_any_of
-			.iter()
-			.any(|k| info.provides.contains(k))
-	{
-		return false;
-	}
-	if !filter.consumes_any_of.is_empty()
-		&& !filter
-			.consumes_any_of
-			.iter()
-			.any(|k| info.consumes.contains(k))
-	{
-		return false;
-	}
-	true
-}
-
 pub(crate) fn anchor_kind_compat(
 	kind: &AnchorKind,
 	master_provides: &[InterestKind],
@@ -622,11 +590,36 @@ fn anchor_kind_signature(
 	use InterestKind::*;
 	match kind {
 		AnchorKind::SentenceMirror => (&[Position, Span, Sentence], &[Sentence]),
-		AnchorKind::Alignment { .. } => (&[Sentence, Span], &[Sentence, Span]),
+		AnchorKind::Alignment { .. } => (&[Sentence, Span], &[Span]),
 		AnchorKind::KwicSelection => (&[Hit], &[Sentence]),
 		AnchorKind::DocPickerSelection => (&[Document], &[Document]),
 		AnchorKind::NamedResultsSelection => (&[Results], &[Results]),
 		AnchorKind::ConlluView => (&[Sentence], &[Sentence]),
+	}
+}
+
+fn all_anchor_kinds() -> impl Iterator<Item = AnchorKind> {
+	[
+		AnchorKind::SentenceMirror,
+		AnchorKind::Alignment { name: String::new() },
+		AnchorKind::KwicSelection,
+		AnchorKind::DocPickerSelection,
+		AnchorKind::NamedResultsSelection,
+		AnchorKind::ConlluView,
+	]
+	.into_iter()
+}
+
+// Drift guard for all_anchor_kinds: forces a compile error if AnchorKind grows.
+#[allow(dead_code)]
+fn assert_anchor_kinds_covered(kind: &AnchorKind) {
+	match kind {
+		AnchorKind::SentenceMirror => {}
+		AnchorKind::Alignment { .. } => {}
+		AnchorKind::KwicSelection => {}
+		AnchorKind::DocPickerSelection => {}
+		AnchorKind::NamedResultsSelection => {}
+		AnchorKind::ConlluView => {}
 	}
 }
 
@@ -726,7 +719,7 @@ fn generate_handle() -> ResultHandle {
 fn now_rfc3339() -> String {
 	time::OffsetDateTime::now_utc()
 		.format(&time::format_description::well_known::Rfc3339)
-		.unwrap_or_default()
+		.expect("RFC 3339 format of OffsetDateTime::now_utc() is total")
 }
 
 fn try_send_outbound(
@@ -747,7 +740,6 @@ fn try_send_outbound(
 	}
 }
 
-#[allow(dead_code)]
 pub(crate) enum Command {
 	Register {
 		params: RegisterParams,
@@ -890,42 +882,12 @@ pub(crate) fn run(mut state: State, commands: Receiver<Command>) {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::dispatch::test_support::make_handle;
 	use crate::protocol::{InterestKind, ProcessKind};
-	use std::path::{Path, PathBuf};
 	use std::sync::mpsc::sync_channel;
-	use std::sync::{OnceLock, RwLock};
-	use tempfile::TempDir;
-
-	fn corpus_fixture() -> &'static Path {
-		static FIXTURE: OnceLock<(TempDir, PathBuf)> = OnceLock::new();
-		let (_keep, path) = FIXTURE.get_or_init(|| {
-			let temp = TempDir::new().expect("tempdir");
-			let out = temp.path().join("corpus");
-			let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
-				.join("../../testdata/parallel/corpus.toml");
-			montre_build::MultiCorpusBuilder::from_manifest(&manifest)
-				.expect("manifest load")
-				.build(&out)
-				.expect("corpus build");
-			(temp, out)
-		});
-		path.as_path()
-	}
-
-	fn fake_corpus() -> Arc<CorpusHandle> {
-		let path = corpus_fixture();
-		let corpus = Arc::new(montre_index::open(path).expect("corpus open"));
-		let canonical_path = std::fs::canonicalize(path).expect("canonicalize");
-		Arc::new(CorpusHandle {
-			corpus,
-			corpus_id: "test-corpus".to_string(),
-			canonical_path,
-			results: Arc::new(RwLock::new(HashMap::new())),
-		})
-	}
 
 	fn make_state() -> State {
-		State::new(1, fake_corpus())
+		State::new(1, make_handle())
 	}
 
 	fn dummy_outbound() -> SyncSender<Outbound> {
@@ -996,11 +958,12 @@ mod tests {
 		let reply = state
 			.register(make_register_params(ProcessKind::External), dummy_outbound())
 			.unwrap();
-		for kind in SUPPORTED_ANCHOR_KINDS {
+		for kind in all_anchor_kinds() {
+			let name = kind.type_name();
 			assert!(
-				reply.capabilities.anchor_kinds.iter().any(|k| k == kind),
+				reply.capabilities.anchor_kinds.iter().any(|k| k == name),
 				"expected capability '{}' present",
-				kind,
+				name,
 			);
 		}
 	}
@@ -1268,13 +1231,13 @@ mod tests {
 			kinds: vec![ProcessKind::Reader],
 			..Default::default()
 		};
-		assert!(roster_filter_matches(&filter, &info));
+		assert!(filter.matches(&info));
 
 		let filter = RosterFilter {
 			kinds: vec![ProcessKind::Kwic],
 			..Default::default()
 		};
-		assert!(!roster_filter_matches(&filter, &info));
+		assert!(!filter.matches(&info));
 	}
 
 	#[test]
@@ -1287,13 +1250,13 @@ mod tests {
 			provides_any_of: vec![InterestKind::Sentence],
 			..Default::default()
 		};
-		assert!(roster_filter_matches(&filter, &info));
+		assert!(filter.matches(&info));
 
 		let filter = RosterFilter {
 			provides_any_of: vec![InterestKind::Hit],
 			..Default::default()
 		};
-		assert!(!roster_filter_matches(&filter, &info));
+		assert!(!filter.matches(&info));
 	}
 
 	#[test]
@@ -1304,14 +1267,14 @@ mod tests {
 			provides_any_of: vec![InterestKind::Sentence],
 			..Default::default()
 		};
-		assert!(roster_filter_matches(&filter, &info));
+		assert!(filter.matches(&info));
 
 		let filter = RosterFilter {
 			kinds: vec![ProcessKind::Reader],
 			provides_any_of: vec![InterestKind::Hit],
 			..Default::default()
 		};
-		assert!(!roster_filter_matches(&filter, &info));
+		assert!(!filter.matches(&info));
 	}
 
 	#[test]
@@ -1403,7 +1366,7 @@ mod tests {
 
 	#[test]
 	fn transform_sentence_mirror_passes_sentence_through() {
-		let handle = fake_corpus();
+		let handle = make_handle();
 		let doc = find_doc(&handle.corpus, "la_maison");
 		let interest = Interest::Sentence { doc, sent: 0 };
 		let out = transform_interest(&handle, &interest, &AnchorKind::SentenceMirror);
@@ -1419,7 +1382,7 @@ mod tests {
 
 	#[test]
 	fn transform_sentence_mirror_widens_position_to_containing_sentence() {
-		let handle = fake_corpus();
+		let handle = make_handle();
 		let doc = find_doc(&handle.corpus, "la_maison");
 		let span = sentence_to_span(&handle, doc, 0).expect("sentence span");
 		let interest = Interest::Position { doc, position: span.start };
@@ -1436,7 +1399,7 @@ mod tests {
 
 	#[test]
 	fn transform_sentence_mirror_widens_span_to_sentence_containing_start() {
-		let handle = fake_corpus();
+		let handle = make_handle();
 		let doc = find_doc(&handle.corpus, "la_maison");
 		let span = sentence_to_span(&handle, doc, 0).expect("sentence span");
 		let interest = Interest::Span { doc, start: span.start, end: span.end };
@@ -1453,7 +1416,7 @@ mod tests {
 
 	#[test]
 	fn transform_sentence_mirror_position_outside_any_sentence_returns_empty() {
-		let handle = fake_corpus();
+		let handle = make_handle();
 		let doc = find_doc(&handle.corpus, "la_maison");
 		let interest = Interest::Position { doc, position: u64::MAX };
 		let out = transform_interest(&handle, &interest, &AnchorKind::SentenceMirror);
@@ -1462,7 +1425,7 @@ mod tests {
 
 	#[test]
 	fn transform_sentence_mirror_defensively_rejects_hit_input() {
-		let handle = fake_corpus();
+		let handle = make_handle();
 		let interest = Interest::Hit { result: "r-x".to_string(), hit_idx: 0 };
 		let out = transform_interest(&handle, &interest, &AnchorKind::SentenceMirror);
 		assert!(out.is_empty());
@@ -1470,7 +1433,7 @@ mod tests {
 
 	#[test]
 	fn transform_alignment_projects_sentence_to_target_doc() {
-		let handle = fake_corpus();
+		let handle = make_handle();
 		let source_doc = find_doc(&handle.corpus, "la_maison");
 		let target_doc = find_doc(&handle.corpus, "the_house");
 		let interest = Interest::Sentence { doc: source_doc, sent: 0 };
@@ -1490,7 +1453,7 @@ mod tests {
 
 	#[test]
 	fn transform_alignment_projects_span_to_target_doc() {
-		let handle = fake_corpus();
+		let handle = make_handle();
 		let source_doc = find_doc(&handle.corpus, "la_maison");
 		let target_doc = find_doc(&handle.corpus, "the_house");
 		let span = sentence_to_span(&handle, source_doc, 0).expect("sentence span");
@@ -1508,7 +1471,7 @@ mod tests {
 
 	#[test]
 	fn transform_alignment_unknown_name_returns_empty() {
-		let handle = fake_corpus();
+		let handle = make_handle();
 		let doc = find_doc(&handle.corpus, "la_maison");
 		let interest = Interest::Span { doc, start: 0, end: 5 };
 		let kind = AnchorKind::Alignment { name: "totally-not-an-alignment".to_string() };
@@ -1518,7 +1481,7 @@ mod tests {
 
 	#[test]
 	fn transform_alignment_defensively_rejects_position_input() {
-		let handle = fake_corpus();
+		let handle = make_handle();
 		let doc = find_doc(&handle.corpus, "la_maison");
 		let interest = Interest::Position { doc, position: 0 };
 		let kind = AnchorKind::Alignment { name: "sentence".to_string() };
@@ -1553,7 +1516,7 @@ mod tests {
 
 	#[test]
 	fn transform_kwic_unknown_result_returns_empty() {
-		let handle = fake_corpus();
+		let handle = make_handle();
 		let interest = Interest::Hit { result: "r-bogus".to_string(), hit_idx: 0 };
 		let out = transform_interest(&handle, &interest, &AnchorKind::KwicSelection);
 		assert!(out.is_empty());
@@ -1570,7 +1533,7 @@ mod tests {
 
 	#[test]
 	fn transform_inert_kinds_return_empty() {
-		let handle = fake_corpus();
+		let handle = make_handle();
 		let doc = find_doc(&handle.corpus, "la_maison");
 		assert!(transform_interest(
 			&handle,

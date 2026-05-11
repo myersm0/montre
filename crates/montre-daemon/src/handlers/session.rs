@@ -1,6 +1,6 @@
-use std::sync::mpsc::sync_channel;
-
-use crate::dispatch::{RpcContext, STATE_DISPATCH_FAILURE, STATE_REPLY_FAILURE};
+use crate::dispatch::{
+	parse_params, parse_params_or_default, serialize_reply, state_roundtrip, RpcContext,
+};
 use crate::protocol::{
 	OkReply, ProtocolError, SessionRosterParams, SessionRosterReply,
 	SessionUpdateLabelParams,
@@ -14,75 +14,47 @@ pub(crate) fn handle_session_unregister(
 		ProtocolError::new(-32603, "internal: unregister without process_id")
 	})?;
 
-	let (reply_tx, reply_rx) = sync_channel(1);
-	ctx.state_tx
-		.send(Command::Unregister {
-			process_id,
-			reply: reply_tx,
-		})
-		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
-	reply_rx
-		.recv()
-		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))?;
+	state_roundtrip(ctx, |reply| Command::Unregister {
+		process_id,
+		reply,
+	})?;
 
 	ctx.process_id = None;
 
-	serde_json::to_value(OkReply { ok: true })
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	serialize_reply(OkReply { ok: true })
 }
 
 pub(crate) fn handle_session_update_label(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let raw = params
-		.ok_or_else(|| ProtocolError::new(-32602, "session.update_label requires params"))?;
-	let parsed: SessionUpdateLabelParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+	let parsed: SessionUpdateLabelParams = parse_params("session.update_label", params)?;
 
 	let process_id = ctx.process_id.ok_or_else(|| {
 		ProtocolError::new(-32603, "internal: update_label without process_id")
 	})?;
 
-	let (reply_tx, reply_rx) = sync_channel(1);
-	ctx.state_tx
-		.send(Command::UpdateLabel {
-			process_id,
-			label: parsed.label,
-			reply: reply_tx,
-		})
-		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
-	reply_rx
-		.recv()
-		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))??;
+	state_roundtrip(ctx, |reply| Command::UpdateLabel {
+		process_id,
+		label: parsed.label,
+		reply,
+	})??;
 
-	serde_json::to_value(OkReply { ok: true })
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	serialize_reply(OkReply { ok: true })
 }
 
 pub(crate) fn handle_session_roster(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let parsed: SessionRosterParams = match params {
-		None => SessionRosterParams::default(),
-		Some(v) => serde_json::from_value(v)
-			.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?,
-	};
+	let parsed: SessionRosterParams = parse_params_or_default(params)?;
 
-	let (reply_tx, reply_rx) = sync_channel(1);
-	ctx.state_tx
-		.send(Command::Roster {
-			filter: parsed.filter,
-			reply: reply_tx,
-		})
-		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
-	let processes = reply_rx
-		.recv()
-		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))?;
+	let processes = state_roundtrip(ctx, |reply| Command::Roster {
+		filter: parsed.filter,
+		reply,
+	})?;
 
-	serde_json::to_value(SessionRosterReply { processes })
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	serialize_reply(SessionRosterReply { processes })
 }
 
 #[cfg(test)]

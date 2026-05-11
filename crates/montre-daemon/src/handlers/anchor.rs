@@ -1,6 +1,6 @@
-use std::sync::mpsc::sync_channel;
-
-use crate::dispatch::{RpcContext, STATE_DISPATCH_FAILURE, STATE_REPLY_FAILURE};
+use crate::dispatch::{
+	parse_params, parse_params_or_default, serialize_reply, state_roundtrip, RpcContext,
+};
 use crate::protocol::{
 	AnchorCreateParams, AnchorCreateReply, AnchorListParams, AnchorListReply,
 	AnchorRemoveParams, OkReply, ProtocolError,
@@ -11,75 +11,44 @@ pub(crate) fn handle_anchor_create(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let raw = params
-		.ok_or_else(|| ProtocolError::new(-32602, "anchor.create requires params"))?;
-	let parsed: AnchorCreateParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+	let parsed: AnchorCreateParams = parse_params("anchor.create", params)?;
 
-	let (reply_tx, reply_rx) = sync_channel(1);
-	ctx.state_tx
-		.send(Command::AnchorCreate {
-			master: parsed.master_id,
-			follower: parsed.follower_id,
-			kind: parsed.kind,
-			reply: reply_tx,
-		})
-		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
-	let anchor_id = reply_rx
-		.recv()
-		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))??;
+	let anchor_id = state_roundtrip(ctx, |reply| Command::AnchorCreate {
+		master: parsed.master_id,
+		follower: parsed.follower_id,
+		kind: parsed.kind,
+		reply,
+	})??;
 
-	serde_json::to_value(AnchorCreateReply { anchor_id })
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	serialize_reply(AnchorCreateReply { anchor_id })
 }
 
 pub(crate) fn handle_anchor_remove(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let raw = params
-		.ok_or_else(|| ProtocolError::new(-32602, "anchor.remove requires params"))?;
-	let parsed: AnchorRemoveParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+	let parsed: AnchorRemoveParams = parse_params("anchor.remove", params)?;
 
-	let (reply_tx, reply_rx) = sync_channel(1);
-	ctx.state_tx
-		.send(Command::AnchorRemove {
-			anchor_id: parsed.anchor_id,
-			reply: reply_tx,
-		})
-		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
-	reply_rx
-		.recv()
-		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))??;
+	state_roundtrip(ctx, |reply| Command::AnchorRemove {
+		anchor_id: parsed.anchor_id,
+		reply,
+	})??;
 
-	serde_json::to_value(OkReply { ok: true })
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	serialize_reply(OkReply { ok: true })
 }
 
 pub(crate) fn handle_anchor_list(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let parsed: AnchorListParams = match params {
-		None => AnchorListParams::default(),
-		Some(v) => serde_json::from_value(v)
-			.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?,
-	};
+	let parsed: AnchorListParams = parse_params_or_default(params)?;
 
-	let (reply_tx, reply_rx) = sync_channel(1);
-	ctx.state_tx
-		.send(Command::AnchorList {
-			process_id: parsed.process_id,
-			reply: reply_tx,
-		})
-		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
-	let anchors = reply_rx
-		.recv()
-		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))?;
+	let anchors = state_roundtrip(ctx, |reply| Command::AnchorList {
+		process_id: parsed.process_id,
+		reply,
+	})?;
 
-	serde_json::to_value(AnchorListReply { anchors })
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	serialize_reply(AnchorListReply { anchors })
 }
 
 #[cfg(test)]

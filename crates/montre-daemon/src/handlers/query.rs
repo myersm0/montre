@@ -1,8 +1,8 @@
-use std::sync::mpsc::sync_channel;
-
 use montre_query::QueryError;
 
-use crate::dispatch::{RpcContext, STATE_DISPATCH_FAILURE, STATE_REPLY_FAILURE};
+use crate::dispatch::{
+	parse_params, serialize_reply, state_roundtrip, RpcContext,
+};
 use crate::protocol::error_codes;
 use crate::protocol::{
 	Hit, NamedResultEntry, OkReply, ProtocolError, QueryDeleteNamedParams, QueryDiscardParams,
@@ -41,10 +41,7 @@ pub(crate) fn handle_query_execute(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let raw = params
-		.ok_or_else(|| ProtocolError::new(-32602, "query.execute requires params"))?;
-	let parsed: QueryExecuteParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+	let parsed: QueryExecuteParams = parse_params("query.execute", params)?;
 
 	let ast = montre_query::parse(&parsed.cql).map_err(map_query_error)?;
 	let plan = montre_query::planner::plan(&ast).map_err(map_query_error)?;
@@ -54,51 +51,36 @@ pub(crate) fn handle_query_execute(
 	let hits = results.into_hits();
 	let hit_count = hits.len() as u64;
 
-	let (reply_tx, reply_rx) = sync_channel(1);
-	ctx.state_tx
-		.send(Command::InsertResult {
-			cql: parsed.cql,
-			hits,
-			reply: reply_tx,
-		})
-		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
-	let handle = reply_rx
-		.recv()
-		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))?;
+	let handle = state_roundtrip(ctx, |reply| Command::InsertResult {
+		cql: parsed.cql,
+		hits,
+		reply,
+	})?;
 
-	let reply = QueryExecuteReply { handle, hit_count };
-	serde_json::to_value(reply)
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	serialize_reply(QueryExecuteReply { handle, hit_count })
 }
 
 pub(crate) fn handle_query_execute_count(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let raw = params
-		.ok_or_else(|| ProtocolError::new(-32602, "query.execute_count requires params"))?;
-	let parsed: QueryExecuteParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+	let parsed: QueryExecuteParams = parse_params("query.execute_count", params)?;
 
 	let ast = montre_query::parse(&parsed.cql).map_err(map_query_error)?;
 	let plan = montre_query::planner::plan(&ast).map_err(map_query_error)?;
 	let count = montre_query::executor::execute_count(&plan, &ctx.handle.corpus)
 		.map_err(map_query_error)?;
 
-	let reply = QueryExecuteCountReply {
+	serialize_reply(QueryExecuteCountReply {
 		count: count as u64,
-	};
-	serde_json::to_value(reply)
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	})
 }
 
 pub(crate) fn handle_query_hits(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let raw = params.ok_or_else(|| ProtocolError::new(-32602, "query.hits requires params"))?;
-	let parsed: QueryHitsParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+	let parsed: QueryHitsParams = parse_params("query.hits", params)?;
 
 	if parsed.limit > MAX_HITS_PER_PAGE {
 		return Err(ProtocolError::new(
@@ -126,24 +108,19 @@ pub(crate) fn handle_query_hits(
 		.map(Hit::from)
 		.collect();
 
-	let reply = QueryHitsReply {
+	serialize_reply(QueryHitsReply {
 		hits,
 		offset: parsed.offset,
 		limit: parsed.limit,
 		total_count,
-	};
-	serde_json::to_value(reply)
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	})
 }
 
 pub(crate) fn handle_query_metadata(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let raw = params
-		.ok_or_else(|| ProtocolError::new(-32602, "query.metadata requires params"))?;
-	let parsed: QueryMetadataParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+	let parsed: QueryMetadataParams = parse_params("query.metadata", params)?;
 
 	let entry = {
 		let table = ctx.handle.results.read().expect("results lock poisoned");
@@ -152,108 +129,70 @@ pub(crate) fn handle_query_metadata(
 		})?
 	};
 
-	serde_json::to_value(entry.metadata.clone())
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	serialize_reply(entry.metadata.clone())
 }
 
 pub(crate) fn handle_query_save(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let raw = params.ok_or_else(|| ProtocolError::new(-32602, "query.save requires params"))?;
-	let parsed: QuerySaveParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+	let parsed: QuerySaveParams = parse_params("query.save", params)?;
 
-	let (reply_tx, reply_rx) = sync_channel(1);
-	ctx.state_tx
-		.send(Command::SaveResult {
-			handle: parsed.handle,
-			name: parsed.name,
-			reply: reply_tx,
-		})
-		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
-	reply_rx
-		.recv()
-		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))??;
+	state_roundtrip(ctx, |reply| Command::SaveResult {
+		handle: parsed.handle,
+		name: parsed.name,
+		reply,
+	})??;
 
-	let reply = QuerySaveReply {
+	serialize_reply(QuerySaveReply {
 		ok: true,
 		form: ResultForm::QueryBacked,
-	};
-	serde_json::to_value(reply)
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	})
 }
 
 pub(crate) fn handle_query_materialize(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let raw = params
-		.ok_or_else(|| ProtocolError::new(-32602, "query.materialize requires params"))?;
-	let parsed: QueryMaterializeParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+	let parsed: QueryMaterializeParams = parse_params("query.materialize", params)?;
 
-	let (reply_tx, reply_rx) = sync_channel(1);
-	ctx.state_tx
-		.send(Command::MaterializeResult {
-			name: parsed.name,
-			reply: reply_tx,
-		})
-		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
-	let metadata = reply_rx
-		.recv()
-		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))??;
+	let metadata = state_roundtrip(ctx, |reply| Command::MaterializeResult {
+		name: parsed.name,
+		reply,
+	})??;
 
 	let materialized_at = metadata
 		.materialized_at
 		.expect("state guarantees materialized_at after MaterializeResult");
-	let reply = QueryMaterializeReply {
+	serialize_reply(QueryMaterializeReply {
 		ok: true,
 		hit_count: metadata.hit_count,
 		materialized_at,
-	};
-	serde_json::to_value(reply)
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	})
 }
 
 pub(crate) fn handle_query_load(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let raw = params.ok_or_else(|| ProtocolError::new(-32602, "query.load requires params"))?;
-	let parsed: QueryLoadParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+	let parsed: QueryLoadParams = parse_params("query.load", params)?;
 
-	let (reply_tx, reply_rx) = sync_channel(1);
-	ctx.state_tx
-		.send(Command::LoadNamed {
-			name: parsed.name,
-			reply: reply_tx,
-		})
-		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
-	let metadata = reply_rx
-		.recv()
-		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))??;
+	let metadata = state_roundtrip(ctx, |reply| Command::LoadNamed {
+		name: parsed.name,
+		reply,
+	})??;
 
-	let reply = QueryLoadReply {
+	serialize_reply(QueryLoadReply {
 		handle: metadata.handle,
 		hit_count: metadata.hit_count,
 		form: metadata.form,
-	};
-	serde_json::to_value(reply)
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	})
 }
 
 pub(crate) fn handle_query_list_named(
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let (reply_tx, reply_rx) = sync_channel(1);
-	ctx.state_tx
-		.send(Command::ListNamed { reply: reply_tx })
-		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
-	let entries = reply_rx
-		.recv()
-		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))?;
+	let entries = state_roundtrip(ctx, |reply| Command::ListNamed { reply })?;
 
 	let names: Vec<NamedResultEntry> = entries
 		.into_iter()
@@ -266,56 +205,35 @@ pub(crate) fn handle_query_list_named(
 		})
 		.collect();
 
-	serde_json::to_value(QueryListNamedReply { names })
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	serialize_reply(QueryListNamedReply { names })
 }
 
 pub(crate) fn handle_query_delete_named(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let raw = params
-		.ok_or_else(|| ProtocolError::new(-32602, "query.delete_named requires params"))?;
-	let parsed: QueryDeleteNamedParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+	let parsed: QueryDeleteNamedParams = parse_params("query.delete_named", params)?;
 
-	let (reply_tx, reply_rx) = sync_channel(1);
-	ctx.state_tx
-		.send(Command::DeleteNamed {
-			name: parsed.name,
-			reply: reply_tx,
-		})
-		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
-	reply_rx
-		.recv()
-		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))??;
+	state_roundtrip(ctx, |reply| Command::DeleteNamed {
+		name: parsed.name,
+		reply,
+	})??;
 
-	serde_json::to_value(OkReply { ok: true })
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	serialize_reply(OkReply { ok: true })
 }
 
 pub(crate) fn handle_query_discard(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let raw = params
-		.ok_or_else(|| ProtocolError::new(-32602, "query.discard requires params"))?;
-	let parsed: QueryDiscardParams = serde_json::from_value(raw)
-		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))?;
+	let parsed: QueryDiscardParams = parse_params("query.discard", params)?;
 
-	let (reply_tx, reply_rx) = sync_channel(1);
-	ctx.state_tx
-		.send(Command::DiscardHandle {
-			handle: parsed.handle,
-			reply: reply_tx,
-		})
-		.map_err(|_| ProtocolError::new(-32603, STATE_DISPATCH_FAILURE))?;
-	reply_rx
-		.recv()
-		.map_err(|_| ProtocolError::new(-32603, STATE_REPLY_FAILURE))?;
+	state_roundtrip(ctx, |reply| Command::DiscardHandle {
+		handle: parsed.handle,
+		reply,
+	})?;
 
-	serde_json::to_value(OkReply { ok: true })
-		.map_err(|e| ProtocolError::new(-32603, format!("response serialization failed: {}", e)))
+	serialize_reply(OkReply { ok: true })
 }
 
 #[cfg(test)]
