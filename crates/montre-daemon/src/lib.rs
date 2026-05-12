@@ -137,6 +137,12 @@ pub(crate) fn socket_path_for(corpus_path: &Path) -> io::Result<PathBuf> {
 	default_socket_path(&canonical)
 }
 
+pub(crate) fn state_dir_for_corpus(corpus_path: &Path) -> io::Result<PathBuf> {
+	let canonical = std::fs::canonicalize(corpus_path)?;
+	let corpus_id = derive_corpus_id(&canonical);
+	storage::state_dir_for(&corpus_id)
+}
+
 fn default_socket_path(canonical: &Path) -> io::Result<PathBuf> {
 	let dir = data_dir().ok_or_else(|| {
 		io::Error::new(

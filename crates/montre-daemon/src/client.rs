@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -8,6 +9,8 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+use fs4::fs_std::FileExt;
 
 use crate::dispatch::{read_frame, write_frame, OUTBOUND_QUEUE_DEPTH};
 use crate::protocol::*;
@@ -63,6 +66,15 @@ impl DaemonClient {
 
 	pub fn connect_or_spawn(corpus_path: &Path) -> Result<Self> {
 		let socket = crate::socket_path_for(corpus_path)?;
+		match UnixStream::connect(&socket) {
+			Ok(stream) => return Self::connect_inner(stream),
+			Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => {}
+			Err(e) => return Err(e.into()),
+		}
+
+		let state_dir = crate::state_dir_for_corpus(corpus_path)?;
+		let _spawn_lock = acquire_spawn_lock(&state_dir)?;
+
 		match UnixStream::connect(&socket) {
 			Ok(stream) => return Self::connect_inner(stream),
 			Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => {}
@@ -508,6 +520,51 @@ fn poll_connect_with_backoff(socket: &Path, timeout: Duration) -> Result<DaemonC
 		}
 		thread::sleep(sleep);
 		sleep = std::cmp::min(sleep * 2, Duration::from_millis(250));
+	}
+}
+
+struct SpawnLockGuard {
+	_file: File,
+}
+
+fn acquire_spawn_lock(state_dir: &Path) -> io::Result<SpawnLockGuard> {
+	let path = state_dir.join("spawn.lock");
+	let file = OpenOptions::new()
+		.create(true)
+		.write(true)
+		.read(true)
+		.truncate(false)
+		.open(&path)?;
+	file.lock_exclusive()?;
+	Ok(SpawnLockGuard { _file: file })
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn spawn_lock_serializes_within_process() {
+		let temp = tempfile::TempDir::new().expect("tempdir");
+		let state_dir = temp.path();
+
+		let first = acquire_spawn_lock(state_dir).expect("first acquire");
+
+		let second_path = state_dir.join("spawn.lock");
+		let second_file = OpenOptions::new()
+			.create(true)
+			.write(true)
+			.read(true)
+			.truncate(false)
+			.open(&second_path)
+			.expect("open second");
+		let acquired = second_file.try_lock_exclusive().expect("try lock");
+		assert!(!acquired, "second lock should not be acquired while first held");
+
+		drop(first);
+
+		let acquired = second_file.try_lock_exclusive().expect("try lock after release");
+		assert!(acquired, "second lock should succeed after first released");
 	}
 }
 
