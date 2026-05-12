@@ -195,6 +195,18 @@ On a 1.5M token corpus (Maupassant French/English, Apple M4 Max):
 ## Bindings
 Montre exposes a C FFI for embedding in other languages.
 
+## Session daemon
+
+Montre includes an optional local session daemon (`montre serve <corpus>`) for use cases that go beyond one-shot CLI invocations: long-running interactive sessions, persistent named query results, and coordination between multiple processes viewing the same corpus.
+
+The daemon runs as one process per corpus, spawned automatically on the first client connection, serving clients over a Unix domain socket via a JSON-RPC 2.0 protocol. A Rust client (`DaemonClient`) ships in the same crate and is the shared entry point for all consumers (bindings, terminal tools, integration tests). Idle daemons shut themselves down after a configurable timeout (default 30 minutes).
+
+See [`docs/daemon-protocol.md`](docs/daemon-protocol.md) for more details.
+
+### Terminal interfaces
+
+[montre-tui](https://github.com/myersm0/montre-tui) is a companion project building terminal clients on top of the daemon described above: independent panes for reading, KWIC browsing, CoNLL-U inspection, document picking, vocabulary, named-results browsing, statistics, etc. Each pane is its own process in its own terminal (or in your terminal multiplexer of choice), and the daemon coordinates the shared state (anchored focus across panes, named results, query history) between them. Currently in early development.
+
 ### Julia
 **[Montre.jl](https://github.com/myersm0/Montre.jl)** — registered Julia package.
 ```julia
@@ -226,7 +238,7 @@ Coming soon:
 - Statistics: group, collocation
 - Python bindings (feature-complete, pip install)
 - REPL (persistent corpus session)
-- TUI for interactive exploration
+- Terminal UI ([montre-tui](https://github.com/myersm0/montre-tui), separate repo)
 - Support for additional input formats (VRT, Stanza JSON, TEI)
 
 ## Citing Montre
