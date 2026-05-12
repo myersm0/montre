@@ -76,6 +76,18 @@ pub fn serve(options: ServeOptions) -> Result<(), DaemonError> {
 	let mut state = state::State::new(daemon_epoch, Arc::clone(&handle), Arc::clone(&coordinator));
 	state.replay_named_results()?;
 
+	let effective_idle_timeout = match options.idle_timeout {
+		None => Some(Duration::from_secs(1800)),
+		Some(d) if d.is_zero() => None,
+		Some(d) => Some(d),
+	};
+	if let Some(t) = effective_idle_timeout {
+		tracing::info!(seconds = t.as_secs(), "idle timeout configured");
+	} else {
+		tracing::info!("idle timeout disabled");
+	}
+	state.set_idle_timeout(effective_idle_timeout);
+
 	let (state_tx, state_rx) = channel();
 
 	let state_thread = thread::spawn(move || state::run(state, state_rx));

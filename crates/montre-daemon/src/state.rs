@@ -43,6 +43,8 @@ pub(crate) struct State {
 	anchors: HashMap<AnchorId, Anchor>,
 	subscriptions: HashMap<Topic, HashSet<ProcessId>>,
 	named_results: HashMap<String, NamedResultRecord>,
+	idle_timeout: Option<std::time::Duration>,
+	roster_emptied_at: Option<std::time::Instant>,
 	next_process_id: ProcessId,
 	next_anchor_id: AnchorId,
 }
@@ -61,9 +63,15 @@ impl State {
 			anchors: HashMap::new(),
 			subscriptions: HashMap::new(),
 			named_results: HashMap::new(),
+			idle_timeout: None,
+			roster_emptied_at: Some(std::time::Instant::now()),
 			next_process_id: 1,
 			next_anchor_id: 1,
 		}
+	}
+
+	pub(crate) fn set_idle_timeout(&mut self, timeout: Option<std::time::Duration>) {
+		self.idle_timeout = timeout;
 	}
 
 	pub(crate) fn replay_named_results(&mut self) -> std::io::Result<()> {
@@ -116,6 +124,7 @@ impl State {
 				outbound,
 			},
 		);
+		self.roster_emptied_at = None;
 
 		self.notify_roster(RosterEvent::Registered, info);
 
@@ -149,6 +158,10 @@ impl State {
 
 		for subscribers in self.subscriptions.values_mut() {
 			subscribers.remove(&process_id);
+		}
+
+		if self.roster.is_empty() {
+			self.roster_emptied_at = Some(std::time::Instant::now());
 		}
 
 		self.notify_roster(RosterEvent::Unregistered, connection.info);
@@ -643,6 +656,19 @@ impl State {
 		});
 	}
 
+	fn check_idle_timeout(&self) {
+		let Some(timeout) = self.idle_timeout else { return };
+		let Some(emptied_at) = self.roster_emptied_at else { return };
+		let elapsed = emptied_at.elapsed();
+		if elapsed >= timeout {
+			tracing::info!(
+				elapsed_seconds = elapsed.as_secs(),
+				"idle timeout reached; initiating shutdown",
+			);
+			self.initiate_shutdown(ShutdownReason::IdleTimeout);
+		}
+	}
+
 	fn notify_shutdown(&self, reason: ShutdownReason) {
 		let params = ShutdownNotificationParams {
 			reason,
@@ -956,7 +982,22 @@ pub(crate) enum Command {
 }
 
 pub(crate) fn run(mut state: State, commands: Receiver<Command>) {
-	while let Ok(command) = commands.recv() {
+	loop {
+		let command = match state.idle_timeout {
+			Some(timeout) => match commands.recv_timeout(timeout) {
+				Ok(c) => c,
+				Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+					state.check_idle_timeout();
+					continue;
+				}
+				Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+			},
+			None => match commands.recv() {
+				Ok(c) => c,
+				Err(_) => return,
+			},
+		};
+
 		match command {
 			Command::Register { params, outbound, reply } => {
 				let _ = reply.send(state.register(params, outbound));
@@ -1782,5 +1823,89 @@ mod tests {
 		assert_eq!(message_b["method"], "notification.shutdown");
 		assert_eq!(message_a["params"]["reason"], "requested");
 		assert_eq!(message_a["params"]["in_seconds"], 0);
+	}
+
+	#[test]
+	fn roster_emptied_at_initially_set_at_startup() {
+		let state = make_state();
+		assert!(state.roster_emptied_at.is_some());
+	}
+
+	#[test]
+	fn register_clears_roster_emptied_at() {
+		let mut state = make_state();
+		state
+			.register(make_register_params(ProcessKind::Reader), dummy_outbound())
+			.unwrap();
+		assert!(state.roster_emptied_at.is_none());
+	}
+
+	#[test]
+	fn unregister_to_empty_sets_roster_emptied_at() {
+		let mut state = make_state();
+		let pid = state
+			.register(make_register_params(ProcessKind::Reader), dummy_outbound())
+			.unwrap()
+			.process_id;
+		assert!(state.roster_emptied_at.is_none());
+		state.unregister(pid);
+		assert!(state.roster_emptied_at.is_some());
+	}
+
+	#[test]
+	fn unregister_with_remaining_roster_does_not_set_roster_emptied_at() {
+		let mut state = make_state();
+		let pid_a = state
+			.register(make_register_params(ProcessKind::Reader), dummy_outbound())
+			.unwrap()
+			.process_id;
+		let _pid_b = state
+			.register(make_register_params(ProcessKind::Kwic), dummy_outbound())
+			.unwrap()
+			.process_id;
+		state.unregister(pid_a);
+		assert!(state.roster_emptied_at.is_none());
+	}
+
+	#[test]
+	fn check_idle_timeout_fires_when_threshold_exceeded() {
+		use std::time::{Duration, Instant};
+		let coordinator = ShutdownCoordinator::dummy();
+		let mut state = State::new(1, make_handle(), Arc::clone(&coordinator));
+		state.set_idle_timeout(Some(Duration::from_secs(1)));
+		state.roster_emptied_at = Some(
+			Instant::now()
+				.checked_sub(Duration::from_secs(2))
+				.expect("instant subtract"),
+		);
+		assert!(!coordinator.is_shutting_down());
+		state.check_idle_timeout();
+		assert!(coordinator.is_shutting_down());
+	}
+
+	#[test]
+	fn check_idle_timeout_skips_when_roster_emptied_at_is_none() {
+		use std::time::Duration;
+		let coordinator = ShutdownCoordinator::dummy();
+		let mut state = State::new(1, make_handle(), Arc::clone(&coordinator));
+		state.set_idle_timeout(Some(Duration::from_millis(1)));
+		state.roster_emptied_at = None;
+		state.check_idle_timeout();
+		assert!(!coordinator.is_shutting_down());
+	}
+
+	#[test]
+	fn check_idle_timeout_skips_when_idle_timeout_disabled() {
+		use std::time::{Duration, Instant};
+		let coordinator = ShutdownCoordinator::dummy();
+		let mut state = State::new(1, make_handle(), Arc::clone(&coordinator));
+		state.set_idle_timeout(None);
+		state.roster_emptied_at = Some(
+			Instant::now()
+				.checked_sub(Duration::from_secs(2))
+				.expect("instant subtract"),
+		);
+		state.check_idle_timeout();
+		assert!(!coordinator.is_shutting_down());
 	}
 }

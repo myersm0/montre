@@ -145,7 +145,7 @@ Integration tests in `tests/` use a real socket (`tests/c2_plumbing.rs` shows th
 
 **Single connection per client.** Each `DaemonClient` opens one socket. Clients that need to coordinate on more than one corpus open one client per corpus. v1 does not support cross-corpus operations.
 
-**No idle timeout, no graceful shutdown, no race-safe spawn.** All deferred to c5. The daemon currently runs until killed; clients connecting to a missing socket fail rather than auto-spawning; concurrent first-time-connect from two clients races the socket file.
+**Spawn race not yet handled.** Concurrent first-time-connect from two clients races the socket file. Idle timeout, graceful shutdown, and signal handling are all landed in c5; race-safe spawn (a client-side lockfile) is the remaining piece.
 
 ## Conventions
 
