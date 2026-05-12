@@ -1,5 +1,15 @@
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+
+use crate::protocol::{ResultForm, ResultHandle, ResultMetadata};
+
+pub(crate) struct NamedResultRecord {
+	pub handle: ResultHandle,
+	pub cql: String,
+	pub hit_count: u64,
+	pub created_at: String,
+}
 
 pub(crate) fn state_dir_for(corpus_id: &str) -> io::Result<PathBuf> {
 	state_dir_under(&state_root_from_env()?, corpus_id)
@@ -49,7 +59,86 @@ pub(crate) fn load_and_bump_epoch(state_dir: &Path) -> io::Result<u64> {
 	Ok(next)
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn named_results_path(state_dir: &Path) -> PathBuf {
+	state_dir.join("named_results.jsonl")
+}
+
+pub(crate) fn persist_named_results<'a, I>(
+	state_dir: &Path,
+	corpus_id: &str,
+	records: I,
+) -> io::Result<()>
+where
+	I: IntoIterator<Item = (&'a str, &'a NamedResultRecord)>,
+{
+	let mut content = String::new();
+	for (name, record) in records {
+		let metadata = ResultMetadata {
+			handle: record.handle.clone(),
+			query: record.cql.clone(),
+			created_at: record.created_at.clone(),
+			materialized_at: None,
+			hit_count: record.hit_count,
+			corpus_id: corpus_id.to_string(),
+			name: Some(name.to_string()),
+			form: ResultForm::QueryBacked,
+		};
+		let line = serde_json::to_string(&metadata).map_err(|error| {
+			io::Error::new(io::ErrorKind::InvalidData, error)
+		})?;
+		content.push_str(&line);
+		content.push('\n');
+	}
+	write_atomic(&named_results_path(state_dir), content.as_bytes())
+}
+
+pub(crate) fn load_named_results(
+	state_dir: &Path,
+) -> io::Result<HashMap<String, NamedResultRecord>> {
+	let path = named_results_path(state_dir);
+	let content = match std::fs::read_to_string(&path) {
+		Ok(text) => text,
+		Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(HashMap::new()),
+		Err(error) => return Err(error),
+	};
+	let mut out = HashMap::new();
+	for (index, line) in content.lines().enumerate() {
+		let trimmed = line.trim();
+		if trimmed.is_empty() {
+			continue;
+		}
+		let metadata: ResultMetadata = match serde_json::from_str(trimmed) {
+			Ok(value) => value,
+			Err(error) => {
+				tracing::warn!(
+					line = index + 1,
+					error = %error,
+					"skipping malformed named-results line",
+				);
+				continue;
+			}
+		};
+		let Some(name) = metadata.name else {
+			tracing::warn!(
+				line = index + 1,
+				"skipping named-results line with no name",
+			);
+			continue;
+		};
+		out.insert(
+			name,
+			NamedResultRecord {
+				handle: metadata.handle,
+				cql: metadata.query,
+				hit_count: metadata.hit_count,
+				created_at: metadata.created_at,
+			},
+		);
+	}
+	Ok(out)
+}
+
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 	let temporary_path = path.with_extension("tmp");
 	{
 		let mut file = std::fs::File::create(&temporary_path)?;
@@ -130,5 +219,106 @@ mod tests {
 		write_atomic(&path, b"42").unwrap();
 		assert_eq!(std::fs::read_to_string(&path).unwrap(), "42");
 		assert!(!temporary_path.exists());
+	}
+
+	fn record(handle: &str, cql: &str, hit_count: u64) -> NamedResultRecord {
+		NamedResultRecord {
+			handle: handle.to_string(),
+			cql: cql.to_string(),
+			hit_count,
+			created_at: "2026-05-12T00:00:00Z".to_string(),
+		}
+	}
+
+	#[test]
+	fn load_named_results_missing_file_returns_empty_map() {
+		let temp = TempDir::new().expect("tempdir");
+		let loaded = load_named_results(temp.path()).expect("load");
+		assert!(loaded.is_empty());
+	}
+
+	#[test]
+	fn persist_and_load_named_results_roundtrip() {
+		let temp = TempDir::new().expect("tempdir");
+		let alpha = record("r-alpha", "[pos=\"NOUN\"]", 100);
+		let beta = record("r-beta", "[pos=\"ADJ\"]", 50);
+		let snapshot = vec![("alpha", &alpha), ("beta", &beta)];
+		persist_named_results(temp.path(), "corpus-id", snapshot).expect("persist");
+
+		let loaded = load_named_results(temp.path()).expect("load");
+		assert_eq!(loaded.len(), 2);
+		assert_eq!(loaded.get("alpha").unwrap().handle, "r-alpha");
+		assert_eq!(loaded.get("alpha").unwrap().cql, "[pos=\"NOUN\"]");
+		assert_eq!(loaded.get("alpha").unwrap().hit_count, 100);
+		assert_eq!(loaded.get("beta").unwrap().handle, "r-beta");
+	}
+
+	#[test]
+	fn persist_named_results_empty_iter_truncates_file() {
+		let temp = TempDir::new().expect("tempdir");
+		let alpha = record("r-alpha", "[pos=\"NOUN\"]", 100);
+		persist_named_results(temp.path(), "corpus-id", vec![("alpha", &alpha)]).unwrap();
+		persist_named_results::<std::iter::Empty<_>>(
+			temp.path(),
+			"corpus-id",
+			std::iter::empty(),
+		)
+		.unwrap();
+		let loaded = load_named_results(temp.path()).unwrap();
+		assert!(loaded.is_empty());
+	}
+
+	#[test]
+	fn load_named_results_skips_malformed_lines() {
+		let temp = TempDir::new().expect("tempdir");
+		let path = named_results_path(temp.path());
+		let good = serde_json::to_string(&ResultMetadata {
+			handle: "r-good".to_string(),
+			query: "[]".to_string(),
+			created_at: "2026-05-12T00:00:00Z".to_string(),
+			materialized_at: None,
+			hit_count: 1,
+			corpus_id: "c".to_string(),
+			name: Some("good".to_string()),
+			form: ResultForm::QueryBacked,
+		})
+		.unwrap();
+		let content = format!("{}\n{{not valid json\n\n{}\n", good, good.replace("good", "good2"));
+		std::fs::write(&path, content).unwrap();
+		let loaded = load_named_results(temp.path()).unwrap();
+		assert_eq!(loaded.len(), 2);
+		assert!(loaded.contains_key("good"));
+		assert!(loaded.contains_key("good2"));
+	}
+
+	#[test]
+	fn load_named_results_skips_lines_without_name() {
+		let temp = TempDir::new().expect("tempdir");
+		let path = named_results_path(temp.path());
+		let anonymous = serde_json::to_string(&ResultMetadata {
+			handle: "r-anon".to_string(),
+			query: "[]".to_string(),
+			created_at: "2026-05-12T00:00:00Z".to_string(),
+			materialized_at: None,
+			hit_count: 1,
+			corpus_id: "c".to_string(),
+			name: None,
+			form: ResultForm::QueryBacked,
+		})
+		.unwrap();
+		std::fs::write(&path, format!("{}\n", anonymous)).unwrap();
+		let loaded = load_named_results(temp.path()).unwrap();
+		assert!(loaded.is_empty());
+	}
+
+	#[test]
+	fn persist_named_results_writes_atomically_via_temporary() {
+		let temp = TempDir::new().expect("tempdir");
+		let alpha = record("r-alpha", "[]", 1);
+		let path = named_results_path(temp.path());
+		std::fs::write(path.with_extension("tmp"), b"garbage").unwrap();
+		persist_named_results(temp.path(), "c", vec![("alpha", &alpha)]).unwrap();
+		assert!(!path.with_extension("tmp").exists());
+		assert!(path.exists());
 	}
 }

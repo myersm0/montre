@@ -405,6 +405,7 @@ pub(crate) mod test_support {
 	use montre_index::Corpus;
 	use std::collections::HashMap;
 	use std::path::{Path, PathBuf};
+	use std::sync::atomic::{AtomicU64, Ordering};
 	use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
 	use std::sync::{Arc, OnceLock, RwLock};
 	use std::thread;
@@ -428,12 +429,22 @@ pub(crate) mod test_support {
 	}
 
 	pub fn make_handle() -> Arc<CorpusHandle> {
+		static STATE_ROOT: OnceLock<TempDir> = OnceLock::new();
+		static STATE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 		let (path, canonical) = corpus_fixture();
 		let corpus = Arc::new(montre_index::open(path).expect("corpus open"));
+
+		let root = STATE_ROOT.get_or_init(|| TempDir::new().expect("state root tempdir"));
+		let counter = STATE_COUNTER.fetch_add(1, Ordering::SeqCst);
+		let state_dir = root.path().join(format!("test-{:08}", counter));
+		std::fs::create_dir_all(&state_dir).expect("create state dir");
+
 		Arc::new(CorpusHandle {
 			corpus,
 			corpus_id: "test-corpus-id".to_string(),
 			canonical_path: canonical.to_path_buf(),
+			state_dir,
 			results: Arc::new(RwLock::new(HashMap::new())),
 		})
 	}

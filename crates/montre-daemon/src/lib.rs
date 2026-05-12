@@ -41,6 +41,7 @@ pub(crate) struct CorpusHandle {
 	pub corpus: Arc<Corpus>,
 	pub corpus_id: String,
 	pub canonical_path: PathBuf,
+	pub state_dir: PathBuf,
 	pub results: Arc<RwLock<ResultsTable>>,
 }
 
@@ -64,10 +65,12 @@ pub fn serve(options: ServeOptions) -> Result<(), DaemonError> {
 		corpus,
 		corpus_id,
 		canonical_path,
+		state_dir,
 		results: Arc::new(RwLock::new(HashMap::new())),
 	});
 
-	let state = state::State::new(daemon_epoch, Arc::clone(&handle));
+	let mut state = state::State::new(daemon_epoch, Arc::clone(&handle));
+	state.replay_named_results()?;
 
 	let (state_tx, state_rx) = channel();
 

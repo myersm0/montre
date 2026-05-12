@@ -13,6 +13,7 @@ use crate::protocol::{
 	ProcessInfo, ProtocolError, RegisterParams, RegisterReply, ResultForm, ResultHandle,
 	ResultMetadata, RosterFilter, Span, Topic, PROTOCOL_VERSION,
 };
+use crate::storage::{self, NamedResultRecord};
 use crate::CorpusHandle;
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -38,7 +39,7 @@ pub(crate) struct State {
 	roster: HashMap<ProcessId, Connection>,
 	anchors: HashMap<AnchorId, Anchor>,
 	subscriptions: HashMap<Topic, HashSet<ProcessId>>,
-	named_results: HashMap<String, ResultHandle>,
+	named_results: HashMap<String, NamedResultRecord>,
 	next_process_id: ProcessId,
 	next_anchor_id: AnchorId,
 }
@@ -55,6 +56,13 @@ impl State {
 			next_process_id: 1,
 			next_anchor_id: 1,
 		}
+	}
+
+	pub(crate) fn replay_named_results(&mut self) -> std::io::Result<()> {
+		let loaded = storage::load_named_results(&self.handle.state_dir)?;
+		tracing::info!(count = loaded.len(), "replayed named results from disk");
+		self.named_results = loaded;
+		Ok(())
 	}
 
 	fn allocate_process_id(&mut self) -> ProcessId {
@@ -246,19 +254,38 @@ impl State {
 			Arc::new(next)
 		};
 
+		let record = NamedResultRecord {
+			handle: handle.clone(),
+			cql: promoted.cql.clone(),
+			hit_count: promoted.metadata.hit_count,
+			created_at: promoted.metadata.created_at.clone(),
+		};
+
+		let extra = std::iter::once((name.as_str(), &record));
+		let existing = self
+			.named_results
+			.iter()
+			.map(|(k, v)| (k.as_str(), v));
+		storage::persist_named_results(
+			&self.handle.state_dir,
+			&self.handle.corpus_id,
+			existing.chain(extra),
+		)
+		.map_err(persist_error)?;
+
 		let metadata = promoted.metadata.clone();
 		self.handle.results
 			.write()
 			.expect("results lock poisoned")
-			.insert(handle.clone(), promoted);
-		self.named_results.insert(name.clone(), handle);
+			.insert(handle, promoted);
+		self.named_results.insert(name.clone(), record);
 
 		self.notify_named_results(NamedResultsEvent::Saved, name, Some(metadata));
 		Ok(())
 	}
 
 	fn materialize_result(&mut self, name: String) -> Result<ResultMetadata, ProtocolError> {
-		let handle = self.named_results.get(&name).cloned().ok_or_else(|| {
+		let handle = self.named_results.get(&name).map(|r| r.handle.clone()).ok_or_else(|| {
 			ProtocolError::new(
 				error_codes::NAMED_RESULT_NOT_FOUND,
 				format!("name '{}' not found", name),
@@ -296,39 +323,79 @@ impl State {
 		Ok(metadata)
 	}
 
-	fn load_named(&self, name: &str) -> Result<ResultMetadata, ProtocolError> {
-		let handle = self.named_results.get(name).ok_or_else(|| {
+	fn load_named(&self, name: &str) -> Result<LoadOutcome, ProtocolError> {
+		let record = self.named_results.get(name).ok_or_else(|| {
 			ProtocolError::new(
 				error_codes::NAMED_RESULT_NOT_FOUND,
 				format!("name '{}' not found", name),
 			)
 		})?;
 		let table = self.handle.results.read().expect("results lock poisoned");
-		let entry = table.get(handle).ok_or_else(|| {
-			ProtocolError::new(error_codes::RESULT_HANDLE_INVALID, "handle not found")
-		})?;
-		Ok(entry.metadata.clone())
+		if let Some(entry) = table.get(&record.handle) {
+			return Ok(LoadOutcome::Realized(entry.metadata.clone()));
+		}
+		Ok(LoadOutcome::Pending {
+			handle: record.handle.clone(),
+			cql: record.cql.clone(),
+			created_at: record.created_at.clone(),
+		})
+	}
+
+	fn install_replayed_result(&mut self, entry: Arc<ResultEntry>) {
+		let handle = entry.metadata.handle.clone();
+		self.handle.results
+			.write()
+			.expect("results lock poisoned")
+			.insert(handle, entry);
 	}
 
 	fn list_named(&self) -> Vec<ResultMetadata> {
 		let table = self.handle.results.read().expect("results lock poisoned");
 		self.named_results
-			.values()
-			.filter_map(|h| table.get(h).map(|e| e.metadata.clone()))
+			.iter()
+			.map(|(name, record)| {
+				if let Some(entry) = table.get(&record.handle) {
+					return entry.metadata.clone();
+				}
+				ResultMetadata {
+					handle: record.handle.clone(),
+					query: record.cql.clone(),
+					created_at: record.created_at.clone(),
+					materialized_at: None,
+					hit_count: record.hit_count,
+					corpus_id: self.handle.corpus_id.clone(),
+					name: Some(name.clone()),
+					form: ResultForm::QueryBacked,
+				}
+			})
 			.collect()
 	}
 
 	fn delete_named(&mut self, name: String) -> Result<(), ProtocolError> {
-		let handle = self.named_results.remove(&name).ok_or_else(|| {
+		let record_handle = self.named_results.get(&name).map(|r| r.handle.clone()).ok_or_else(|| {
 			ProtocolError::new(
 				error_codes::NAMED_RESULT_NOT_FOUND,
 				format!("name '{}' not found", name),
 			)
 		})?;
+
+		let surviving = self
+			.named_results
+			.iter()
+			.filter(|(key, _)| key.as_str() != name.as_str())
+			.map(|(k, v)| (k.as_str(), v));
+		storage::persist_named_results(
+			&self.handle.state_dir,
+			&self.handle.corpus_id,
+			surviving,
+		)
+		.map_err(persist_error)?;
+
+		self.named_results.remove(&name);
 		self.handle.results
 			.write()
 			.expect("results lock poisoned")
-			.remove(&handle);
+			.remove(&record_handle);
 		self.notify_named_results(NamedResultsEvent::Deleted, name, None);
 		Ok(())
 	}
@@ -738,6 +805,20 @@ fn try_send_outbound(
 	}
 }
 
+fn persist_error(error: std::io::Error) -> ProtocolError {
+	tracing::error!(error = %error, "named-results persistence failed");
+	ProtocolError::new(-32603, format!("persistence failure: {}", error))
+}
+
+pub(crate) enum LoadOutcome {
+	Realized(ResultMetadata),
+	Pending {
+		handle: ResultHandle,
+		cql: String,
+		created_at: String,
+	},
+}
+
 pub(crate) enum Command {
 	Register {
 		params: RegisterParams,
@@ -777,7 +858,11 @@ pub(crate) enum Command {
 	},
 	LoadNamed {
 		name: String,
-		reply: SyncSender<Result<ResultMetadata, ProtocolError>>,
+		reply: SyncSender<Result<LoadOutcome, ProtocolError>>,
+	},
+	InstallReplayedResult {
+		entry: Arc<ResultEntry>,
+		reply: SyncSender<()>,
 	},
 	ListNamed {
 		reply: SyncSender<Vec<ResultMetadata>>,
@@ -846,6 +931,10 @@ pub(crate) fn run(mut state: State, commands: Receiver<Command>) {
 			}
 			Command::LoadNamed { name, reply } => {
 				let _ = reply.send(state.load_named(&name));
+			}
+			Command::InstallReplayedResult { entry, reply } => {
+				state.install_replayed_result(entry);
+				let _ = reply.send(());
 			}
 			Command::ListNamed { reply } => {
 				let _ = reply.send(state.list_named());
@@ -1551,5 +1640,58 @@ mod tests {
 			&AnchorKind::ConlluView,
 		)
 		.is_empty());
+	}
+
+	fn state_sharing_dir(state_dir: std::path::PathBuf) -> State {
+		use crate::dispatch::test_support::corpus_fixture;
+		use std::sync::RwLock;
+		let (path, canonical) = corpus_fixture();
+		let corpus = Arc::new(montre_index::open(path).expect("corpus open"));
+		let handle = Arc::new(CorpusHandle {
+			corpus,
+			corpus_id: "persist-test".to_string(),
+			canonical_path: canonical.to_path_buf(),
+			state_dir,
+			results: Arc::new(RwLock::new(HashMap::new())),
+		});
+		State::new(1, handle)
+	}
+
+	#[test]
+	fn save_persists_and_replay_restores_named_record() {
+		let temp = tempfile::TempDir::new().expect("tempdir");
+		let state_dir = temp.path().to_path_buf();
+
+		let mut first = state_sharing_dir(state_dir.clone());
+		let handle = first.insert_result("[pos=\"NOUN\"]".to_string(), vec![]);
+		first.save_result(handle.clone(), "saved".to_string()).unwrap();
+		drop(first);
+
+		let mut second = state_sharing_dir(state_dir);
+		second.replay_named_results().expect("replay");
+
+		let record = second.named_results.get("saved").expect("name present after replay");
+		assert_eq!(record.handle, handle);
+		assert_eq!(record.cql, "[pos=\"NOUN\"]");
+	}
+
+	#[test]
+	fn delete_persists_removal_and_replay_omits_it() {
+		let temp = tempfile::TempDir::new().expect("tempdir");
+		let state_dir = temp.path().to_path_buf();
+
+		let mut first = state_sharing_dir(state_dir.clone());
+		let kept = first.insert_result("[pos=\"NOUN\"]".to_string(), vec![]);
+		let doomed = first.insert_result("[pos=\"ADJ\"]".to_string(), vec![]);
+		first.save_result(kept, "kept".to_string()).unwrap();
+		first.save_result(doomed, "doomed".to_string()).unwrap();
+		first.delete_named("doomed".to_string()).unwrap();
+		drop(first);
+
+		let mut second = state_sharing_dir(state_dir);
+		second.replay_named_results().expect("replay");
+
+		assert!(second.named_results.contains_key("kept"));
+		assert!(!second.named_results.contains_key("doomed"));
 	}
 }
