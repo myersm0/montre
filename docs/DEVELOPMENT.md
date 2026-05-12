@@ -42,30 +42,36 @@ Components remain independently queryable. You can query `maupassant-fr` as if t
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        montre-cli                           │
-│                   (thin shell, display)                     │
-└─────────────────────────────────────────────────────────────┘
-                              │
-        ┌─────────────────────┼─────────────────────┐
-        ▼                     ▼                     ▼
-┌───────────────┐    ┌───────────────┐    ┌───────────────┐
-│  montre-query │    │ montre-build  │    │  montre-index │
-│               │    │               │    │               │
-│ Parser        │    │ CorpusReader  │    │ Corpus        │
-│ AST           │    │ CorpusBuilder │    │ InvertedIndex │
-│ Planner       │    │ (conllu, json)│    │ ForwardIndex  │
-│ Executor      │    │               │    │ SpanIndex     │
-└───────────────┘    └───────────────┘    └───────────────┘
-        │                     │                     │
-        └─────────────────────┼─────────────────────┘
-                              ▼
-                    ┌───────────────┐
-                    │  montre-core  │
-                    │               │
-                    │ Span          │
-                    │ Position      │
-                    │ Value         │
-                    └───────────────┘
+│         build/query/count/vocab/...     │     serve         │
+└──────────────────────┬──────────────────┴─────────┬─────────┘
+                       │                            ▼
+                       │                  ┌──────────────────┐
+                       │                  │  montre-daemon   │
+                       │                  │  server + client │
+                       │                  └────────┬─────────┘
+                       │                           │
+       ┌───────────────┴─────────────┬─────────────┴──────────┐
+       ▼                             ▼                        ▼
+┌───────────────┐            ┌───────────────┐        ┌───────────────┐
+│ montre-query  │            │ montre-build  │        │ montre-index  │
+│               │            │               │        │               │
+│ Parser        │            │ CorpusReader  │        │ Corpus        │
+│ AST           │            │ CorpusBuilder │        │ InvertedIndex │
+│ Planner       │            │ (conllu, json)│        │ ForwardIndex  │
+│ Executor      │            │               │        │ SpanIndex     │
+└───────────────┘            └───────────────┘        └───────────────┘
+       └─────────────────────────────┼────────────────────────┘
+                                     ▼
+                            ┌───────────────┐
+                            │  montre-core  │
+                            │               │
+                            │ Span          │
+                            │ Position      │
+                            │ Value         │
+                            └───────────────┘
 ```
+
+`montre-daemon` sits above the engine crates: it depends on `montre-index` and `montre-query` for corpus access and execution, and exposes both a server (`montre serve`, invoked via the CLI) and a `DaemonClient` that is the shared entry point for bindings, terminal interfaces, and integration tests. The CLI is the only binary; the daemon runs as a `serve` subcommand of the same executable.
 
 ### Crate responsibilities
 
@@ -75,7 +81,8 @@ Components remain independently queryable. You can query `maupassant-fr` as if t
 | `montre-index` | Index structures and corpus loading | `montre-core` |
 | `montre-build` | Corpus construction from source formats | `montre-core`, `montre-index` |
 | `montre-query` | Query parsing, planning, execution | `montre-core`, `montre-index` |
-| `montre-cli` | Command-line interface | all of the above |
+| `montre-daemon` | Session daemon + shared client; coordination, persistent results | `montre-core`, `montre-index`, `montre-query` |
+| `montre-cli` | Command-line interface (incl. `serve` subcommand) | all of the above |
 | `montre-ffi` | C FFI for Julia/Python/R bindings | `montre-core`, `montre-index`, `montre-query`, `montre-build` |
 | `montre-py` | Python bindings (future) | all of the above |
 
