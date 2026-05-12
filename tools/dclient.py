@@ -2,40 +2,47 @@
 """
 montre-daemon interactive client.
 
-Connects to a running daemon, auto-registers, and drops to a REPL.
+Connects to a running daemon, auto-registers, and drops to a REPL with
+asynchronous notification handling.
 
 usage:
     python3 dclient.py [--socket /path/to/sock]
 
-defaults to /tmp/montre-daemon.sock (matches what `cargo run --example serve_local`
-sets up by default).
+defaults to /tmp/montre-daemon.sock (matches `cargo run --example serve_local`).
 
 REPL commands:
-    method                       send method with no params
-    method {"k": "v"}            send method with JSON params
-    .help                        show available methods
+    method                       send method as a request (waits for response)
+    method {"k": "v"}            same, with JSON params
+    .notify method [params]      send as a notification (no id, no reply expected)
+    .help                        list available methods
     .quit / exit / EOF           disconnect
+
+server-pushed notifications (anchor_update, roster_changed,
+named_results_changed, shutdown) print as they arrive.
 
 examples:
     daemon> corpus.info
-    daemon> corpus.documents
-    daemon> corpus.documents {"component": "fr"}
-    daemon> corpus.layer_info {"layer": "upos"}
-    daemon> text.surface {"start": 0, "end": 5}
-    daemon> alignment.list
-    daemon> query.execute_count {"cql": "[pos=\\"NOUN\\"]"}
     daemon> query.execute {"cql": "[pos=\\"NOUN\\"]"}
     daemon> query.hits {"handle": "r-...", "offset": 0, "limit": 10}
+    daemon> subscription.subscribe {"topic": "roster_changed"}
+    daemon> .notify session.publish_interest {"interest": {"type": "Sentence", "doc": 0, "sent": 0}}
+    daemon> daemon.shutdown {"reason": "requested"}
 """
 
 import argparse
 import json
+import queue
 import socket
 import struct
 import sys
+import threading
 
 
-METHODS = [
+methods = [
+	"session.unregister",
+	"session.update_label",
+	"session.roster",
+	"session.publish_interest (notification)",
 	"corpus.info",
 	"corpus.documents",
 	"corpus.layer_info",
@@ -45,12 +52,24 @@ METHODS = [
 	"text.document",
 	"text.annotations",
 	"text.annotations_range",
-	"alignment.list",
-	"alignment.project",
 	"query.execute",
 	"query.execute_count",
 	"query.hits",
 	"query.metadata",
+	"query.save",
+	"query.materialize",
+	"query.load",
+	"query.list_named",
+	"query.delete_named",
+	"query.discard",
+	"alignment.list",
+	"alignment.project",
+	"anchor.create",
+	"anchor.remove",
+	"anchor.list",
+	"subscription.subscribe",
+	"subscription.unsubscribe",
+	"daemon.shutdown",
 ]
 
 
@@ -61,13 +80,13 @@ def send_frame(sock, payload):
 
 
 def recv_n(sock, n):
-	buf = b""
-	while len(buf) < n:
-		chunk = sock.recv(n - len(buf))
+	buffer = b""
+	while len(buffer) < n:
+		chunk = sock.recv(n - len(buffer))
 		if not chunk:
 			raise ConnectionError("daemon disconnected")
-		buf += chunk
-	return buf
+		buffer += chunk
+	return buffer
 
 
 def recv_frame(sock):
@@ -76,31 +95,69 @@ def recv_frame(sock):
 	return json.loads(recv_n(sock, length))
 
 
-def call(sock, request_id, method, params=None):
-	req = {"jsonrpc": "2.0", "id": request_id, "method": method}
+def reader_loop(sock, responses, stop_flag):
+	while not stop_flag.is_set():
+		try:
+			frame = recv_frame(sock)
+		except (ConnectionError, OSError, ValueError) as e:
+			if not stop_flag.is_set():
+				sys.stdout.write(f"\n[connection closed: {e}]\n")
+				sys.stdout.flush()
+			stop_flag.set()
+			break
+		if "id" in frame:
+			responses.put(frame)
+		else:
+			method = frame.get("method", "?")
+			params = frame.get("params", {})
+			sys.stdout.write(f"\n[notification: {method}]\n")
+			sys.stdout.write(json.dumps(params, indent=2))
+			sys.stdout.write("\ndaemon> ")
+			sys.stdout.flush()
+
+
+def send_request(sock, responses, request_id, method, params):
+	request = {"jsonrpc": "2.0", "id": request_id, "method": method}
 	if params is not None:
-		req["params"] = params
-	send_frame(sock, req)
-	return recv_frame(sock)
+		request["params"] = params
+	send_frame(sock, request)
+	return responses.get(timeout=30)
 
 
-def parse_line(line):
-	parts = line.split(maxsplit=1)
+def send_notification(sock, method, params):
+	request = {"jsonrpc": "2.0", "method": method}
+	if params is not None:
+		request["params"] = params
+	send_frame(sock, request)
+
+
+def parse_method_and_params(text):
+	parts = text.split(maxsplit=1)
+	if not parts or not parts[0]:
+		raise ValueError("missing method name")
 	method = parts[0]
 	if len(parts) == 1:
 		return method, None
-	params_str = parts[1].strip()
-	if not params_str:
+	params_text = parts[1].strip()
+	if not params_text:
 		return method, None
 	try:
-		return method, json.loads(params_str)
+		return method, json.loads(params_text)
 	except json.JSONDecodeError as e:
 		raise ValueError(f"bad params JSON: {e}")
 
 
-def repl(sock):
+def parse_command(line):
+	if line.startswith(".notify"):
+		method, params = parse_method_and_params(line[len(".notify"):].strip())
+		return "notify", method, params
+	method, params = parse_method_and_params(line)
+	return "request", method, params
+
+
+def repl(sock, responses, stop_flag):
 	next_id = 1
-	while True:
+	while not stop_flag.is_set():
 		try:
 			line = input("daemon> ").strip()
 		except (EOFError, KeyboardInterrupt):
@@ -112,23 +169,31 @@ def repl(sock):
 			break
 		if line == ".help":
 			print("available methods:")
-			for m in METHODS:
+			for m in methods:
 				print(f"  {m}")
+			print("\nuse '.notify METHOD [PARAMS]' to send a notification (no reply expected)")
 			continue
 
 		try:
-			method, params = parse_line(line)
+			kind, method, params = parse_command(line)
 		except ValueError as e:
 			print(e)
 			continue
 
 		try:
-			reply = call(sock, next_id, method, params)
+			if kind == "notify":
+				send_notification(sock, method, params)
+				print("(sent as notification, no reply)")
+			else:
+				reply = send_request(sock, responses, next_id, method, params)
+				next_id += 1
+				print(json.dumps(reply, indent=2))
 		except ConnectionError as e:
 			print(f"connection lost: {e}")
 			break
-		next_id += 1
-		print(json.dumps(reply, indent=2))
+		except queue.Empty:
+			print("timeout waiting for response")
+			break
 
 
 def main():
@@ -153,12 +218,25 @@ def main():
 		print("remove it and restart the daemon")
 		sys.exit(1)
 
-	reply = call(
-		sock,
-		0,
-		"session.register",
-		{"protocol_version": 1, "kind": "external"},
+	responses = queue.Queue()
+	stop_flag = threading.Event()
+	reader = threading.Thread(
+		target=reader_loop,
+		args=(sock, responses, stop_flag),
+		daemon=True,
 	)
+	reader.start()
+
+	try:
+		reply = send_request(
+			sock, responses, 0,
+			"session.register",
+			{"protocol_version": 1, "kind": "external"},
+		)
+	except (ConnectionError, queue.Empty) as e:
+		print(f"register failed: {e}")
+		sys.exit(1)
+
 	if "error" in reply:
 		print(f"register failed: {reply['error']}")
 		sys.exit(1)
@@ -168,7 +246,8 @@ def main():
 		f"daemon_epoch={result['daemon_epoch']}")
 	print("type .help for methods, .quit to exit")
 
-	repl(sock)
+	repl(sock, responses, stop_flag)
+	stop_flag.set()
 	sock.close()
 
 
