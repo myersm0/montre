@@ -3,6 +3,7 @@ pub mod protocol;
 mod dispatch;
 mod handlers;
 mod shutdown;
+mod signals;
 mod state;
 mod storage;
 
@@ -79,12 +80,17 @@ pub fn serve(options: ServeOptions) -> Result<(), DaemonError> {
 
 	let state_thread = thread::spawn(move || state::run(state, state_rx));
 
+	let (signal_handle, signal_thread) = signals::install_signal_thread(state_tx.clone())?;
+
 	let listener_result = dispatch::run_listener(
 		&socket_path,
 		state_tx,
 		handle,
 		Arc::clone(&coordinator),
 	);
+
+	signal_handle.close();
+	let _ = signal_thread.join();
 
 	let _ = state_thread.join();
 

@@ -12,6 +12,7 @@ montre-index = { workspace = true }
 montre-query = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+signal-hook = { version = "0.3", features = ["iterator"] }
 thiserror = { workspace = true }
 time = { version = "0.3", features = ["formatting"] }
 tracing = { workspace = true }
