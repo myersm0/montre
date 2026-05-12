@@ -11,8 +11,10 @@ use crate::protocol::error_codes;
 use crate::protocol::{
 	Anchor, AnchorId, AnchorKind, AlignmentSource, Capabilities, Interest, InterestKind, ProcessId,
 	ProcessInfo, ProtocolError, RegisterParams, RegisterReply, ResultForm, ResultHandle,
-	ResultMetadata, RosterFilter, Span, Topic, PROTOCOL_VERSION,
+	ResultMetadata, RosterFilter, ShutdownNotificationParams, ShutdownReason, Span, Topic,
+	PROTOCOL_VERSION,
 };
+use crate::shutdown::ShutdownCoordinator;
 use crate::storage::{self, NamedResultRecord};
 use crate::CorpusHandle;
 
@@ -36,6 +38,7 @@ pub(crate) struct Connection {
 pub(crate) struct State {
 	daemon_epoch: u64,
 	handle: Arc<CorpusHandle>,
+	coordinator: Arc<ShutdownCoordinator>,
 	roster: HashMap<ProcessId, Connection>,
 	anchors: HashMap<AnchorId, Anchor>,
 	subscriptions: HashMap<Topic, HashSet<ProcessId>>,
@@ -45,10 +48,15 @@ pub(crate) struct State {
 }
 
 impl State {
-	pub(crate) fn new(daemon_epoch: u64, handle: Arc<CorpusHandle>) -> Self {
+	pub(crate) fn new(
+		daemon_epoch: u64,
+		handle: Arc<CorpusHandle>,
+		coordinator: Arc<ShutdownCoordinator>,
+	) -> Self {
 		Self {
 			daemon_epoch,
 			handle,
+			coordinator,
 			roster: HashMap::new(),
 			anchors: HashMap::new(),
 			subscriptions: HashMap::new(),
@@ -605,6 +613,48 @@ impl State {
 			let _ = try_send_outbound(&outbound, payload.clone(), pid);
 		}
 	}
+
+	fn broadcast_to_all(&self, payload: serde_json::Value) {
+		let recipients: Vec<(ProcessId, SyncSender<Outbound>)> = self
+			.roster
+			.iter()
+			.map(|(pid, c)| (*pid, c.outbound.clone()))
+			.collect();
+		for (pid, outbound) in recipients {
+			let _ = try_send_outbound(&outbound, payload.clone(), pid);
+		}
+	}
+
+	fn initiate_shutdown(&self, reason: ShutdownReason) {
+		if !self.coordinator.mark_shutting_down() {
+			tracing::debug!("shutdown already in progress; ignoring duplicate initiate");
+			return;
+		}
+		tracing::info!(reason = ?reason, "daemon shutdown initiated");
+		self.notify_shutdown(reason);
+
+		let coordinator = Arc::clone(&self.coordinator);
+		std::thread::spawn(move || {
+			std::thread::sleep(std::time::Duration::from_millis(500));
+			coordinator.close_all_streams();
+			if let Err(error) = coordinator.wake_listener() {
+				tracing::warn!(error = %error, "self-connect to wake listener failed");
+			}
+		});
+	}
+
+	fn notify_shutdown(&self, reason: ShutdownReason) {
+		let params = ShutdownNotificationParams {
+			reason,
+			in_seconds: 0,
+		};
+		let payload = serde_json::json!({
+			"jsonrpc": "2.0",
+			"method": "notification.shutdown",
+			"params": serde_json::to_value(params).unwrap_or(serde_json::Value::Null),
+		});
+		self.broadcast_to_all(payload);
+	}
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -899,6 +949,10 @@ pub(crate) enum Command {
 		topic: Topic,
 		reply: SyncSender<()>,
 	},
+	InitiateShutdown {
+		reason: ShutdownReason,
+		reply: SyncSender<()>,
+	},
 }
 
 pub(crate) fn run(mut state: State, commands: Receiver<Command>) {
@@ -962,6 +1016,10 @@ pub(crate) fn run(mut state: State, commands: Receiver<Command>) {
 				state.unsubscribe(process_id, topic);
 				let _ = reply.send(());
 			}
+			Command::InitiateShutdown { reason, reply } => {
+				state.initiate_shutdown(reason);
+				let _ = reply.send(());
+			}
 		}
 	}
 }
@@ -974,7 +1032,7 @@ mod tests {
 	use std::sync::mpsc::sync_channel;
 
 	fn make_state() -> State {
-		State::new(1, make_handle())
+		State::new(1, make_handle(), crate::shutdown::ShutdownCoordinator::dummy())
 	}
 
 	fn dummy_outbound() -> SyncSender<Outbound> {
@@ -1654,7 +1712,7 @@ mod tests {
 			state_dir,
 			results: Arc::new(RwLock::new(HashMap::new())),
 		});
-		State::new(1, handle)
+		State::new(1, handle, crate::shutdown::ShutdownCoordinator::dummy())
 	}
 
 	#[test]
@@ -1693,5 +1751,36 @@ mod tests {
 
 		assert!(second.named_results.contains_key("kept"));
 		assert!(!second.named_results.contains_key("doomed"));
+	}
+
+	#[test]
+	fn initiate_shutdown_marks_coordinator_and_is_idempotent() {
+		let coordinator = ShutdownCoordinator::dummy();
+		let state = State::new(1, make_handle(), Arc::clone(&coordinator));
+		assert!(!coordinator.is_shutting_down());
+		state.initiate_shutdown(ShutdownReason::Requested);
+		assert!(coordinator.is_shutting_down());
+		state.initiate_shutdown(ShutdownReason::Signal);
+		assert!(coordinator.is_shutting_down());
+	}
+
+	#[test]
+	fn initiate_shutdown_broadcasts_notification_to_all_roster_members() {
+		let coordinator = ShutdownCoordinator::dummy();
+		let mut state = State::new(1, make_handle(), Arc::clone(&coordinator));
+
+		let (tx_a, rx_a) = sync_channel::<Outbound>(16);
+		let (tx_b, rx_b) = sync_channel::<Outbound>(16);
+		state.register(make_register_params(ProcessKind::Reader), tx_a).unwrap();
+		state.register(make_register_params(ProcessKind::Kwic), tx_b).unwrap();
+
+		state.initiate_shutdown(ShutdownReason::Requested);
+
+		let message_a = rx_a.try_recv().expect("a should receive shutdown");
+		let message_b = rx_b.try_recv().expect("b should receive shutdown");
+		assert_eq!(message_a["method"], "notification.shutdown");
+		assert_eq!(message_b["method"], "notification.shutdown");
+		assert_eq!(message_a["params"]["reason"], "requested");
+		assert_eq!(message_a["params"]["in_seconds"], 0);
 	}
 }

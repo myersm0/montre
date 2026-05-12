@@ -5,13 +5,14 @@ use std::sync::mpsc::{sync_channel, Receiver, Sender, SyncSender};
 use std::sync::Arc;
 use std::thread;
 
-use crate::handlers::{alignment, anchor, corpus, query, session, subscription, text};
+use crate::handlers::{alignment, anchor, corpus, daemon, query, session, subscription, text};
 use crate::protocol::error_codes;
 use crate::protocol::{
 	ProcessId, ProtocolError, PublishInterestParams, RegisterParams,
 };
 use crate::state::{Command, Outbound};
 use crate::CorpusHandle;
+use crate::shutdown::ShutdownCoordinator;
 
 pub(crate) const MAX_PAYLOAD_SIZE: usize = 16 * 1024 * 1024;
 pub(crate) const OUTBOUND_QUEUE_DEPTH: usize = 256;
@@ -166,6 +167,7 @@ pub(crate) fn run_listener(
 	socket_path: &Path,
 	state_tx: Sender<Command>,
 	handle: Arc<CorpusHandle>,
+	coordinator: Arc<ShutdownCoordinator>,
 ) -> io::Result<()> {
 	if socket_path.exists() {
 		std::fs::remove_file(socket_path)?;
@@ -174,8 +176,17 @@ pub(crate) fn run_listener(
 	tracing::info!(socket = %socket_path.display(), "daemon listening");
 
 	for stream in listener.incoming() {
+		if coordinator.is_shutting_down() {
+			break;
+		}
 		match stream {
 			Ok(stream) => {
+				if coordinator.is_shutting_down() {
+					break;
+				}
+				if let Ok(clone) = stream.try_clone() {
+					coordinator.register_stream(clone);
+				}
 				let tx = state_tx.clone();
 				let handle = Arc::clone(&handle);
 				thread::spawn(move || run_connection(stream, tx, handle));
@@ -328,6 +339,7 @@ pub(crate) fn dispatch_request(
 		"anchor.list" => anchor::handle_anchor_list(params, ctx),
 		"subscription.subscribe" => subscription::handle_subscription_subscribe(params, ctx),
 		"subscription.unsubscribe" => subscription::handle_subscription_unsubscribe(params, ctx),
+		"daemon.shutdown" => daemon::handle_daemon_shutdown(params, ctx),
 		_ => Err(ProtocolError::new(
 			-32601,
 			format!("Method not found: {}", method),
@@ -481,7 +493,7 @@ pub(crate) mod test_support {
 		F: FnOnce(&mut RpcContext),
 	{
 		let handle = make_handle();
-		let st = state::State::new(1, Arc::clone(&handle));
+		let st = state::State::new(1, Arc::clone(&handle), crate::shutdown::ShutdownCoordinator::dummy());
 		let (state_tx, state_rx) = channel();
 		let state_handle = thread::spawn(move || state::run(st, state_rx));
 		{
@@ -498,7 +510,7 @@ pub(crate) mod test_support {
 		F: FnOnce(Sender<Command>, Arc<CorpusHandle>),
 	{
 		let handle = make_handle();
-		let st = state::State::new(1, Arc::clone(&handle));
+		let st = state::State::new(1, Arc::clone(&handle), crate::shutdown::ShutdownCoordinator::dummy());
 		let (state_tx, state_rx) = channel();
 		let state_handle = thread::spawn(move || state::run(st, state_rx));
 		body(state_tx.clone(), handle);
@@ -696,7 +708,7 @@ mod tests {
 	#[test]
 	fn dispatch_register_round_trip() {
 		let handle = make_handle();
-		let st = state::State::new(7, Arc::clone(&handle));
+		let st = state::State::new(7, Arc::clone(&handle), crate::shutdown::ShutdownCoordinator::dummy());
 		let (state_tx, state_rx) = channel();
 		let state_handle = thread::spawn(move || state::run(st, state_rx));
 
@@ -722,7 +734,7 @@ mod tests {
 	#[test]
 	fn dispatch_rejects_pre_register_methods() {
 		let handle = make_handle();
-		let st = state::State::new(1, Arc::clone(&handle));
+		let st = state::State::new(1, Arc::clone(&handle), crate::shutdown::ShutdownCoordinator::dummy());
 		let (state_tx, state_rx) = channel();
 		let state_handle = thread::spawn(move || state::run(st, state_rx));
 
@@ -741,7 +753,7 @@ mod tests {
 	#[test]
 	fn dispatch_unknown_method_returns_method_not_found() {
 		let handle = make_handle();
-		let st = state::State::new(1, Arc::clone(&handle));
+		let st = state::State::new(1, Arc::clone(&handle), crate::shutdown::ShutdownCoordinator::dummy());
 		let (state_tx, state_rx) = channel();
 		let state_handle = thread::spawn(move || state::run(st, state_rx));
 

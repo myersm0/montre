@@ -2,6 +2,7 @@ pub mod client;
 pub mod protocol;
 mod dispatch;
 mod handlers;
+mod shutdown;
 mod state;
 mod storage;
 
@@ -69,14 +70,21 @@ pub fn serve(options: ServeOptions) -> Result<(), DaemonError> {
 		results: Arc::new(RwLock::new(HashMap::new())),
 	});
 
-	let mut state = state::State::new(daemon_epoch, Arc::clone(&handle));
+	let coordinator = Arc::new(shutdown::ShutdownCoordinator::new(socket_path.clone()));
+
+	let mut state = state::State::new(daemon_epoch, Arc::clone(&handle), Arc::clone(&coordinator));
 	state.replay_named_results()?;
 
 	let (state_tx, state_rx) = channel();
 
 	let state_thread = thread::spawn(move || state::run(state, state_rx));
 
-	let listener_result = dispatch::run_listener(&socket_path, state_tx, handle);
+	let listener_result = dispatch::run_listener(
+		&socket_path,
+		state_tx,
+		handle,
+		Arc::clone(&coordinator),
+	);
 
 	let _ = state_thread.join();
 
