@@ -7,11 +7,13 @@ license.workspace = true
 
 [dependencies]
 blake3 = "1"
+fs4 = "0.13"
 montre-core = { workspace = true }
 montre-index = { workspace = true }
 montre-query = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+signal-hook = { version = "0.3", features = ["iterator"] }
 thiserror = { workspace = true }
 time = { version = "0.3", features = ["formatting"] }
 tracing = { workspace = true }

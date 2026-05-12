@@ -2,7 +2,10 @@ pub mod client;
 pub mod protocol;
 mod dispatch;
 mod handlers;
+mod shutdown;
+mod signals;
 mod state;
+mod storage;
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -40,6 +43,7 @@ pub(crate) struct CorpusHandle {
 	pub corpus: Arc<Corpus>,
 	pub corpus_id: String,
 	pub canonical_path: PathBuf,
+	pub state_dir: PathBuf,
 	pub results: Arc<RwLock<ResultsTable>>,
 }
 
@@ -50,6 +54,10 @@ pub fn serve(options: ServeOptions) -> Result<(), DaemonError> {
 	let canonical_path = std::fs::canonicalize(&options.corpus_path)?;
 	let corpus_id = derive_corpus_id(&canonical_path);
 
+	let state_dir = storage::state_dir_for(&corpus_id)?;
+	let daemon_epoch = storage::load_and_bump_epoch(&state_dir)?;
+	tracing::info!(epoch = daemon_epoch, "daemon epoch bumped");
+
 	let socket_path = match &options.socket_path {
 		Some(p) => p.clone(),
 		None => default_socket_path(&canonical_path)?,
@@ -59,17 +67,42 @@ pub fn serve(options: ServeOptions) -> Result<(), DaemonError> {
 		corpus,
 		corpus_id,
 		canonical_path,
+		state_dir,
 		results: Arc::new(RwLock::new(HashMap::new())),
 	});
 
-	let daemon_epoch = 1;
-	let state = state::State::new(daemon_epoch, Arc::clone(&handle));
+	let coordinator = Arc::new(shutdown::ShutdownCoordinator::new(socket_path.clone()));
+
+	let mut state = state::State::new(daemon_epoch, Arc::clone(&handle), Arc::clone(&coordinator));
+	state.replay_named_results()?;
+
+	let effective_idle_timeout = match options.idle_timeout {
+		None => Some(Duration::from_secs(1800)),
+		Some(d) if d.is_zero() => None,
+		Some(d) => Some(d),
+	};
+	if let Some(t) = effective_idle_timeout {
+		tracing::info!(seconds = t.as_secs(), "idle timeout configured");
+	} else {
+		tracing::info!("idle timeout disabled");
+	}
+	state.set_idle_timeout(effective_idle_timeout);
 
 	let (state_tx, state_rx) = channel();
 
 	let state_thread = thread::spawn(move || state::run(state, state_rx));
 
-	let listener_result = dispatch::run_listener(&socket_path, state_tx, handle);
+	let (signal_handle, signal_thread) = signals::install_signal_thread(state_tx.clone())?;
+
+	let listener_result = dispatch::run_listener(
+		&socket_path,
+		state_tx,
+		handle,
+		Arc::clone(&coordinator),
+	);
+
+	signal_handle.close();
+	let _ = signal_thread.join();
 
 	let _ = state_thread.join();
 
@@ -102,6 +135,12 @@ fn hex_prefix(canonical: &Path, hex_chars: usize) -> String {
 pub(crate) fn socket_path_for(corpus_path: &Path) -> io::Result<PathBuf> {
 	let canonical = std::fs::canonicalize(corpus_path)?;
 	default_socket_path(&canonical)
+}
+
+pub(crate) fn state_dir_for_corpus(corpus_path: &Path) -> io::Result<PathBuf> {
+	let canonical = std::fs::canonicalize(corpus_path)?;
+	let corpus_id = derive_corpus_id(&canonical);
+	storage::state_dir_for(&corpus_id)
 }
 
 fn default_socket_path(canonical: &Path) -> io::Result<PathBuf> {

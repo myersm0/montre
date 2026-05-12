@@ -11,8 +11,11 @@ use crate::protocol::error_codes;
 use crate::protocol::{
 	Anchor, AnchorId, AnchorKind, AlignmentSource, Capabilities, Interest, InterestKind, ProcessId,
 	ProcessInfo, ProtocolError, RegisterParams, RegisterReply, ResultForm, ResultHandle,
-	ResultMetadata, RosterFilter, Span, Topic, PROTOCOL_VERSION,
+	ResultMetadata, RosterFilter, ShutdownNotificationParams, ShutdownReason, Span, Topic,
+	PROTOCOL_VERSION,
 };
+use crate::shutdown::ShutdownCoordinator;
+use crate::storage::{self, NamedResultRecord};
 use crate::CorpusHandle;
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -25,9 +28,7 @@ pub(crate) struct ResultEntry {
 	pub metadata: ResultMetadata,
 }
 
-pub(crate) enum Outbound {
-	Message(serde_json::Value),
-}
+pub(crate) type Outbound = serde_json::Value;
 
 pub(crate) struct Connection {
 	info: ProcessInfo,
@@ -37,26 +38,47 @@ pub(crate) struct Connection {
 pub(crate) struct State {
 	daemon_epoch: u64,
 	handle: Arc<CorpusHandle>,
+	coordinator: Arc<ShutdownCoordinator>,
 	roster: HashMap<ProcessId, Connection>,
 	anchors: HashMap<AnchorId, Anchor>,
 	subscriptions: HashMap<Topic, HashSet<ProcessId>>,
-	named_results: HashMap<String, ResultHandle>,
+	named_results: HashMap<String, NamedResultRecord>,
+	idle_timeout: Option<std::time::Duration>,
+	roster_emptied_at: Option<std::time::Instant>,
 	next_process_id: ProcessId,
 	next_anchor_id: AnchorId,
 }
 
 impl State {
-	pub(crate) fn new(daemon_epoch: u64, handle: Arc<CorpusHandle>) -> Self {
+	pub(crate) fn new(
+		daemon_epoch: u64,
+		handle: Arc<CorpusHandle>,
+		coordinator: Arc<ShutdownCoordinator>,
+	) -> Self {
 		Self {
 			daemon_epoch,
 			handle,
+			coordinator,
 			roster: HashMap::new(),
 			anchors: HashMap::new(),
 			subscriptions: HashMap::new(),
 			named_results: HashMap::new(),
+			idle_timeout: None,
+			roster_emptied_at: Some(std::time::Instant::now()),
 			next_process_id: 1,
 			next_anchor_id: 1,
 		}
+	}
+
+	pub(crate) fn set_idle_timeout(&mut self, timeout: Option<std::time::Duration>) {
+		self.idle_timeout = timeout;
+	}
+
+	pub(crate) fn replay_named_results(&mut self) -> std::io::Result<()> {
+		let loaded = storage::load_named_results(&self.handle.state_dir)?;
+		tracing::info!(count = loaded.len(), "replayed named results from disk");
+		self.named_results = loaded;
+		Ok(())
 	}
 
 	fn allocate_process_id(&mut self) -> ProcessId {
@@ -102,6 +124,7 @@ impl State {
 				outbound,
 			},
 		);
+		self.roster_emptied_at = None;
 
 		self.notify_roster(RosterEvent::Registered, info);
 
@@ -135,6 +158,10 @@ impl State {
 
 		for subscribers in self.subscriptions.values_mut() {
 			subscribers.remove(&process_id);
+		}
+
+		if self.roster.is_empty() {
+			self.roster_emptied_at = Some(std::time::Instant::now());
 		}
 
 		self.notify_roster(RosterEvent::Unregistered, connection.info);
@@ -248,19 +275,38 @@ impl State {
 			Arc::new(next)
 		};
 
+		let record = NamedResultRecord {
+			handle: handle.clone(),
+			cql: promoted.cql.clone(),
+			hit_count: promoted.metadata.hit_count,
+			created_at: promoted.metadata.created_at.clone(),
+		};
+
+		let extra = std::iter::once((name.as_str(), &record));
+		let existing = self
+			.named_results
+			.iter()
+			.map(|(k, v)| (k.as_str(), v));
+		storage::persist_named_results(
+			&self.handle.state_dir,
+			&self.handle.corpus_id,
+			existing.chain(extra),
+		)
+		.map_err(persist_error)?;
+
 		let metadata = promoted.metadata.clone();
 		self.handle.results
 			.write()
 			.expect("results lock poisoned")
-			.insert(handle.clone(), promoted);
-		self.named_results.insert(name.clone(), handle);
+			.insert(handle, promoted);
+		self.named_results.insert(name.clone(), record);
 
 		self.notify_named_results(NamedResultsEvent::Saved, name, Some(metadata));
 		Ok(())
 	}
 
 	fn materialize_result(&mut self, name: String) -> Result<ResultMetadata, ProtocolError> {
-		let handle = self.named_results.get(&name).cloned().ok_or_else(|| {
+		let handle = self.named_results.get(&name).map(|r| r.handle.clone()).ok_or_else(|| {
 			ProtocolError::new(
 				error_codes::NAMED_RESULT_NOT_FOUND,
 				format!("name '{}' not found", name),
@@ -298,39 +344,79 @@ impl State {
 		Ok(metadata)
 	}
 
-	fn load_named(&self, name: &str) -> Result<ResultMetadata, ProtocolError> {
-		let handle = self.named_results.get(name).ok_or_else(|| {
+	fn load_named(&self, name: &str) -> Result<LoadOutcome, ProtocolError> {
+		let record = self.named_results.get(name).ok_or_else(|| {
 			ProtocolError::new(
 				error_codes::NAMED_RESULT_NOT_FOUND,
 				format!("name '{}' not found", name),
 			)
 		})?;
 		let table = self.handle.results.read().expect("results lock poisoned");
-		let entry = table.get(handle).ok_or_else(|| {
-			ProtocolError::new(error_codes::RESULT_HANDLE_INVALID, "handle not found")
-		})?;
-		Ok(entry.metadata.clone())
+		if let Some(entry) = table.get(&record.handle) {
+			return Ok(LoadOutcome::Realized(entry.metadata.clone()));
+		}
+		Ok(LoadOutcome::Pending {
+			handle: record.handle.clone(),
+			cql: record.cql.clone(),
+			created_at: record.created_at.clone(),
+		})
+	}
+
+	fn install_replayed_result(&mut self, entry: Arc<ResultEntry>) {
+		let handle = entry.metadata.handle.clone();
+		self.handle.results
+			.write()
+			.expect("results lock poisoned")
+			.insert(handle, entry);
 	}
 
 	fn list_named(&self) -> Vec<ResultMetadata> {
 		let table = self.handle.results.read().expect("results lock poisoned");
 		self.named_results
-			.values()
-			.filter_map(|h| table.get(h).map(|e| e.metadata.clone()))
+			.iter()
+			.map(|(name, record)| {
+				if let Some(entry) = table.get(&record.handle) {
+					return entry.metadata.clone();
+				}
+				ResultMetadata {
+					handle: record.handle.clone(),
+					query: record.cql.clone(),
+					created_at: record.created_at.clone(),
+					materialized_at: None,
+					hit_count: record.hit_count,
+					corpus_id: self.handle.corpus_id.clone(),
+					name: Some(name.clone()),
+					form: ResultForm::QueryBacked,
+				}
+			})
 			.collect()
 	}
 
 	fn delete_named(&mut self, name: String) -> Result<(), ProtocolError> {
-		let handle = self.named_results.remove(&name).ok_or_else(|| {
+		let record_handle = self.named_results.get(&name).map(|r| r.handle.clone()).ok_or_else(|| {
 			ProtocolError::new(
 				error_codes::NAMED_RESULT_NOT_FOUND,
 				format!("name '{}' not found", name),
 			)
 		})?;
+
+		let surviving = self
+			.named_results
+			.iter()
+			.filter(|(key, _)| key.as_str() != name.as_str())
+			.map(|(k, v)| (k.as_str(), v));
+		storage::persist_named_results(
+			&self.handle.state_dir,
+			&self.handle.corpus_id,
+			surviving,
+		)
+		.map_err(persist_error)?;
+
+		self.named_results.remove(&name);
 		self.handle.results
 			.write()
 			.expect("results lock poisoned")
-			.remove(&handle);
+			.remove(&record_handle);
 		self.notify_named_results(NamedResultsEvent::Deleted, name, None);
 		Ok(())
 	}
@@ -540,6 +626,61 @@ impl State {
 			let _ = try_send_outbound(&outbound, payload.clone(), pid);
 		}
 	}
+
+	fn broadcast_to_all(&self, payload: serde_json::Value) {
+		let recipients: Vec<(ProcessId, SyncSender<Outbound>)> = self
+			.roster
+			.iter()
+			.map(|(pid, c)| (*pid, c.outbound.clone()))
+			.collect();
+		for (pid, outbound) in recipients {
+			let _ = try_send_outbound(&outbound, payload.clone(), pid);
+		}
+	}
+
+	fn initiate_shutdown(&self, reason: ShutdownReason) {
+		if !self.coordinator.mark_shutting_down() {
+			tracing::debug!("shutdown already in progress; ignoring duplicate initiate");
+			return;
+		}
+		tracing::info!(reason = ?reason, "daemon shutdown initiated");
+		self.notify_shutdown(reason);
+
+		let coordinator = Arc::clone(&self.coordinator);
+		std::thread::spawn(move || {
+			std::thread::sleep(std::time::Duration::from_millis(500));
+			coordinator.close_all_streams();
+			if let Err(error) = coordinator.wake_listener() {
+				tracing::warn!(error = %error, "self-connect to wake listener failed");
+			}
+		});
+	}
+
+	fn check_idle_timeout(&self) {
+		let Some(timeout) = self.idle_timeout else { return };
+		let Some(emptied_at) = self.roster_emptied_at else { return };
+		let elapsed = emptied_at.elapsed();
+		if elapsed >= timeout {
+			tracing::info!(
+				elapsed_seconds = elapsed.as_secs(),
+				"idle timeout reached; initiating shutdown",
+			);
+			self.initiate_shutdown(ShutdownReason::IdleTimeout);
+		}
+	}
+
+	fn notify_shutdown(&self, reason: ShutdownReason) {
+		let params = ShutdownNotificationParams {
+			reason,
+			in_seconds: 0,
+		};
+		let payload = serde_json::json!({
+			"jsonrpc": "2.0",
+			"method": "notification.shutdown",
+			"params": serde_json::to_value(params).unwrap_or(serde_json::Value::Null),
+		});
+		self.broadcast_to_all(payload);
+	}
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -727,7 +868,7 @@ fn try_send_outbound(
 	payload: serde_json::Value,
 	process_id: ProcessId,
 ) -> Result<(), ()> {
-	match tx.try_send(Outbound::Message(payload)) {
+	match tx.try_send(payload) {
 		Ok(()) => Ok(()),
 		Err(std::sync::mpsc::TrySendError::Full(_)) => {
 			tracing::warn!(
@@ -738,6 +879,20 @@ fn try_send_outbound(
 		}
 		Err(std::sync::mpsc::TrySendError::Disconnected(_)) => Err(()),
 	}
+}
+
+fn persist_error(error: std::io::Error) -> ProtocolError {
+	tracing::error!(error = %error, "named-results persistence failed");
+	ProtocolError::new(-32603, format!("persistence failure: {}", error))
+}
+
+pub(crate) enum LoadOutcome {
+	Realized(ResultMetadata),
+	Pending {
+		handle: ResultHandle,
+		cql: String,
+		created_at: String,
+	},
 }
 
 pub(crate) enum Command {
@@ -779,7 +934,11 @@ pub(crate) enum Command {
 	},
 	LoadNamed {
 		name: String,
-		reply: SyncSender<Result<ResultMetadata, ProtocolError>>,
+		reply: SyncSender<Result<LoadOutcome, ProtocolError>>,
+	},
+	InstallReplayedResult {
+		entry: Arc<ResultEntry>,
+		reply: SyncSender<()>,
 	},
 	ListNamed {
 		reply: SyncSender<Vec<ResultMetadata>>,
@@ -816,10 +975,29 @@ pub(crate) enum Command {
 		topic: Topic,
 		reply: SyncSender<()>,
 	},
+	InitiateShutdown {
+		reason: ShutdownReason,
+		reply: SyncSender<()>,
+	},
 }
 
 pub(crate) fn run(mut state: State, commands: Receiver<Command>) {
-	while let Ok(command) = commands.recv() {
+	loop {
+		let command = match state.idle_timeout {
+			Some(timeout) => match commands.recv_timeout(timeout) {
+				Ok(c) => c,
+				Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+					state.check_idle_timeout();
+					continue;
+				}
+				Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+			},
+			None => match commands.recv() {
+				Ok(c) => c,
+				Err(_) => return,
+			},
+		};
+
 		match command {
 			Command::Register { params, outbound, reply } => {
 				let _ = reply.send(state.register(params, outbound));
@@ -849,6 +1027,10 @@ pub(crate) fn run(mut state: State, commands: Receiver<Command>) {
 			Command::LoadNamed { name, reply } => {
 				let _ = reply.send(state.load_named(&name));
 			}
+			Command::InstallReplayedResult { entry, reply } => {
+				state.install_replayed_result(entry);
+				let _ = reply.send(());
+			}
 			Command::ListNamed { reply } => {
 				let _ = reply.send(state.list_named());
 			}
@@ -875,6 +1057,10 @@ pub(crate) fn run(mut state: State, commands: Receiver<Command>) {
 				state.unsubscribe(process_id, topic);
 				let _ = reply.send(());
 			}
+			Command::InitiateShutdown { reason, reply } => {
+				state.initiate_shutdown(reason);
+				let _ = reply.send(());
+			}
 		}
 	}
 }
@@ -887,7 +1073,7 @@ mod tests {
 	use std::sync::mpsc::sync_channel;
 
 	fn make_state() -> State {
-		State::new(1, make_handle())
+		State::new(1, make_handle(), crate::shutdown::ShutdownCoordinator::dummy())
 	}
 
 	fn dummy_outbound() -> SyncSender<Outbound> {
@@ -1553,5 +1739,173 @@ mod tests {
 			&AnchorKind::ConlluView,
 		)
 		.is_empty());
+	}
+
+	fn state_sharing_dir(state_dir: std::path::PathBuf) -> State {
+		use crate::dispatch::test_support::corpus_fixture;
+		use std::sync::RwLock;
+		let (path, canonical) = corpus_fixture();
+		let corpus = Arc::new(montre_index::open(path).expect("corpus open"));
+		let handle = Arc::new(CorpusHandle {
+			corpus,
+			corpus_id: "persist-test".to_string(),
+			canonical_path: canonical.to_path_buf(),
+			state_dir,
+			results: Arc::new(RwLock::new(HashMap::new())),
+		});
+		State::new(1, handle, crate::shutdown::ShutdownCoordinator::dummy())
+	}
+
+	#[test]
+	fn save_persists_and_replay_restores_named_record() {
+		let temp = tempfile::TempDir::new().expect("tempdir");
+		let state_dir = temp.path().to_path_buf();
+
+		let mut first = state_sharing_dir(state_dir.clone());
+		let handle = first.insert_result("[pos=\"NOUN\"]".to_string(), vec![]);
+		first.save_result(handle.clone(), "saved".to_string()).unwrap();
+		drop(first);
+
+		let mut second = state_sharing_dir(state_dir);
+		second.replay_named_results().expect("replay");
+
+		let record = second.named_results.get("saved").expect("name present after replay");
+		assert_eq!(record.handle, handle);
+		assert_eq!(record.cql, "[pos=\"NOUN\"]");
+	}
+
+	#[test]
+	fn delete_persists_removal_and_replay_omits_it() {
+		let temp = tempfile::TempDir::new().expect("tempdir");
+		let state_dir = temp.path().to_path_buf();
+
+		let mut first = state_sharing_dir(state_dir.clone());
+		let kept = first.insert_result("[pos=\"NOUN\"]".to_string(), vec![]);
+		let doomed = first.insert_result("[pos=\"ADJ\"]".to_string(), vec![]);
+		first.save_result(kept, "kept".to_string()).unwrap();
+		first.save_result(doomed, "doomed".to_string()).unwrap();
+		first.delete_named("doomed".to_string()).unwrap();
+		drop(first);
+
+		let mut second = state_sharing_dir(state_dir);
+		second.replay_named_results().expect("replay");
+
+		assert!(second.named_results.contains_key("kept"));
+		assert!(!second.named_results.contains_key("doomed"));
+	}
+
+	#[test]
+	fn initiate_shutdown_marks_coordinator_and_is_idempotent() {
+		let coordinator = ShutdownCoordinator::dummy();
+		let state = State::new(1, make_handle(), Arc::clone(&coordinator));
+		assert!(!coordinator.is_shutting_down());
+		state.initiate_shutdown(ShutdownReason::Requested);
+		assert!(coordinator.is_shutting_down());
+		state.initiate_shutdown(ShutdownReason::Signal);
+		assert!(coordinator.is_shutting_down());
+	}
+
+	#[test]
+	fn initiate_shutdown_broadcasts_notification_to_all_roster_members() {
+		let coordinator = ShutdownCoordinator::dummy();
+		let mut state = State::new(1, make_handle(), Arc::clone(&coordinator));
+
+		let (tx_a, rx_a) = sync_channel::<Outbound>(16);
+		let (tx_b, rx_b) = sync_channel::<Outbound>(16);
+		state.register(make_register_params(ProcessKind::Reader), tx_a).unwrap();
+		state.register(make_register_params(ProcessKind::Kwic), tx_b).unwrap();
+
+		state.initiate_shutdown(ShutdownReason::Requested);
+
+		let message_a = rx_a.try_recv().expect("a should receive shutdown");
+		let message_b = rx_b.try_recv().expect("b should receive shutdown");
+		assert_eq!(message_a["method"], "notification.shutdown");
+		assert_eq!(message_b["method"], "notification.shutdown");
+		assert_eq!(message_a["params"]["reason"], "requested");
+		assert_eq!(message_a["params"]["in_seconds"], 0);
+	}
+
+	#[test]
+	fn roster_emptied_at_initially_set_at_startup() {
+		let state = make_state();
+		assert!(state.roster_emptied_at.is_some());
+	}
+
+	#[test]
+	fn register_clears_roster_emptied_at() {
+		let mut state = make_state();
+		state
+			.register(make_register_params(ProcessKind::Reader), dummy_outbound())
+			.unwrap();
+		assert!(state.roster_emptied_at.is_none());
+	}
+
+	#[test]
+	fn unregister_to_empty_sets_roster_emptied_at() {
+		let mut state = make_state();
+		let pid = state
+			.register(make_register_params(ProcessKind::Reader), dummy_outbound())
+			.unwrap()
+			.process_id;
+		assert!(state.roster_emptied_at.is_none());
+		state.unregister(pid);
+		assert!(state.roster_emptied_at.is_some());
+	}
+
+	#[test]
+	fn unregister_with_remaining_roster_does_not_set_roster_emptied_at() {
+		let mut state = make_state();
+		let pid_a = state
+			.register(make_register_params(ProcessKind::Reader), dummy_outbound())
+			.unwrap()
+			.process_id;
+		let _pid_b = state
+			.register(make_register_params(ProcessKind::Kwic), dummy_outbound())
+			.unwrap()
+			.process_id;
+		state.unregister(pid_a);
+		assert!(state.roster_emptied_at.is_none());
+	}
+
+	#[test]
+	fn check_idle_timeout_fires_when_threshold_exceeded() {
+		use std::time::{Duration, Instant};
+		let coordinator = ShutdownCoordinator::dummy();
+		let mut state = State::new(1, make_handle(), Arc::clone(&coordinator));
+		state.set_idle_timeout(Some(Duration::from_secs(1)));
+		state.roster_emptied_at = Some(
+			Instant::now()
+				.checked_sub(Duration::from_secs(2))
+				.expect("instant subtract"),
+		);
+		assert!(!coordinator.is_shutting_down());
+		state.check_idle_timeout();
+		assert!(coordinator.is_shutting_down());
+	}
+
+	#[test]
+	fn check_idle_timeout_skips_when_roster_emptied_at_is_none() {
+		use std::time::Duration;
+		let coordinator = ShutdownCoordinator::dummy();
+		let mut state = State::new(1, make_handle(), Arc::clone(&coordinator));
+		state.set_idle_timeout(Some(Duration::from_millis(1)));
+		state.roster_emptied_at = None;
+		state.check_idle_timeout();
+		assert!(!coordinator.is_shutting_down());
+	}
+
+	#[test]
+	fn check_idle_timeout_skips_when_idle_timeout_disabled() {
+		use std::time::{Duration, Instant};
+		let coordinator = ShutdownCoordinator::dummy();
+		let mut state = State::new(1, make_handle(), Arc::clone(&coordinator));
+		state.set_idle_timeout(None);
+		state.roster_emptied_at = Some(
+			Instant::now()
+				.checked_sub(Duration::from_secs(2))
+				.expect("instant subtract"),
+		);
+		state.check_idle_timeout();
+		assert!(!coordinator.is_shutting_down());
 	}
 }

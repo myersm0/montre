@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use montre_query::QueryError;
 
 use crate::dispatch::{
@@ -9,9 +11,9 @@ use crate::protocol::{
 	QueryExecuteCountReply, QueryExecuteParams, QueryExecuteReply, QueryHitsParams,
 	QueryHitsReply, QueryListNamedReply, QueryLoadParams, QueryLoadReply,
 	QueryMaterializeParams, QueryMaterializeReply, QueryMetadataParams, QuerySaveParams,
-	QuerySaveReply, ResultForm,
+	QuerySaveReply, ResultForm, ResultMetadata,
 };
-use crate::state::Command;
+use crate::state::{Command, LoadOutcome, ResultEntry};
 
 const MAX_HITS_PER_PAGE: u64 = 1000;
 
@@ -177,16 +179,62 @@ pub(crate) fn handle_query_load(
 ) -> Result<serde_json::Value, ProtocolError> {
 	let parsed: QueryLoadParams = parse_params("query.load", params)?;
 
-	let metadata = state_roundtrip(ctx, |reply| Command::LoadNamed {
-		name: parsed.name,
+	let outcome = state_roundtrip(ctx, |reply| Command::LoadNamed {
+		name: parsed.name.clone(),
 		reply,
 	})??;
 
-	serialize_reply(QueryLoadReply {
-		handle: metadata.handle,
-		hit_count: metadata.hit_count,
-		form: metadata.form,
-	})
+	match outcome {
+		LoadOutcome::Realized(metadata) => serialize_reply(QueryLoadReply {
+			handle: metadata.handle,
+			hit_count: metadata.hit_count,
+			form: metadata.form,
+		}),
+		LoadOutcome::Pending { handle, cql, created_at } => {
+			let ast = montre_query::parse(&cql).map_err(stored_query_invalid)?;
+			let plan = montre_query::planner::plan(&ast).map_err(stored_query_invalid)?;
+			let mut results = montre_query::executor::execute(&plan, &ctx.handle.corpus)
+				.map_err(stored_query_invalid)?;
+			results.populate_context(&ctx.handle.corpus);
+			let hits = results.into_hits();
+			let hit_count = hits.len() as u64;
+
+			let metadata = ResultMetadata {
+				handle: handle.clone(),
+				query: cql.clone(),
+				created_at,
+				materialized_at: None,
+				hit_count,
+				corpus_id: ctx.handle.corpus_id.clone(),
+				name: Some(parsed.name),
+				form: ResultForm::QueryBacked,
+			};
+			let entry = Arc::new(ResultEntry {
+				cql,
+				hits: Arc::new(hits),
+				metadata,
+			});
+
+			state_roundtrip(ctx, |reply| Command::InstallReplayedResult {
+				entry,
+				reply,
+			})?;
+
+			serialize_reply(QueryLoadReply {
+				handle,
+				hit_count,
+				form: ResultForm::QueryBacked,
+			})
+		}
+	}
+}
+
+fn stored_query_invalid(error: QueryError) -> ProtocolError {
+	let mapped = map_query_error(error);
+	ProtocolError::new(
+		error_codes::STORED_QUERY_INVALID,
+		format!("stored query no longer valid: {}", mapped.message),
+	)
 }
 
 pub(crate) fn handle_query_list_named(

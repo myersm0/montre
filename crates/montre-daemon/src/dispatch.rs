@@ -5,13 +5,14 @@ use std::sync::mpsc::{sync_channel, Receiver, Sender, SyncSender};
 use std::sync::Arc;
 use std::thread;
 
-use crate::handlers::{alignment, anchor, corpus, query, session, subscription, text};
+use crate::handlers::{alignment, anchor, corpus, daemon, query, session, subscription, text};
 use crate::protocol::error_codes;
 use crate::protocol::{
 	ProcessId, ProtocolError, PublishInterestParams, RegisterParams,
 };
 use crate::state::{Command, Outbound};
 use crate::CorpusHandle;
+use crate::shutdown::ShutdownCoordinator;
 
 pub(crate) const MAX_PAYLOAD_SIZE: usize = 16 * 1024 * 1024;
 pub(crate) const OUTBOUND_QUEUE_DEPTH: usize = 256;
@@ -166,6 +167,7 @@ pub(crate) fn run_listener(
 	socket_path: &Path,
 	state_tx: Sender<Command>,
 	handle: Arc<CorpusHandle>,
+	coordinator: Arc<ShutdownCoordinator>,
 ) -> io::Result<()> {
 	if socket_path.exists() {
 		std::fs::remove_file(socket_path)?;
@@ -174,8 +176,17 @@ pub(crate) fn run_listener(
 	tracing::info!(socket = %socket_path.display(), "daemon listening");
 
 	for stream in listener.incoming() {
+		if coordinator.is_shutting_down() {
+			break;
+		}
 		match stream {
 			Ok(stream) => {
+				if coordinator.is_shutting_down() {
+					break;
+				}
+				if let Ok(clone) = stream.try_clone() {
+					coordinator.register_stream(clone);
+				}
 				let tx = state_tx.clone();
 				let handle = Arc::clone(&handle);
 				thread::spawn(move || run_connection(stream, tx, handle));
@@ -212,7 +223,7 @@ fn run_connection(
 }
 
 fn run_writer(mut stream: UnixStream, rx: Receiver<Outbound>) {
-	while let Ok(Outbound::Message(value)) = rx.recv() {
+	while let Ok(value) = rx.recv() {
 		let payload = match serde_json::to_vec(&value) {
 			Ok(p) => p,
 			Err(e) => {
@@ -256,14 +267,14 @@ fn run_reader(
 		match parse_inbound(&frame) {
 			Err(error) => {
 				let response = build_error_response(serde_json::Value::Null, error);
-				let _ = outbound_tx.send(Outbound::Message(response));
+				let _ = outbound_tx.send(response);
 			}
 			Ok(Inbound::Request { id, method, params }) => {
 				let response = match dispatch_request(&method, params, &mut ctx) {
 					Ok(value) => build_response(id, value),
 					Err(error) => build_error_response(id, error),
 				};
-				let _ = outbound_tx.send(Outbound::Message(response));
+				let _ = outbound_tx.send(response);
 			}
 			Ok(Inbound::Notification { method, params }) => {
 				dispatch_notification(&method, params, &ctx);
@@ -328,6 +339,7 @@ pub(crate) fn dispatch_request(
 		"anchor.list" => anchor::handle_anchor_list(params, ctx),
 		"subscription.subscribe" => subscription::handle_subscription_subscribe(params, ctx),
 		"subscription.unsubscribe" => subscription::handle_subscription_unsubscribe(params, ctx),
+		"daemon.shutdown" => daemon::handle_daemon_shutdown(params, ctx),
 		_ => Err(ProtocolError::new(
 			-32601,
 			format!("Method not found: {}", method),
@@ -405,6 +417,7 @@ pub(crate) mod test_support {
 	use montre_index::Corpus;
 	use std::collections::HashMap;
 	use std::path::{Path, PathBuf};
+	use std::sync::atomic::{AtomicU64, Ordering};
 	use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
 	use std::sync::{Arc, OnceLock, RwLock};
 	use std::thread;
@@ -428,12 +441,22 @@ pub(crate) mod test_support {
 	}
 
 	pub fn make_handle() -> Arc<CorpusHandle> {
+		static STATE_ROOT: OnceLock<TempDir> = OnceLock::new();
+		static STATE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 		let (path, canonical) = corpus_fixture();
 		let corpus = Arc::new(montre_index::open(path).expect("corpus open"));
+
+		let root = STATE_ROOT.get_or_init(|| TempDir::new().expect("state root tempdir"));
+		let counter = STATE_COUNTER.fetch_add(1, Ordering::SeqCst);
+		let state_dir = root.path().join(format!("test-{:08}", counter));
+		std::fs::create_dir_all(&state_dir).expect("create state dir");
+
 		Arc::new(CorpusHandle {
 			corpus,
 			corpus_id: "test-corpus-id".to_string(),
 			canonical_path: canonical.to_path_buf(),
+			state_dir,
 			results: Arc::new(RwLock::new(HashMap::new())),
 		})
 	}
@@ -470,7 +493,7 @@ pub(crate) mod test_support {
 		F: FnOnce(&mut RpcContext),
 	{
 		let handle = make_handle();
-		let st = state::State::new(1, Arc::clone(&handle));
+		let st = state::State::new(1, Arc::clone(&handle), crate::shutdown::ShutdownCoordinator::dummy());
 		let (state_tx, state_rx) = channel();
 		let state_handle = thread::spawn(move || state::run(st, state_rx));
 		{
@@ -487,7 +510,7 @@ pub(crate) mod test_support {
 		F: FnOnce(Sender<Command>, Arc<CorpusHandle>),
 	{
 		let handle = make_handle();
-		let st = state::State::new(1, Arc::clone(&handle));
+		let st = state::State::new(1, Arc::clone(&handle), crate::shutdown::ShutdownCoordinator::dummy());
 		let (state_tx, state_rx) = channel();
 		let state_handle = thread::spawn(move || state::run(st, state_rx));
 		body(state_tx.clone(), handle);
@@ -685,7 +708,7 @@ mod tests {
 	#[test]
 	fn dispatch_register_round_trip() {
 		let handle = make_handle();
-		let st = state::State::new(7, Arc::clone(&handle));
+		let st = state::State::new(7, Arc::clone(&handle), crate::shutdown::ShutdownCoordinator::dummy());
 		let (state_tx, state_rx) = channel();
 		let state_handle = thread::spawn(move || state::run(st, state_rx));
 
@@ -711,7 +734,7 @@ mod tests {
 	#[test]
 	fn dispatch_rejects_pre_register_methods() {
 		let handle = make_handle();
-		let st = state::State::new(1, Arc::clone(&handle));
+		let st = state::State::new(1, Arc::clone(&handle), crate::shutdown::ShutdownCoordinator::dummy());
 		let (state_tx, state_rx) = channel();
 		let state_handle = thread::spawn(move || state::run(st, state_rx));
 
@@ -730,7 +753,7 @@ mod tests {
 	#[test]
 	fn dispatch_unknown_method_returns_method_not_found() {
 		let handle = make_handle();
-		let st = state::State::new(1, Arc::clone(&handle));
+		let st = state::State::new(1, Arc::clone(&handle), crate::shutdown::ShutdownCoordinator::dummy());
 		let (state_tx, state_rx) = channel();
 		let state_handle = thread::spawn(move || state::run(st, state_rx));
 
@@ -784,7 +807,6 @@ mod tests {
 	fn publish_interest_sentence_mirror_widens_position_for_follower() {
 		use crate::dispatch::test_support::{register_context, with_state_thread};
 		use crate::protocol::ProcessKind;
-		use crate::state::Outbound;
 		use std::time::Duration;
 
 		with_state_thread(|state_tx, handle| {
@@ -829,7 +851,7 @@ mod tests {
 			});
 			dispatch_notification("session.publish_interest", Some(publish_params), &master_ctx);
 
-			let Outbound::Message(payload) = follower_outbound
+			let payload = follower_outbound
 				.recv_timeout(Duration::from_millis(500))
 				.expect("follower should receive a notification");
 			assert_eq!(payload["jsonrpc"], "2.0");
@@ -845,7 +867,6 @@ mod tests {
 	fn publish_interest_alignment_fans_out_to_follower() {
 		use crate::dispatch::test_support::{register_context, with_state_thread};
 		use crate::protocol::ProcessKind;
-		use crate::state::Outbound;
 		use std::time::Duration;
 
 		with_state_thread(|state_tx, handle| {
@@ -923,8 +944,7 @@ mod tests {
 				expected_count,
 				"one notification per projected target",
 			);
-			for outbound in &received {
-				let Outbound::Message(payload) = outbound;
+			for payload in &received {
 				assert_eq!(payload["jsonrpc"], "2.0");
 				assert_eq!(payload["method"], "notification.anchor_update");
 				assert_eq!(payload["params"]["anchor_id"], anchor_id);

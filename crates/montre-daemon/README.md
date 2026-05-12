@@ -44,7 +44,7 @@ These hold across all phases. Code review and new handlers should preserve them.
 
 **Query execution never blocks the state thread.** The state thread only owns coordination state (roster, anchors, results table, counters). Anything that scales with corpus size (parser, planner, executor, surface text reconstruction, alignment projection inside handlers) runs on the connection thread. Notification transforms in `transform_interest` are the one current exception, called from within `Command::PublishInterest` and `Command::AnchorCreate` handlers; see "Known trade-offs" below.
 
-**`daemon_epoch` is the cache-invalidation contract.** Returned in `session.register`. Increments on daemon restart and on any persistent-state reset. Clients caching handle IDs, anchor IDs, or process IDs across reconnects must check epoch on each registration; if it changed, all prior cached IDs are invalid. The counter is hardcoded to `1` today and persisted to `~/.local/share/montre/state/<corpus_id>/epoch` in c5.
+**`daemon_epoch` is the cache-invalidation contract.** Returned in `session.register`. Increments on daemon restart and on any persistent-state reset. Clients caching handle IDs, anchor IDs, or process IDs across reconnects must check epoch on each registration; if it changed, all prior cached IDs are invalid. The counter is persisted to `<state_dir>/epoch` (default `~/.local/share/montre/state/<corpus_id>/epoch`, override via `XDG_STATE_HOME`) and bumped on every daemon startup.
 
 **Notifications carry no ID.** Strict JSON-RPC 2.0. `session.publish_interest` is a client-to-daemon notification (fire-and-forget). `notification.anchor_update`, `notification.roster_changed`, `notification.named_results_changed`, and `notification.shutdown` are daemon-to-client notifications.
 
@@ -65,6 +65,7 @@ src/
 ├── dispatch.rs       framing, RPC dispatch, listener, reader/writer threads, RpcContext, handle_register
 ├── state.rs          State, Command, run loop, anchor compat matrix, transform_interest
 ├── client.rs         DaemonClient (c4)
+├── storage.rs        state-dir resolution, epoch persistence (c5)
 └── handlers/
     ├── mod.rs
     ├── corpus.rs        corpus.info, corpus.documents, corpus.layer_info
@@ -143,8 +144,6 @@ Integration tests in `tests/` use a real socket (`tests/c2_plumbing.rs` shows th
 **Inert anchor kinds.** `DocPickerSelection`, `NamedResultsSelection`, and `ConlluView` compat-accept their self→self interest pair so `anchor.create` succeeds, but `transform_interest` returns empty for them pending UX design. Anchors of these kinds can be created and listed; they just don't push notifications. Documented in the spec; the daemon's behavior matches.
 
 **Single connection per client.** Each `DaemonClient` opens one socket. Clients that need to coordinate on more than one corpus open one client per corpus. v1 does not support cross-corpus operations.
-
-**No idle timeout, no graceful shutdown, no race-safe spawn.** All deferred to c5. The daemon currently runs until killed; clients connecting to a missing socket fail rather than auto-spawning; concurrent first-time-connect from two clients races the socket file.
 
 ## Conventions
 

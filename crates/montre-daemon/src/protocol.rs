@@ -175,6 +175,27 @@ pub struct OkReply {
 	pub ok: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShutdownReason {
+	IdleTimeout,
+	Signal,
+	FatalError,
+	Requested,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DaemonShutdownParams {
+	#[serde(default)]
+	pub reason: Option<ShutdownReason>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShutdownNotificationParams {
+	pub reason: ShutdownReason,
+	pub in_seconds: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionUpdateLabelParams {
 	#[serde(default)]
