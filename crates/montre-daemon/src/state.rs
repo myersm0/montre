@@ -25,9 +25,7 @@ pub(crate) struct ResultEntry {
 	pub metadata: ResultMetadata,
 }
 
-pub(crate) enum Outbound {
-	Message(serde_json::Value),
-}
+pub(crate) type Outbound = serde_json::Value;
 
 pub(crate) struct Connection {
 	info: ProcessInfo,
@@ -727,7 +725,7 @@ fn try_send_outbound(
 	payload: serde_json::Value,
 	process_id: ProcessId,
 ) -> Result<(), ()> {
-	match tx.try_send(Outbound::Message(payload)) {
+	match tx.try_send(payload) {
 		Ok(()) => Ok(()),
 		Err(std::sync::mpsc::TrySendError::Full(_)) => {
 			tracing::warn!(

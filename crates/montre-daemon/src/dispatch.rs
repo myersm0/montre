@@ -212,7 +212,7 @@ fn run_connection(
 }
 
 fn run_writer(mut stream: UnixStream, rx: Receiver<Outbound>) {
-	while let Ok(Outbound::Message(value)) = rx.recv() {
+	while let Ok(value) = rx.recv() {
 		let payload = match serde_json::to_vec(&value) {
 			Ok(p) => p,
 			Err(e) => {
@@ -256,14 +256,14 @@ fn run_reader(
 		match parse_inbound(&frame) {
 			Err(error) => {
 				let response = build_error_response(serde_json::Value::Null, error);
-				let _ = outbound_tx.send(Outbound::Message(response));
+				let _ = outbound_tx.send(response);
 			}
 			Ok(Inbound::Request { id, method, params }) => {
 				let response = match dispatch_request(&method, params, &mut ctx) {
 					Ok(value) => build_response(id, value),
 					Err(error) => build_error_response(id, error),
 				};
-				let _ = outbound_tx.send(Outbound::Message(response));
+				let _ = outbound_tx.send(response);
 			}
 			Ok(Inbound::Notification { method, params }) => {
 				dispatch_notification(&method, params, &ctx);
@@ -784,7 +784,6 @@ mod tests {
 	fn publish_interest_sentence_mirror_widens_position_for_follower() {
 		use crate::dispatch::test_support::{register_context, with_state_thread};
 		use crate::protocol::ProcessKind;
-		use crate::state::Outbound;
 		use std::time::Duration;
 
 		with_state_thread(|state_tx, handle| {
@@ -829,7 +828,7 @@ mod tests {
 			});
 			dispatch_notification("session.publish_interest", Some(publish_params), &master_ctx);
 
-			let Outbound::Message(payload) = follower_outbound
+			let payload = follower_outbound
 				.recv_timeout(Duration::from_millis(500))
 				.expect("follower should receive a notification");
 			assert_eq!(payload["jsonrpc"], "2.0");
@@ -845,7 +844,6 @@ mod tests {
 	fn publish_interest_alignment_fans_out_to_follower() {
 		use crate::dispatch::test_support::{register_context, with_state_thread};
 		use crate::protocol::ProcessKind;
-		use crate::state::Outbound;
 		use std::time::Duration;
 
 		with_state_thread(|state_tx, handle| {
@@ -923,8 +921,7 @@ mod tests {
 				expected_count,
 				"one notification per projected target",
 			);
-			for outbound in &received {
-				let Outbound::Message(payload) = outbound;
+			for payload in &received {
 				assert_eq!(payload["jsonrpc"], "2.0");
 				assert_eq!(payload["method"], "notification.anchor_update");
 				assert_eq!(payload["params"]["anchor_id"], anchor_id);
