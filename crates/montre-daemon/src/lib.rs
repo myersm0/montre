@@ -3,6 +3,7 @@ pub mod protocol;
 mod dispatch;
 mod handlers;
 mod state;
+mod storage;
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -50,6 +51,10 @@ pub fn serve(options: ServeOptions) -> Result<(), DaemonError> {
 	let canonical_path = std::fs::canonicalize(&options.corpus_path)?;
 	let corpus_id = derive_corpus_id(&canonical_path);
 
+	let state_dir = storage::state_dir_for(&corpus_id)?;
+	let daemon_epoch = storage::load_and_bump_epoch(&state_dir)?;
+	tracing::info!(epoch = daemon_epoch, "daemon epoch bumped");
+
 	let socket_path = match &options.socket_path {
 		Some(p) => p.clone(),
 		None => default_socket_path(&canonical_path)?,
@@ -62,7 +67,6 @@ pub fn serve(options: ServeOptions) -> Result<(), DaemonError> {
 		results: Arc::new(RwLock::new(HashMap::new())),
 	});
 
-	let daemon_epoch = 1;
 	let state = state::State::new(daemon_epoch, Arc::clone(&handle));
 
 	let (state_tx, state_rx) = channel();

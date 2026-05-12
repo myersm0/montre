@@ -44,7 +44,7 @@ These hold across all phases. Code review and new handlers should preserve them.
 
 **Query execution never blocks the state thread.** The state thread only owns coordination state (roster, anchors, results table, counters). Anything that scales with corpus size (parser, planner, executor, surface text reconstruction, alignment projection inside handlers) runs on the connection thread. Notification transforms in `transform_interest` are the one current exception, called from within `Command::PublishInterest` and `Command::AnchorCreate` handlers; see "Known trade-offs" below.
 
-**`daemon_epoch` is the cache-invalidation contract.** Returned in `session.register`. Increments on daemon restart and on any persistent-state reset. Clients caching handle IDs, anchor IDs, or process IDs across reconnects must check epoch on each registration; if it changed, all prior cached IDs are invalid. The counter is hardcoded to `1` today and persisted to `~/.local/share/montre/state/<corpus_id>/epoch` in c5.
+**`daemon_epoch` is the cache-invalidation contract.** Returned in `session.register`. Increments on daemon restart and on any persistent-state reset. Clients caching handle IDs, anchor IDs, or process IDs across reconnects must check epoch on each registration; if it changed, all prior cached IDs are invalid. The counter is persisted to `<state_dir>/epoch` (default `~/.local/share/montre/state/<corpus_id>/epoch`, override via `XDG_STATE_HOME`) and bumped on every daemon startup.
 
 **Notifications carry no ID.** Strict JSON-RPC 2.0. `session.publish_interest` is a client-to-daemon notification (fire-and-forget). `notification.anchor_update`, `notification.roster_changed`, `notification.named_results_changed`, and `notification.shutdown` are daemon-to-client notifications.
 
@@ -65,6 +65,7 @@ src/
 ├── dispatch.rs       framing, RPC dispatch, listener, reader/writer threads, RpcContext, handle_register
 ├── state.rs          State, Command, run loop, anchor compat matrix, transform_interest
 ├── client.rs         DaemonClient (c4)
+├── storage.rs        state-dir resolution, epoch persistence (c5)
 └── handlers/
     ├── mod.rs
     ├── corpus.rs        corpus.info, corpus.documents, corpus.layer_info
