@@ -3,7 +3,7 @@
 [![CI](https://github.com/myersm0/montre/actions/workflows/ci.yml/badge.svg)](https://github.com/myersm0/montre/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/myersm0/montre)](https://github.com/myersm0/montre/releases/latest)
 
-<img src="docs/montre_no-text.svg" align="left" width="160">
+<img src="docs/montre_no-text.svg" align="left" width="180">
 
 A modern, embeddable corpus query engine with first-class support for aligned corpora.
 
