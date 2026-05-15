@@ -1,19 +1,30 @@
-# Montre
 
-[![CI](https://github.com/myersm0/montre/actions/workflows/ci.yml/badge.svg)](https://github.com/myersm0/montre/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/myersm0/montre)](https://github.com/myersm0/montre/releases/latest)
 
-<img src="docs/montre_no-text.svg" align="left" width="180">
+<table border="0">
+<tr>
+<td width="220">
+<img src="docs/montre.svg" align="left" width="200" alt="Montre">
+</td>
+<td>
 
 A modern, embeddable corpus query engine with first-class support for aligned corpora.
 
 > **montre** *(/mɔ̃tʁ/):* “shows,” “reveals,” “makes visible” — from French _montrer_, “to show.” The Latin root is _monstrare_, “to point out, indicate.”
+>
+>  In organ building, the _montre_ is the rank of pipes that stands on the visible face of the instrument.
 
 Montre's internals map cleanly onto the [Universal Dependencies](https://universaldependencies.org/) data model: each CoNLL-U column has a corresponding layer, multiword tokens and empty nodes are preserved with their UD semantics, and the annotation hierarchy (token, sentence, document, component) mirrors the structure of UD treebanks.
 
 No server, external services, or prerequisites. A corpus is a self-contained directory with its own data, indexes, and (optionally) alignments. Build it in one line from your annotation files, or from a TOML manifest describing multiple components.
 
 Designed to be used from the CLI or embedded directly in Julia or Python.
+
+[![CI](https://github.com/myersm0/montre/actions/workflows/ci.yml/badge.svg)](https://github.com/myersm0/montre/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/myersm0/montre)](https://github.com/myersm0/montre/releases/latest)
+
+</td>
+</tr>
+</table>
 
 ---
 
