@@ -1,6 +1,9 @@
 # Montre
+
 [![CI](https://github.com/myersm0/montre/actions/workflows/ci.yml/badge.svg)](https://github.com/myersm0/montre/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/myersm0/montre)](https://github.com/myersm0/montre/releases/latest)
+
+<img src="docs/montre.png" align="left" width="160">
 
 A modern, embeddable corpus query engine with first-class support for aligned corpora.
 
