@@ -2,53 +2,53 @@ use crate::dispatch::{
 	parse_params, parse_params_or_default, serialize_reply, state_roundtrip, RpcContext,
 };
 use crate::protocol::{
-	AnchorCreateParams, AnchorCreateReply, AnchorListParams, AnchorListReply,
-	AnchorRemoveParams, OkReply, ProtocolError,
+	CouplerCreateParams, CouplerCreateReply, CouplerListParams, CouplerListReply,
+	CouplerRemoveParams, OkReply, ProtocolError,
 };
 use crate::state::Command;
 
-pub(crate) fn handle_anchor_create(
+pub(crate) fn handle_coupler_create(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let parsed: AnchorCreateParams = parse_params("anchor.create", params)?;
+	let parsed: CouplerCreateParams = parse_params("coupler.create", params)?;
 
-	let anchor_id = state_roundtrip(ctx, |reply| Command::AnchorCreate {
+	let coupler_id = state_roundtrip(ctx, |reply| Command::CouplerCreate {
 		master: parsed.master_id,
 		follower: parsed.follower_id,
 		kind: parsed.kind,
 		reply,
 	})??;
 
-	serialize_reply(AnchorCreateReply { anchor_id })
+	serialize_reply(CouplerCreateReply { coupler_id })
 }
 
-pub(crate) fn handle_anchor_remove(
+pub(crate) fn handle_coupler_remove(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let parsed: AnchorRemoveParams = parse_params("anchor.remove", params)?;
+	let parsed: CouplerRemoveParams = parse_params("coupler.remove", params)?;
 
-	state_roundtrip(ctx, |reply| Command::AnchorRemove {
-		anchor_id: parsed.anchor_id,
+	state_roundtrip(ctx, |reply| Command::CouplerRemove {
+		coupler_id: parsed.coupler_id,
 		reply,
 	})??;
 
 	serialize_reply(OkReply { ok: true })
 }
 
-pub(crate) fn handle_anchor_list(
+pub(crate) fn handle_coupler_list(
 	params: Option<serde_json::Value>,
 	ctx: &RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let parsed: AnchorListParams = parse_params_or_default(params)?;
+	let parsed: CouplerListParams = parse_params_or_default(params)?;
 
-	let anchors = state_roundtrip(ctx, |reply| Command::AnchorList {
+	let couplers = state_roundtrip(ctx, |reply| Command::CouplerList {
 		process_id: parsed.process_id,
 		reply,
 	})?;
 
-	serialize_reply(AnchorListReply { anchors })
+	serialize_reply(CouplerListReply { couplers })
 }
 
 #[cfg(test)]
@@ -57,12 +57,12 @@ mod tests {
 	use crate::dispatch::test_support::{register_context, with_state_thread};
 	use crate::protocol::error_codes;
 	use crate::protocol::{
-		AnchorCreateReply, AnchorListReply, OkReply, ProcessKind,
+		CouplerCreateReply, CouplerListReply, OkReply, ProcessKind,
 	};
 	use std::sync::Arc;
 
 	#[test]
-	fn anchor_create_succeeds_between_compatible_processes() {
+	fn coupler_create_succeeds_between_compatible_processes() {
 		with_state_thread(|state_tx, handle| {
 			let (mut ctx_a, _rx_a) = register_context(
 				state_tx.clone(),
@@ -85,14 +85,14 @@ mod tests {
 				"kind": { "type": "sentence_mirror" },
 			});
 			let result =
-				dispatch_request("anchor.create", Some(params), &mut ctx_a).unwrap();
-			let reply: AnchorCreateReply = serde_json::from_value(result).unwrap();
-			assert!(reply.anchor_id > 0);
+				dispatch_request("coupler.create", Some(params), &mut ctx_a).unwrap();
+			let reply: CouplerCreateReply = serde_json::from_value(result).unwrap();
+			assert!(reply.coupler_id > 0);
 		});
 	}
 
 	#[test]
-	fn anchor_create_incompatible_returns_1400() {
+	fn coupler_create_incompatible_returns_1400() {
 		with_state_thread(|state_tx, handle| {
 			let (mut ctx_a, _rx_a) = register_context(
 				state_tx.clone(),
@@ -114,14 +114,14 @@ mod tests {
 				"follower_id": ctx_b.process_id.unwrap(),
 				"kind": { "type": "sentence_mirror" },
 			});
-			let err = dispatch_request("anchor.create", Some(params), &mut ctx_a).unwrap_err();
-			assert_eq!(err.code, error_codes::ANCHOR_INCOMPATIBLE);
+			let err = dispatch_request("coupler.create", Some(params), &mut ctx_a).unwrap_err();
+			assert_eq!(err.code, error_codes::COUPLER_INCOMPATIBLE);
 			assert!(err.data.is_some());
 		});
 	}
 
 	#[test]
-	fn anchor_create_unknown_master_returns_1500() {
+	fn coupler_create_unknown_master_returns_1500() {
 		with_state_thread(|state_tx, handle| {
 			let (mut ctx_a, _rx_a) = register_context(
 				state_tx,
@@ -135,13 +135,13 @@ mod tests {
 				"follower_id": ctx_a.process_id.unwrap(),
 				"kind": { "type": "sentence_mirror" },
 			});
-			let err = dispatch_request("anchor.create", Some(params), &mut ctx_a).unwrap_err();
+			let err = dispatch_request("coupler.create", Some(params), &mut ctx_a).unwrap_err();
 			assert_eq!(err.code, error_codes::PROCESS_NOT_FOUND);
 		});
 	}
 
 	#[test]
-	fn anchor_create_missing_params_rejected() {
+	fn coupler_create_missing_params_rejected() {
 		with_state_thread(|state_tx, handle| {
 			let (mut ctx, _rx) = register_context(
 				state_tx,
@@ -150,13 +150,13 @@ mod tests {
 				&[],
 				&[],
 			);
-			let err = dispatch_request("anchor.create", None, &mut ctx).unwrap_err();
+			let err = dispatch_request("coupler.create", None, &mut ctx).unwrap_err();
 			assert_eq!(err.code, -32602);
 		});
 	}
 
 	#[test]
-	fn anchor_remove_succeeds() {
+	fn coupler_remove_succeeds() {
 		with_state_thread(|state_tx, handle| {
 			let (mut ctx_a, _rx_a) = register_context(
 				state_tx.clone(),
@@ -179,20 +179,20 @@ mod tests {
 				"kind": { "type": "sentence_mirror" },
 			});
 			let create_result =
-				dispatch_request("anchor.create", Some(create_params), &mut ctx_a).unwrap();
-			let create_reply: AnchorCreateReply =
+				dispatch_request("coupler.create", Some(create_params), &mut ctx_a).unwrap();
+			let create_reply: CouplerCreateReply =
 				serde_json::from_value(create_result).unwrap();
 
-			let remove_params = serde_json::json!({ "anchor_id": create_reply.anchor_id });
+			let remove_params = serde_json::json!({ "coupler_id": create_reply.coupler_id });
 			let result =
-				dispatch_request("anchor.remove", Some(remove_params), &mut ctx_a).unwrap();
+				dispatch_request("coupler.remove", Some(remove_params), &mut ctx_a).unwrap();
 			let reply: OkReply = serde_json::from_value(result).unwrap();
 			assert!(reply.ok);
 		});
 	}
 
 	#[test]
-	fn anchor_remove_unknown_returns_1401() {
+	fn coupler_remove_unknown_returns_1401() {
 		with_state_thread(|state_tx, handle| {
 			let (mut ctx, _rx) = register_context(
 				state_tx,
@@ -201,14 +201,14 @@ mod tests {
 				&[],
 				&[],
 			);
-			let params = serde_json::json!({ "anchor_id": 9999 });
-			let err = dispatch_request("anchor.remove", Some(params), &mut ctx).unwrap_err();
-			assert_eq!(err.code, error_codes::ANCHOR_NOT_FOUND);
+			let params = serde_json::json!({ "coupler_id": 9999 });
+			let err = dispatch_request("coupler.remove", Some(params), &mut ctx).unwrap_err();
+			assert_eq!(err.code, error_codes::COUPLER_NOT_FOUND);
 		});
 	}
 
 	#[test]
-	fn anchor_list_empty_when_no_anchors() {
+	fn coupler_list_empty_when_no_couplers() {
 		with_state_thread(|state_tx, handle| {
 			let (mut ctx, _rx) = register_context(
 				state_tx,
@@ -217,14 +217,14 @@ mod tests {
 				&[],
 				&[],
 			);
-			let result = dispatch_request("anchor.list", None, &mut ctx).unwrap();
-			let reply: AnchorListReply = serde_json::from_value(result).unwrap();
-			assert!(reply.anchors.is_empty());
+			let result = dispatch_request("coupler.list", None, &mut ctx).unwrap();
+			let reply: CouplerListReply = serde_json::from_value(result).unwrap();
+			assert!(reply.couplers.is_empty());
 		});
 	}
 
 	#[test]
-	fn anchor_list_includes_created_anchor() {
+	fn coupler_list_includes_created_coupler() {
 		with_state_thread(|state_tx, handle| {
 			let (mut ctx_a, _rx_a) = register_context(
 				state_tx.clone(),
@@ -246,16 +246,16 @@ mod tests {
 				"follower_id": ctx_b.process_id.unwrap(),
 				"kind": { "type": "sentence_mirror" },
 			});
-			dispatch_request("anchor.create", Some(create_params), &mut ctx_a).unwrap();
+			dispatch_request("coupler.create", Some(create_params), &mut ctx_a).unwrap();
 
-			let result = dispatch_request("anchor.list", None, &mut ctx_a).unwrap();
-			let reply: AnchorListReply = serde_json::from_value(result).unwrap();
-			assert_eq!(reply.anchors.len(), 1);
+			let result = dispatch_request("coupler.list", None, &mut ctx_a).unwrap();
+			let reply: CouplerListReply = serde_json::from_value(result).unwrap();
+			assert_eq!(reply.couplers.len(), 1);
 		});
 	}
 
 	#[test]
-	fn anchor_list_filter_by_process_id() {
+	fn coupler_list_filter_by_process_id() {
 		with_state_thread(|state_tx, handle| {
 			let (mut ctx_a, _rx_a) = register_context(
 				state_tx.clone(),
@@ -284,12 +284,12 @@ mod tests {
 				"follower_id": ctx_b.process_id.unwrap(),
 				"kind": { "type": "sentence_mirror" },
 			});
-			dispatch_request("anchor.create", Some(create_params), &mut ctx_a).unwrap();
+			dispatch_request("coupler.create", Some(create_params), &mut ctx_a).unwrap();
 
 			let params = serde_json::json!({ "process_id": ctx_c.process_id.unwrap() });
-			let result = dispatch_request("anchor.list", Some(params), &mut ctx_a).unwrap();
-			let reply: AnchorListReply = serde_json::from_value(result).unwrap();
-			assert!(reply.anchors.is_empty());
+			let result = dispatch_request("coupler.list", Some(params), &mut ctx_a).unwrap();
+			let reply: CouplerListReply = serde_json::from_value(result).unwrap();
+			assert!(reply.couplers.is_empty());
 		});
 	}
 }

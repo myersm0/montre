@@ -37,7 +37,7 @@ A daemon exits when any one of these happens:
 
 All three paths go through the same sequence: broadcast `notification.shutdown` to every registered client, wait 500ms, close active streams, exit. Clients see one notification carrying the `reason`, then EOF.
 
-The `daemon_epoch` value returned in `session.register` increments on every daemon startup. Clients caching anything keyed on daemon identity (handle IDs, anchor IDs, process IDs) check it on each registration and invalidate prior caches if it changed.
+The `daemon_epoch` value returned in `session.register` increments on every daemon startup. Clients caching anything keyed on daemon identity (handle IDs, coupler IDs, process IDs) check it on each registration and invalidate prior caches if it changed.
 
 ## Rust: DaemonClient
 
@@ -94,8 +94,8 @@ let notifications = client.notifications();
 
 while let Ok(notif) = notifications.recv() {
 	match notif {
-		NotificationEnvelope::AnchorUpdate { anchor_id, interest } => {
-			handle_focus_change(anchor_id, interest);
+		NotificationEnvelope::CouplerUpdate { coupler_id, interest } => {
+			handle_focus_change(coupler_id, interest);
 		}
 		NotificationEnvelope::RosterChanged { event, process } => { /* ... */ }
 		NotificationEnvelope::Shutdown { reason, .. } => break,
@@ -108,7 +108,7 @@ The reader is the only code path that receives frames. If it exits — EOF, fram
 
 ### Sending notifications
 
-`session.publish_interest` is the lone client-to-daemon notification (fire-and-forget, no reply). `DaemonClient::publish_interest(params)` sends it. Use this whenever the calling process is the master in one or more anchor relationships and its focus has moved.
+`session.publish_interest` is the lone client-to-daemon notification (fire-and-forget, no reply). `DaemonClient::publish_interest(params)` sends it. Use this whenever the calling process is the master in one or more coupler relationships and its focus has moved.
 
 The method returns `Result<(), std::io::Error>`. There is no protocol response, but the socket write can still fail (broken pipe, kernel buffer issues, etc.) — handle the error rather than dropping it.
 
@@ -120,7 +120,7 @@ If you want a layout where one thread pumps notifications and another issues req
 
 ### Cleanup
 
-`DaemonClient` implements `Drop`: going out of scope closes the socket, and the daemon detects EOF and cleans up the registered process (dropping anchors, subscriptions, and outstanding handles). For callers that want to surface unregister errors, `client.close()` is the explicit form.
+`DaemonClient` implements `Drop`: going out of scope closes the socket, and the daemon detects EOF and cleans up the registered process (dropping couplers, subscriptions, and outstanding handles). For callers that want to surface unregister errors, `client.close()` is the explicit form.
 
 ## Other languages
 
@@ -166,7 +166,7 @@ daemon> subscription.subscribe {"topic": "roster_changed"}
 daemon> .notify session.publish_interest {"interest": {"type": "sentence", "doc": 0, "sent": 0}}
 ```
 
-Notifications from the daemon (anchor updates, roster changes, named-results changes, shutdown) print asynchronously as they arrive; the REPL stays usable.
+Notifications from the daemon (coupler updates, roster changes, named-results changes, shutdown) print asynchronously as they arrive; the REPL stays usable.
 
 REPL commands:
 
@@ -175,7 +175,7 @@ REPL commands:
 - `.help` — list known methods
 - `.quit` / `exit` / EOF — disconnect
 
-The `.notify` form is the primary way to exercise master-side anchor behavior from the REPL: register a follower in another `dclient.py` instance, create an anchor between them, then `.notify session.publish_interest` from the master and watch the follower receive transformed `notification.anchor_update` messages.
+The `.notify` form is the primary way to exercise master-side coupler behavior from the REPL: register a follower in another `dclient.py` instance, create a coupler between them, then `.notify session.publish_interest` from the master and watch the follower receive transformed `notification.coupler_update` messages.
 
 ## Common patterns
 
@@ -229,12 +229,12 @@ Named results are query-backed by default: the daemon persists the CQL plus meta
 
 If a stored CQL no longer parses or executes against a rebuilt corpus, `query.load` (and subsequent `query.hits`) returns error code `1204`. The named result is not auto-deleted; the client decides whether to delete, re-save with new CQL, or alert the user.
 
-### Anchored coordination
+### Coupled coordination
 
-The protocol's anchor mechanism lets one process (the master) drive another (the follower) without either party knowing the other's address. The daemon owns the relationship: when the master publishes an interest, the daemon transforms it according to the anchor's `kind` and pushes the result to the follower.
+The protocol's coupler mechanism lets one process (the master) drive another (the follower) without either party knowing the other's address. The daemon owns the relationship: when the master publishes an interest, the daemon transforms it according to the coupler's `kind` and pushes the result to the follower.
 
 ```rust
-// Follower: register with consumes=[Sentence], wait for anchor_update notifications
+// Follower: register with consumes=[Sentence], wait for coupler_update notifications
 let follower_reply = follower.register(RegisterParams {
 	protocol_version: 1,
 	kind: ProcessKind::External,
@@ -243,7 +243,7 @@ let follower_reply = follower.register(RegisterParams {
 	consumes: vec![InterestKind::Sentence],
 })?;
 
-// Master: register with provides=[Hit], create an anchor between us
+// Master: register with provides=[Hit], create a coupler between us
 let master_reply = master.register(RegisterParams {
 	protocol_version: 1,
 	kind: ProcessKind::External,
@@ -252,10 +252,10 @@ let master_reply = master.register(RegisterParams {
 	consumes: vec![],
 })?;
 
-let anchor = master.anchor_create(AnchorCreateParams {
+let coupler = master.coupler_create(CouplerCreateParams {
 	master_id: master_reply.process_id,
 	follower_id: follower_reply.process_id,
-	kind: AnchorKind::KwicSelection,
+	kind: CouplerKind::KwicSelection,
 })?;
 
 // Master: when the user selects a hit in the KWIC, publish it
@@ -266,16 +266,16 @@ master.publish_interest(PublishInterestParams {
 	},
 })?;
 // → daemon transforms (KwicSelection: Hit → containing Sentence)
-// → follower receives notification.anchor_update with Interest::Sentence
+// → follower receives notification.coupler_update with Interest::Sentence
 ```
 
-Each `AnchorKind` defines what the master can publish (`provides`) and what the follower receives after the daemon's transformation (`consumes`). The full matrix is in `daemon-protocol.md` under "Transformation matrix". The most common kinds:
+Each `CouplerKind` defines what the master can publish (`provides`) and what the follower receives after the daemon's transformation (`consumes`). The full matrix is in `daemon-protocol.md` under "Transformation matrix". The most common kinds:
 
 - `SentenceMirror` — widens a `Position` or `Span` to its containing sentence; useful for "keep this pane on the same sentence as that one"
 - `Alignment { name }` — projects via a named alignment; the daemon emits one notification per target sentence (1→N fan-out)
 - `KwicSelection` — resolves a `Hit` to its containing sentence; drives a reader from a KWIC pane
 
-`anchor.create` validates that the master's `provides` and the follower's `consumes` are compatible with the kind's transformation row and returns error `1400` otherwise. Process IDs that disappear (registration ends) silently drop their anchors.
+`coupler.create` validates that the master's `provides` and the follower's `consumes` are compatible with the kind's transformation row and returns error `1400` otherwise. Process IDs that disappear (registration ends) silently drop their couplers.
 
 ### Subscribe to roster changes
 
@@ -287,11 +287,11 @@ client.subscription_subscribe(SubscriptionParams {
 // NotificationEnvelope::RosterChanged { event: "registered", process: ProcessInfo { ... } }
 ```
 
-Topics in v1: `roster_changed`, `named_results_changed`. Anchor updates do not require a subscription — they flow automatically to the follower of each anchor.
+Topics in v1: `roster_changed`, `named_results_changed`. Coupler updates do not require a subscription — they flow automatically to the follower of each coupler.
 
 ## Reference
 
-- [`daemon-protocol.md`](daemon-protocol.md) — wire protocol, error codes, anchor kinds, full operation reference
+- [`daemon-protocol.md`](daemon-protocol.md) — wire protocol, error codes, coupler kinds, full operation reference
 - [`api.md`](api.md) — Rust API of `montre-index::Corpus` and friends; needed when reading hits, projecting alignments, or reconstructing surface text outside the daemon
 - `crates/montre-daemon/src/client.rs` — `DaemonClient` implementation; the canonical reference for method names, parameter types, and error mapping
 - `crates/montre-daemon/README.md` — daemon internals (architecture, invariants, handler conventions); read when modifying the daemon itself, not when writing clients

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub use montre_core::Span;
 
 pub type ProcessId = u32;
-pub type AnchorId = u32;
+pub type CouplerId = u32;
 pub type ResultHandle = String;
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -69,7 +69,7 @@ pub struct ProcessInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum AnchorKind {
+pub enum CouplerKind {
 	SentenceMirror,
 	Alignment { name: String },
 	KwicSelection,
@@ -78,25 +78,25 @@ pub enum AnchorKind {
 	ConlluView,
 }
 
-impl AnchorKind {
+impl CouplerKind {
 	pub fn type_name(&self) -> &'static str {
 		match self {
-			AnchorKind::SentenceMirror => "sentence_mirror",
-			AnchorKind::Alignment { .. } => "alignment",
-			AnchorKind::KwicSelection => "kwic_selection",
-			AnchorKind::DocPickerSelection => "doc_picker_selection",
-			AnchorKind::NamedResultsSelection => "named_results_selection",
-			AnchorKind::ConlluView => "conllu_view",
+			CouplerKind::SentenceMirror => "sentence_mirror",
+			CouplerKind::Alignment { .. } => "alignment",
+			CouplerKind::KwicSelection => "kwic_selection",
+			CouplerKind::DocPickerSelection => "doc_picker_selection",
+			CouplerKind::NamedResultsSelection => "named_results_selection",
+			CouplerKind::ConlluView => "conllu_view",
 		}
 	}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Anchor {
-	pub id: AnchorId,
+pub struct Coupler {
+	pub id: CouplerId,
 	pub master: ProcessId,
 	pub follower: ProcessId,
-	pub kind: AnchorKind,
+	pub kind: CouplerKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,7 +168,7 @@ pub struct RegisterReply {
 pub struct Capabilities {
 	pub observations: bool,
 	pub workspaces: bool,
-	pub anchor_kinds: Vec<String>,
+	pub coupler_kinds: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -527,31 +527,31 @@ pub struct QueryDiscardParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnchorCreateParams {
+pub struct CouplerCreateParams {
 	pub master_id: ProcessId,
 	pub follower_id: ProcessId,
-	pub kind: AnchorKind,
+	pub kind: CouplerKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnchorCreateReply {
-	pub anchor_id: AnchorId,
+pub struct CouplerCreateReply {
+	pub coupler_id: CouplerId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnchorRemoveParams {
-	pub anchor_id: AnchorId,
+pub struct CouplerRemoveParams {
+	pub coupler_id: CouplerId,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AnchorListParams {
+pub struct CouplerListParams {
 	#[serde(default)]
 	pub process_id: Option<ProcessId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnchorListReply {
-	pub anchors: Vec<Anchor>,
+pub struct CouplerListReply {
+	pub couplers: Vec<Coupler>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -632,10 +632,10 @@ pub mod error_codes {
 	pub const RESULT_ALREADY_MATERIALIZED: i32 = 1205;
 	pub const ALIGNMENT_NOT_FOUND: i32 = 1300;
 	pub const SPAN_OUTSIDE_ALIGNMENT: i32 = 1301;
-	pub const ANCHOR_INCOMPATIBLE: i32 = 1400;
-	pub const ANCHOR_NOT_FOUND: i32 = 1401;
-	pub const ANCHOR_CYCLE: i32 = 1402;
-	pub const ANCHOR_KIND_UNSUPPORTED: i32 = 1403;
+	pub const COUPLER_INCOMPATIBLE: i32 = 1400;
+	pub const COUPLER_NOT_FOUND: i32 = 1401;
+	pub const COUPLER_CYCLE: i32 = 1402;
+	pub const COUPLER_KIND_UNSUPPORTED: i32 = 1403;
 	pub const PROCESS_NOT_FOUND: i32 = 1500;
 	pub const UNKNOWN_TOPIC: i32 = 1600;
 }

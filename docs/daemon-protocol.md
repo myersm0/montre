@@ -76,7 +76,7 @@ or:
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "notification.anchor_update",
+  "method": "notification.coupler_update",
   "params": { ... }
 }
 ```
@@ -145,7 +145,7 @@ After registration, the client sends requests and notifications; the daemon send
 ### Disconnection
 
 **Graceful**: client sends `session.unregister`, daemon responds `ok`, client closes the socket. Daemon cleans up:
-- Drops anchors involving this process.
+- Drops couplers involving this process.
 - Drops subscriptions held by this process.
 - Fires `notification.roster_changed` to subscribers.
 
@@ -172,16 +172,16 @@ Wire types referenced throughout the operation reference. JSON forms shown.
 The Rust types backing the wire format live in `montre_daemon::protocol` (params, replies, shared types) and `montre_daemon::client` (notifications, errors). Mapping rules:
 
 - **Params and replies.** Each operation `namespace.method` has matching Rust structs `NamespaceMethodParams` and `NamespaceMethodReply` in `montre_daemon::protocol`. JSON field names match the Rust field names directly; integer types use the widths listed under "Primitives" above. A complete operation → Params/Reply table is in "Rust API reference" at the end of this document.
-- **Tagged enums.** JSON shapes with a `"type"` discriminator (`Interest`, `AnchorKind`) map to Rust enums with `#[serde(tag = "type")]`. Variant names and field names in the Rust type match the JSON exactly: e.g. `{ "type": "sentence", "doc": 3, "sent": 142 }` corresponds to `Interest::Sentence { doc: 3, sent: 142 }`.
-- **Enum string values.** Enums serialized as plain strings (`ProcessKind`, `ShutdownReason`, `ResultForm`, `LayerKind`, `Topic`, `InterestKind`, `AnchorKind` tag values) all use `snake_case` on the wire. The Rust identifiers are `UpperCamelCase`: `ProcessKind::External` ↔ `"external"`, `AnchorKind::KwicSelection` ↔ `"kwic_selection"`, etc.
-- **Notifications.** Server-pushed messages with method names `notification.snake_case_name` map to variants `NotificationEnvelope::UpperCamelName` in `montre_daemon::client` — for example `notification.anchor_update` → `NotificationEnvelope::AnchorUpdate`.
+- **Tagged enums.** JSON shapes with a `"type"` discriminator (`Interest`, `CouplerKind`) map to Rust enums with `#[serde(tag = "type")]`. Variant names and field names in the Rust type match the JSON exactly: e.g. `{ "type": "sentence", "doc": 3, "sent": 142 }` corresponds to `Interest::Sentence { doc: 3, sent: 142 }`.
+- **Enum string values.** Enums serialized as plain strings (`ProcessKind`, `ShutdownReason`, `ResultForm`, `LayerKind`, `Topic`, `InterestKind`, `CouplerKind` tag values) all use `snake_case` on the wire. The Rust identifiers are `UpperCamelCase`: `ProcessKind::External` ↔ `"external"`, `CouplerKind::KwicSelection` ↔ `"kwic_selection"`, etc.
+- **Notifications.** Server-pushed messages with method names `notification.snake_case_name` map to variants `NotificationEnvelope::UpperCamelName` in `montre_daemon::client` — for example `notification.coupler_update` → `NotificationEnvelope::CouplerUpdate`.
 - **Optional fields.** JSON `null` values map to Rust `Option<T>` with `None`. Some optional input fields can also be omitted entirely (serde `#[serde(default)]`) — both forms produce the same `None`.
 
 ### Primitives
 
 ```
 ProcessId       integer, u32 (assigned by daemon, unique within daemon's lifetime)
-AnchorId        integer, u32 (assigned by daemon, unique within daemon's lifetime)
+CouplerId        integer, u32 (assigned by daemon, unique within daemon's lifetime)
 DaemonEpoch     integer, u64 (monotonically incremented on each daemon startup; see session.register)
 ResultHandle    string  (UUID v4 prefixed with `r-`, e.g. "r-3a7f8e2c-...")
 DocumentIndex   integer, u32 (corpus-wide)
@@ -221,7 +221,7 @@ String enum: `"position" | "span" | "sentence" | "hit" | "results" | "document"`
 
 String enum: `"reader" | "kwic" | "conllu" | "docs" | "vocab" | "results" | "external"`.
 
-`"external"` is the kind used by non-TUI clients (Julia, Python, scripts). The kind is a tag for filtering (`session.roster --filter.kinds`); it does not gate participation. External processes register, publish interest, become masters or followers in anchors, and subscribe to topics on equal terms with TUI processes.
+`"external"` is the kind used by non-TUI clients (Julia, Python, scripts). The kind is a tag for filtering (`session.roster --filter.kinds`); it does not gate participation. External processes register, publish interest, become masters or followers in couplers, and subscribe to topics on equal terms with TUI processes.
 
 ### `ProcessInfo`
 
@@ -240,7 +240,7 @@ String enum: `"reader" | "kwic" | "conllu" | "docs" | "vocab" | "results" | "ext
 
 `label` is `null` when the client passed no label at registration (and has not subsequently called `session.update_label`). The daemon does not substitute a default — it returns `null` to clients verbatim. Roster-rendering consumers may choose to display something like `unlabeled-{id}` for display, but the wire value remains `null`.
 
-### `AnchorKind`
+### `CouplerKind`
 
 Tagged union by `type` field:
 
@@ -255,9 +255,9 @@ Tagged union by `type` field:
 
 #### Transformation matrix
 
-Each anchor kind defines (a) which master `provides` `InterestKind`s it accepts, and (b) which follower `consumes` `InterestKind`s its transformation produces. `anchor.create` rejects with error `1400` when neither side overlaps the kind's row.
+Each coupler kind defines (a) which master `provides` `InterestKind`s it accepts, and (b) which follower `consumes` `InterestKind`s its transformation produces. `coupler.create` rejects with error `1400` when neither side overlaps the kind's row.
 
-| AnchorKind | Accepts (master provides) | Produces (follower consumes) | Notes |
+| CouplerKind | Accepts (master provides) | Produces (follower consumes) | Notes |
 |---|---|---|---|
 | `SentenceMirror` | `Position` \| `Span` \| `Sentence` | `Sentence` | Position/Span are widened to their containing sentence. |
 | `Alignment { name }` | `Sentence` \| `Span` | `Span` | 1→many: one notification per target. |
@@ -266,9 +266,9 @@ Each anchor kind defines (a) which master `provides` `InterestKind`s it accepts,
 | `NamedResultsSelection` | `Results` | `Results` | Inert in v1 (see below). |
 | `ConlluView` | `Sentence` | `Sentence` | Inert in v1 (see below). |
 
-**Inert kinds.** `DocPickerSelection`, `NamedResultsSelection`, and `ConlluView` compat-accept their self→self interest pair so `anchor.create` succeeds, but the daemon's transformation returns no notifications for them in v1. Their UX semantics will be defined alongside the corresponding TUI panes; clients can create these anchors today but must not depend on receiving updates.
+**Inert kinds.** `DocPickerSelection`, `NamedResultsSelection`, and `ConlluView` compat-accept their self→self interest pair so `coupler.create` succeeds, but the daemon's transformation returns no notifications for them in v1. Their UX semantics will be defined alongside the corresponding TUI panes; clients can create these couplers today but must not depend on receiving updates.
 
-### `Anchor`
+### `Coupler`
 
 ```json
 {
@@ -279,7 +279,7 @@ Each anchor kind defines (a) which master `provides` `InterestKind`s it accepts,
 }
 ```
 
-Note: `Anchor` uses `master` / `follower`; `anchor.create` params use `master_id` / `follower_id`. The names diverged historically. Clients should write one form and read the other.
+Note: `Coupler` uses `master` / `follower`; `coupler.create` params use `master_id` / `follower_id`. The names diverged historically. Clients should write one form and read the other.
 
 ### `Hit`
 
@@ -389,19 +389,19 @@ Initial handshake. Must be the first message on a new connection.
   "capabilities": {
     "observations": false,
     "workspaces": false,
-    "anchor_kinds": ["sentence_mirror", "alignment", "kwic_selection",
+    "coupler_kinds": ["sentence_mirror", "alignment", "kwic_selection",
                      "doc_picker_selection", "named_results_selection", "conllu_view"]
   }
 }
 ```
 
-See "Capability advertisement" below for the schema. `daemon_epoch` increments on daemon restart and on any persistent state reset. Clients that cache handle IDs, anchor IDs, or process IDs across reconnects must check this on each registration: if the epoch has changed, all prior cached IDs are invalid and must be re-acquired.
+See "Capability advertisement" below for the schema. `daemon_epoch` increments on daemon restart and on any persistent state reset. Clients that cache handle IDs, coupler IDs, or process IDs across reconnects must check this on each registration: if the epoch has changed, all prior cached IDs are invalid and must be re-acquired.
 
 **Errors**: `1000` (protocol mismatch), `-32600` (called twice on the same connection — a connection accepts exactly one `session.register`). Corpus load failure is *not* a wire error: if the corpus fails to load, the daemon never starts, and the client sees a connect failure (ENOENT or ECONNREFUSED) instead.
 
 #### `session.unregister`
 
-Graceful disconnect. Daemon cleans up anchors and subscriptions before responding.
+Graceful disconnect. Daemon cleans up couplers and subscriptions before responding.
 
 **Params**: `{}`
 
@@ -416,7 +416,7 @@ Notification (no response). Sent by master processes whenever their focus change
 { "interest": { "type": "sentence", "doc": 3, "sent": 142 } }
 ```
 
-Daemon walks anchor table, applies transformations, pushes `notification.anchor_update` to followers.
+Daemon walks coupler table, applies transformations, pushes `notification.coupler_update` to followers.
 
 #### `session.roster`
 
@@ -746,9 +746,9 @@ Empty array if no edge exists from the source span (gap).
 
 **Errors**: `1300` (alignment not found), `1301` (source span outside alignment's source component).
 
-### `anchor`
+### `coupler`
 
-#### `anchor.create`
+#### `coupler.create`
 
 **Params**:
 ```json
@@ -759,37 +759,37 @@ Empty array if no edge exists from the source span (gap).
 }
 ```
 
-**Result**: `{ "anchor_id": 7 }`
+**Result**: `{ "coupler_id": 7 }`
 
-**Errors**: `1400` (incompatible interest types — master's `provides` and follower's `consumes` don't overlap the kind's row in the transformation matrix above), `1403` (anchor kind not supported by daemon — kind not present in `capabilities.anchor_kinds`), `1500` (process not found), `1402` (anchor would create a cycle).
+**Errors**: `1400` (incompatible interest types — master's `provides` and follower's `consumes` don't overlap the kind's row in the transformation matrix above), `1403` (coupler kind not supported by daemon — kind not present in `capabilities.coupler_kinds`), `1500` (process not found), `1402` (coupler would create a cycle).
 
 Daemon side-effects:
-- Adds entry to anchor table.
+- Adds entry to coupler table.
 - Subscribes follower to derivative interest updates from this master.
-- Pushes initial `notification.anchor_update` to follower with current transformed interest (if master has published one).
+- Pushes initial `notification.coupler_update` to follower with current transformed interest (if master has published one).
 
-#### `anchor.remove`
+#### `coupler.remove`
 
-**Params**: `{ "anchor_id": 7 }`
+**Params**: `{ "coupler_id": 7 }`
 
 **Result**: `{ "ok": true }`
 
 **Errors**: `1401`.
 
-#### `anchor.list`
+#### `coupler.list`
 
 **Params**:
 ```json
 { "process_id": 4 }
 ```
 
-`process_id` optional; without it, returns all anchors. With it, returns anchors involving that process (as master or follower).
+`process_id` optional; without it, returns all couplers. With it, returns couplers involving that process (as master or follower).
 
-**Result**: `{ "anchors": [Anchor, ...] }`
+**Result**: `{ "couplers": [Coupler, ...] }`
 
 ### `subscription`
 
-Anchors automatically generate `notification.anchor_update` for followers; no subscription needed for that. Explicit subscriptions are for non-anchor topics.
+Couplers automatically generate `notification.coupler_update` for followers; no subscription needed for that. Explicit subscriptions are for non-coupler topics.
 
 #### `subscription.subscribe`
 
@@ -871,9 +871,9 @@ For operations with **no params**, the client method takes no arguments — ther
 | `query.list_named` | `client.query_list_named()` | (none) | `QueryListNamedReply` |
 | `query.delete_named` | `client.query_delete_named(params)` | `QueryDeleteNamedParams` | `OkReply` |
 | `query.discard` | `client.query_discard(params)` | `QueryDiscardParams` | `OkReply` |
-| `anchor.create` | `client.anchor_create(params)` | `AnchorCreateParams` | `AnchorCreateReply` |
-| `anchor.remove` | `client.anchor_remove(params)` | `AnchorRemoveParams` | `OkReply` |
-| `anchor.list` | `client.anchor_list(params)` | `AnchorListParams` | `AnchorListReply` |
+| `coupler.create` | `client.coupler_create(params)` | `CouplerCreateParams` | `CouplerCreateReply` |
+| `coupler.remove` | `client.coupler_remove(params)` | `CouplerRemoveParams` | `OkReply` |
+| `coupler.list` | `client.coupler_list(params)` | `CouplerListParams` | `CouplerListReply` |
 | `subscription.subscribe` | `client.subscription_subscribe(params)` | `SubscriptionParams` | `OkReply` |
 | `subscription.unsubscribe` | `client.subscription_unsubscribe(params)` | `SubscriptionParams` | `OkReply` |
 | `daemon.shutdown` | (no client method in v1; clients use raw JSON-RPC if needed) | `DaemonShutdownParams` | `OkReply` |
@@ -884,7 +884,7 @@ Server-pushed notifications surface as variants of `NotificationEnvelope` (in `m
 
 | Wire method | Rust variant | Payload fields |
 |---|---|---|
-| `notification.anchor_update` | `NotificationEnvelope::AnchorUpdate` | `anchor_id: AnchorId`, `interest: Interest` |
+| `notification.coupler_update` | `NotificationEnvelope::CouplerUpdate` | `coupler_id: CouplerId`, `interest: Interest` |
 | `notification.roster_changed` | `NotificationEnvelope::RosterChanged` | `event: String`, `process: ProcessInfo` |
 | `notification.named_results_changed` | `NotificationEnvelope::NamedResultsChanged` | `event: String`, `name: String`, `metadata: Option<ResultMetadata>` |
 | `notification.shutdown` | `NotificationEnvelope::Shutdown` | `reason: String`, `in_seconds: u32` |
@@ -901,8 +901,8 @@ Types referenced from multiple params/replies. Rust types live in `montre_daemon
 | `InterestKind` | string | `"position" / "span" / "sentence" / "hit" / "results" / "document"` (Rust: `InterestKind::Position / Span / Sentence / Hit / Results / Document`) |
 | `ProcessKind` | string | `"reader" / "kwic" / "conllu" / "docs" / "vocab" / "results" / "external"` (Rust: `ProcessKind::Reader / Kwic / Conllu / Docs / Vocab / Results / External`) |
 | `ProcessInfo` | object | full process descriptor |
-| `AnchorKind` | `{ "type": <kind>, ... }` | tagged enum, see "AnchorKind" above |
-| `Anchor` | object | `{ id, master, follower, kind }` |
+| `CouplerKind` | `{ "type": <kind>, ... }` | tagged enum, see "CouplerKind" above |
+| `Coupler` | object | `{ id, master, follower, kind }` |
 | `Hit` | object | `{ span, document_index, sentence_index, captures }` |
 | `Span` | object | `{ start, end }` |
 | `ResultMetadata` | object | full named-result descriptor |
@@ -921,19 +921,19 @@ Types referenced from multiple params/replies. Rust types live in `montre_daemon
 
 Server-pushed messages. Always JSON-RPC notifications (no `id`, no response expected).
 
-### `notification.anchor_update`
+### `notification.coupler_update`
 
-Sent to followers when their master's interest changes. Daemon has already applied the anchor's transformation.
+Sent to followers when their master's interest changes. Daemon has already applied the coupler's transformation.
 
 **Params**:
 ```json
 {
-  "anchor_id": 7,
+  "coupler_id": 7,
   "interest": { "type": "span", "doc": 7, "start": 980, "end": 1010 }
 }
 ```
 
-For 1→many transformations (e.g. `Alignment` projecting to multiple target sentences), the daemon emits **one `notification.anchor_update` per target**. Followers see them in source-order; each carries the same `anchor_id` and a single transformed `interest`.
+For 1→many transformations (e.g. `Alignment` projecting to multiple target sentences), the daemon emits **one `notification.coupler_update` per target**. Followers see them in source-order; each carries the same `coupler_id` and a single transformed `interest`.
 
 ### `notification.roster_changed`
 
@@ -1012,10 +1012,10 @@ JSON-RPC standard error structure:
 | 1205 | Result already materialized |
 | 1300 | Alignment not found |
 | 1301 | Span outside alignment source |
-| 1400 | Anchor: incompatible interest types |
-| 1401 | Anchor not found |
-| 1402 | Anchor would create cycle |
-| 1403 | Anchor kind not supported by daemon |
+| 1400 | Coupler: incompatible interest types |
+| 1401 | Coupler not found |
+| 1402 | Coupler would create cycle |
+| 1403 | Coupler kind not supported by daemon |
 | 1500 | Process not found |
 | 1600 | Unknown subscription topic |
 
@@ -1030,11 +1030,11 @@ For `1100` (CQL parse error):
 }
 ```
 
-For `1400` (anchor incompatibility):
+For `1400` (coupler incompatibility):
 ```json
 {
   "code": 1400,
-  "message": "Anchor incompatibility",
+  "message": "Coupler incompatibility",
   "data": {
     "master_provides": ["position", "span"],
     "follower_consumes": ["hit", "results"]
@@ -1059,13 +1059,13 @@ crates/montre-daemon/
 ├── src/
 │   ├── lib.rs        — entry point (`serve`), corpus open, state directory, listener wire-up
 │   ├── dispatch.rs   — wire framing, JSON-RPC parsing, request/notification dispatch, per-connection reader/writer threads
-│   ├── state.rs      — state-owning thread: roster, anchors, subscriptions, named results, idle-shutdown timer
+│   ├── state.rs      — state-owning thread: roster, couplers, subscriptions, named results, idle-shutdown timer
 │   ├── client.rs     — `DaemonClient`: shared client module (see below)
 │   ├── protocol.rs   — wire types (params/replies, error codes, enums)
 │   ├── storage.rs    — atomic file writes, epoch persistence, named-results persistence
 │   ├── shutdown.rs   — coordinator that closes active streams during shutdown
 │   ├── signals.rs    — SIGHUP/SIGINT/SIGTERM handling
-│   └── handlers/     — per-namespace request handlers (alignment, anchor, corpus, daemon, query, session, subscription, text)
+│   └── handlers/     — per-namespace request handlers (alignment, coupler, corpus, daemon, query, session, subscription, text)
 ├── examples/
 │   └── serve_local.rs — bare daemon launcher for protocol-exploration tooling
 └── tests/            — integration tests (over real Unix sockets)
@@ -1081,7 +1081,7 @@ The client side of the protocol — auto-spawn dance, length-prefix framing, JSO
 
 - `connect_or_spawn(corpus_path)` / `connect(socket_path)` for setup.
 - One typed method per protocol operation. Each method takes the operation's `*Params` struct (from `montre_daemon::protocol`) and returns the operation's `*Reply` struct. For example: `client.query_execute(QueryExecuteParams { cql: "...".into() })` returns `Result<QueryExecuteReply>`.
-- `notifications()` returns a `&std::sync::mpsc::Receiver<NotificationEnvelope>` for server-pushed notifications (anchor updates, roster changes, named-results changes, shutdown).
+- `notifications()` returns a `&std::sync::mpsc::Receiver<NotificationEnvelope>` for server-pushed notifications (coupler updates, roster changes, named-results changes, shutdown).
 - `publish_interest(params)` is fire-and-forget; no reply.
 - `close(self)` for an explicit unregister-and-shutdown sequence.
 
@@ -1145,7 +1145,7 @@ The `capabilities` object in `session.register` response advertises optional fea
 {
   "observations": false,
   "workspaces": false,
-  "anchor_kinds": ["sentence_mirror", "alignment", "kwic_selection",
+  "coupler_kinds": ["sentence_mirror", "alignment", "kwic_selection",
                    "doc_picker_selection", "named_results_selection", "conllu_view"]
 }
 ```
@@ -1195,17 +1195,17 @@ Daemon `→` client: 100-element hit array.
 
 Client closes connection (or sends `session.unregister` first).
 
-### Anchored reading: KWIC drives reader
+### Coupled reading: KWIC drives reader
 
 Two clients connected. KWIC at `process_id: 4`, reader at `process_id: 9`.
 
-Reader establishes the anchor:
+Reader establishes the coupler:
 ```json
-{ "jsonrpc": "2.0", "id": 17, "method": "anchor.create",
+{ "jsonrpc": "2.0", "id": 17, "method": "coupler.create",
   "params": { "master_id": 4, "follower_id": 9, "kind": { "type": "kwic_selection" } } }
 ```
 
-Daemon responds with `anchor_id`. KWIC user navigates to a different hit; KWIC publishes:
+Daemon responds with `coupler_id`. KWIC user navigates to a different hit; KWIC publishes:
 ```json
 { "jsonrpc": "2.0", "method": "session.publish_interest",
   "params": { "interest": { "type": "hit", "result": "r-3a7f...", "hit_idx": 23 } } }
@@ -1213,8 +1213,8 @@ Daemon responds with `anchor_id`. KWIC user navigates to a different hit; KWIC p
 
 Daemon transforms `Hit -> Sentence` (resolves the hit's containing sentence) and pushes to the reader:
 ```json
-{ "jsonrpc": "2.0", "method": "notification.anchor_update",
-  "params": { "anchor_id": 7, "interest": { "type": "sentence", "doc": 3, "sent": 142 } } }
+{ "jsonrpc": "2.0", "method": "notification.coupler_update",
+  "params": { "coupler_id": 7, "interest": { "type": "sentence", "doc": 3, "sent": 142 } } }
 ```
 
 Reader scrolls to the new sentence and highlights it.

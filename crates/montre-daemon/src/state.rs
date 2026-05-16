@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::handlers::alignment::project_alignment;
 use crate::protocol::error_codes;
 use crate::protocol::{
-	Anchor, AnchorId, AnchorKind, AlignmentSource, Capabilities, Interest, InterestKind, ProcessId,
+	Coupler, CouplerId, CouplerKind, AlignmentSource, Capabilities, Interest, InterestKind, ProcessId,
 	ProcessInfo, ProtocolError, RegisterParams, RegisterReply, ResultForm, ResultHandle,
 	ResultMetadata, RosterFilter, ShutdownNotificationParams, ShutdownReason, Span, Topic,
 	PROTOCOL_VERSION,
@@ -40,13 +40,13 @@ pub(crate) struct State {
 	handle: Arc<CorpusHandle>,
 	coordinator: Arc<ShutdownCoordinator>,
 	roster: HashMap<ProcessId, Connection>,
-	anchors: HashMap<AnchorId, Anchor>,
+	couplers: HashMap<CouplerId, Coupler>,
 	subscriptions: HashMap<Topic, HashSet<ProcessId>>,
 	named_results: HashMap<String, NamedResultRecord>,
 	idle_timeout: Option<std::time::Duration>,
 	roster_emptied_at: Option<std::time::Instant>,
 	next_process_id: ProcessId,
-	next_anchor_id: AnchorId,
+	next_coupler_id: CouplerId,
 }
 
 impl State {
@@ -60,13 +60,13 @@ impl State {
 			handle,
 			coordinator,
 			roster: HashMap::new(),
-			anchors: HashMap::new(),
+			couplers: HashMap::new(),
 			subscriptions: HashMap::new(),
 			named_results: HashMap::new(),
 			idle_timeout: None,
 			roster_emptied_at: Some(std::time::Instant::now()),
 			next_process_id: 1,
-			next_anchor_id: 1,
+			next_coupler_id: 1,
 		}
 	}
 
@@ -87,9 +87,9 @@ impl State {
 		id
 	}
 
-	fn allocate_anchor_id(&mut self) -> AnchorId {
-		let id = self.next_anchor_id;
-		self.next_anchor_id = self.next_anchor_id.wrapping_add(1);
+	fn allocate_coupler_id(&mut self) -> CouplerId {
+		let id = self.next_coupler_id;
+		self.next_coupler_id = self.next_coupler_id.wrapping_add(1);
 		id
 	}
 
@@ -136,7 +136,7 @@ impl State {
 			capabilities: Capabilities {
 				observations: false,
 				workspaces: false,
-				anchor_kinds: all_anchor_kinds().map(|k| k.type_name().to_string()).collect(),
+				coupler_kinds: all_coupler_kinds().map(|k| k.type_name().to_string()).collect(),
 			},
 		})
 	}
@@ -146,14 +146,14 @@ impl State {
 			return;
 		};
 
-		let dropped: Vec<AnchorId> = self
-			.anchors
+		let dropped: Vec<CouplerId> = self
+			.couplers
 			.iter()
 			.filter(|(_, a)| a.master == process_id || a.follower == process_id)
 			.map(|(id, _)| *id)
 			.collect();
 		for id in dropped {
-			self.anchors.remove(&id);
+			self.couplers.remove(&id);
 		}
 
 		for subscribers in self.subscriptions.values_mut() {
@@ -198,14 +198,14 @@ impl State {
 		};
 		connection.info.current_interest = Some(interest.clone());
 
-		let derivative_targets: Vec<(AnchorId, ProcessId, AnchorKind)> = self
-			.anchors
+		let derivative_targets: Vec<(CouplerId, ProcessId, CouplerKind)> = self
+			.couplers
 			.values()
 			.filter(|a| a.master == process_id)
 			.map(|a| (a.id, a.follower, a.kind.clone()))
 			.collect();
 
-		for (anchor_id, follower, kind) in derivative_targets {
+		for (coupler_id, follower, kind) in derivative_targets {
 			let transformed = transform_interest(&self.handle, &interest, &kind);
 			let Some(outbound) = self.roster.get(&follower).map(|c| c.outbound.clone()) else {
 				continue;
@@ -213,9 +213,9 @@ impl State {
 			for derived in transformed {
 				let payload = serde_json::json!({
 					"jsonrpc": "2.0",
-					"method": "notification.anchor_update",
+					"method": "notification.coupler_update",
 					"params": {
-						"anchor_id": anchor_id,
+						"coupler_id": coupler_id,
 						"interest": derived,
 					},
 				});
@@ -431,16 +431,16 @@ impl State {
 		}
 	}
 
-	fn anchor_create(
+	fn coupler_create(
 		&mut self,
 		master: ProcessId,
 		follower: ProcessId,
-		kind: AnchorKind,
-	) -> Result<AnchorId, ProtocolError> {
-		if !all_anchor_kinds().any(|k| k.type_name() == kind.type_name()) {
+		kind: CouplerKind,
+	) -> Result<CouplerId, ProtocolError> {
+		if !all_coupler_kinds().any(|k| k.type_name() == kind.type_name()) {
 			return Err(ProtocolError::new(
-				error_codes::ANCHOR_KIND_UNSUPPORTED,
-				format!("anchor kind '{}' not supported by this daemon", kind.type_name()),
+				error_codes::COUPLER_KIND_UNSUPPORTED,
+				format!("coupler kind '{}' not supported by this daemon", kind.type_name()),
 			));
 		}
 		if !self.roster.contains_key(&master) {
@@ -455,13 +455,13 @@ impl State {
 				format!("follower process {} not found", follower),
 			));
 		}
-		if self.anchor_creates_cycle(master, follower) {
+		if self.coupler_creates_cycle(master, follower) {
 			return Err(ProtocolError::new(
-				error_codes::ANCHOR_CYCLE,
-				"anchor would create a cycle in the dependency graph",
+				error_codes::COUPLER_CYCLE,
+				"coupler would create a cycle in the dependency graph",
 			));
 		}
-		let compat_ok = anchor_kind_compat(
+		let compat_ok = coupler_kind_compat(
 			&kind,
 			&self.roster[&master].info.provides,
 			&self.roster[&follower].info.consumes,
@@ -470,9 +470,9 @@ impl State {
 			let master_provides = self.roster[&master].info.provides.clone();
 			let follower_consumes = self.roster[&follower].info.consumes.clone();
 			return Err(ProtocolError::new(
-				error_codes::ANCHOR_INCOMPATIBLE,
+				error_codes::COUPLER_INCOMPATIBLE,
 				format!(
-					"anchor kind '{}' incompatible with master provides / follower consumes",
+					"coupler kind '{}' incompatible with master provides / follower consumes",
 					kind.type_name(),
 				),
 			)
@@ -482,14 +482,14 @@ impl State {
 			})));
 		}
 
-		let anchor_id = self.allocate_anchor_id();
-		let anchor = Anchor {
-			id: anchor_id,
+		let coupler_id = self.allocate_coupler_id();
+		let coupler = Coupler {
+			id: coupler_id,
 			master,
 			follower,
 			kind: kind.clone(),
 		};
-		self.anchors.insert(anchor_id, anchor);
+		self.couplers.insert(coupler_id, coupler);
 
 		let initial = self
 			.roster
@@ -501,9 +501,9 @@ impl State {
 				for derived in transformed {
 					let payload = serde_json::json!({
 						"jsonrpc": "2.0",
-						"method": "notification.anchor_update",
+						"method": "notification.coupler_update",
 						"params": {
-							"anchor_id": anchor_id,
+							"coupler_id": coupler_id,
 							"interest": derived,
 						},
 					});
@@ -512,23 +512,23 @@ impl State {
 			}
 		}
 
-		Ok(anchor_id)
+		Ok(coupler_id)
 	}
 
-	fn anchor_remove(&mut self, anchor_id: AnchorId) -> Result<(), ProtocolError> {
-		self.anchors
-			.remove(&anchor_id)
+	fn coupler_remove(&mut self, coupler_id: CouplerId) -> Result<(), ProtocolError> {
+		self.couplers
+			.remove(&coupler_id)
 			.map(|_| ())
 			.ok_or_else(|| {
-				ProtocolError::new(error_codes::ANCHOR_NOT_FOUND, "anchor not found")
+				ProtocolError::new(error_codes::COUPLER_NOT_FOUND, "coupler not found")
 			})
 	}
 
-	fn anchor_list(&self, filter: Option<ProcessId>) -> Vec<Anchor> {
+	fn coupler_list(&self, filter: Option<ProcessId>) -> Vec<Coupler> {
 		match filter {
-			None => self.anchors.values().cloned().collect(),
+			None => self.couplers.values().cloned().collect(),
 			Some(pid) => self
-				.anchors
+				.couplers
 				.values()
 				.filter(|a| a.master == pid || a.follower == pid)
 				.cloned()
@@ -536,7 +536,7 @@ impl State {
 		}
 	}
 
-	fn anchor_creates_cycle(&self, master: ProcessId, follower: ProcessId) -> bool {
+	fn coupler_creates_cycle(&self, master: ProcessId, follower: ProcessId) -> bool {
 		if master == follower {
 			return true;
 		}
@@ -549,9 +549,9 @@ impl State {
 			if current == master {
 				return true;
 			}
-			for anchor in self.anchors.values() {
-				if anchor.master == current {
-					stack.push(anchor.follower);
+			for coupler in self.couplers.values() {
+				if coupler.master == current {
+					stack.push(coupler.follower);
 				}
 			}
 		}
@@ -715,66 +715,66 @@ impl NamedResultsEvent {
 	}
 }
 
-pub(crate) fn anchor_kind_compat(
-	kind: &AnchorKind,
+pub(crate) fn coupler_kind_compat(
+	kind: &CouplerKind,
 	master_provides: &[InterestKind],
 	follower_consumes: &[InterestKind],
 ) -> bool {
-	let (accepted_in, produced_out) = anchor_kind_signature(kind);
+	let (accepted_in, produced_out) = coupler_kind_signature(kind);
 	accepted_in.iter().any(|k| master_provides.contains(k))
 		&& produced_out.iter().any(|k| follower_consumes.contains(k))
 }
 
-fn anchor_kind_signature(
-	kind: &AnchorKind,
+fn coupler_kind_signature(
+	kind: &CouplerKind,
 ) -> (&'static [InterestKind], &'static [InterestKind]) {
 	use InterestKind::*;
 	match kind {
-		AnchorKind::SentenceMirror => (&[Position, Span, Sentence], &[Sentence]),
-		AnchorKind::Alignment { .. } => (&[Sentence, Span], &[Span]),
-		AnchorKind::KwicSelection => (&[Hit], &[Sentence]),
-		AnchorKind::DocPickerSelection => (&[Document], &[Document]),
-		AnchorKind::NamedResultsSelection => (&[Results], &[Results]),
-		AnchorKind::ConlluView => (&[Sentence], &[Sentence]),
+		CouplerKind::SentenceMirror => (&[Position, Span, Sentence], &[Sentence]),
+		CouplerKind::Alignment { .. } => (&[Sentence, Span], &[Span]),
+		CouplerKind::KwicSelection => (&[Hit], &[Sentence]),
+		CouplerKind::DocPickerSelection => (&[Document], &[Document]),
+		CouplerKind::NamedResultsSelection => (&[Results], &[Results]),
+		CouplerKind::ConlluView => (&[Sentence], &[Sentence]),
 	}
 }
 
-fn all_anchor_kinds() -> impl Iterator<Item = AnchorKind> {
+fn all_coupler_kinds() -> impl Iterator<Item = CouplerKind> {
 	[
-		AnchorKind::SentenceMirror,
-		AnchorKind::Alignment { name: String::new() },
-		AnchorKind::KwicSelection,
-		AnchorKind::DocPickerSelection,
-		AnchorKind::NamedResultsSelection,
-		AnchorKind::ConlluView,
+		CouplerKind::SentenceMirror,
+		CouplerKind::Alignment { name: String::new() },
+		CouplerKind::KwicSelection,
+		CouplerKind::DocPickerSelection,
+		CouplerKind::NamedResultsSelection,
+		CouplerKind::ConlluView,
 	]
 	.into_iter()
 }
 
-// Drift guard for all_anchor_kinds: forces a compile error if AnchorKind grows.
+// Drift guard for all_coupler_kinds: forces a compile error if CouplerKind grows.
 #[allow(dead_code)]
-fn assert_anchor_kinds_covered(kind: &AnchorKind) {
+fn assert_coupler_kinds_covered(kind: &CouplerKind) {
 	match kind {
-		AnchorKind::SentenceMirror => {}
-		AnchorKind::Alignment { .. } => {}
-		AnchorKind::KwicSelection => {}
-		AnchorKind::DocPickerSelection => {}
-		AnchorKind::NamedResultsSelection => {}
-		AnchorKind::ConlluView => {}
+		CouplerKind::SentenceMirror => {}
+		CouplerKind::Alignment { .. } => {}
+		CouplerKind::KwicSelection => {}
+		CouplerKind::DocPickerSelection => {}
+		CouplerKind::NamedResultsSelection => {}
+		CouplerKind::ConlluView => {}
 	}
 }
 
 fn transform_interest(
 	handle: &CorpusHandle,
 	interest: &Interest,
-	kind: &AnchorKind,
+	kind: &CouplerKind,
 ) -> Vec<Interest> {
-	let (accepts, _) = anchor_kind_signature(kind);
+	let (accepts, _) = coupler_kind_signature(kind);
 	if !accepts.contains(&interest.kind()) {
 		return Vec::new();
 	}
 	match kind {
-		AnchorKind::SentenceMirror => match interest {
+		CouplerKind::SentenceMirror => match interest {
 			Interest::Sentence { .. } => vec![interest.clone()],
 			Interest::Position { doc, position } => {
 				widen_position_to_sentence(handle, *doc, *position)
@@ -784,7 +784,7 @@ fn transform_interest(
 			}
 			_ => Vec::new(),
 		},
-		AnchorKind::Alignment { name } => {
+		CouplerKind::Alignment { name } => {
 			let source = match interest {
 				Interest::Sentence { doc, sent } => {
 					let Some(span) = sentence_to_span(handle, *doc, *sent) else {
@@ -805,7 +805,7 @@ fn transform_interest(
 				Err(_) => Vec::new(),
 			}
 		}
-		AnchorKind::KwicSelection => match interest {
+		CouplerKind::KwicSelection => match interest {
 			Interest::Hit { result, hit_idx } => {
 				let table = handle.results.read().expect("results lock poisoned");
 				let Some(entry) = table.get(result) else { return Vec::new(); };
@@ -822,9 +822,9 @@ fn transform_interest(
 			}
 			_ => Vec::new(),
 		},
-		AnchorKind::DocPickerSelection
-		| AnchorKind::NamedResultsSelection
-		| AnchorKind::ConlluView => Vec::new(),
+		CouplerKind::DocPickerSelection
+		| CouplerKind::NamedResultsSelection
+		| CouplerKind::ConlluView => Vec::new(),
 	}
 }
 
@@ -951,19 +951,19 @@ pub(crate) enum Command {
 		handle: ResultHandle,
 		reply: SyncSender<()>,
 	},
-	AnchorCreate {
+	CouplerCreate {
 		master: ProcessId,
 		follower: ProcessId,
-		kind: AnchorKind,
-		reply: SyncSender<Result<AnchorId, ProtocolError>>,
+		kind: CouplerKind,
+		reply: SyncSender<Result<CouplerId, ProtocolError>>,
 	},
-	AnchorRemove {
-		anchor_id: AnchorId,
+	CouplerRemove {
+		coupler_id: CouplerId,
 		reply: SyncSender<Result<(), ProtocolError>>,
 	},
-	AnchorList {
+	CouplerList {
 		process_id: Option<ProcessId>,
-		reply: SyncSender<Vec<Anchor>>,
+		reply: SyncSender<Vec<Coupler>>,
 	},
 	Subscribe {
 		process_id: ProcessId,
@@ -1041,14 +1041,14 @@ pub(crate) fn run(mut state: State, commands: Receiver<Command>) {
 				state.discard_handle(handle);
 				let _ = reply.send(());
 			}
-			Command::AnchorCreate { master, follower, kind, reply } => {
-				let _ = reply.send(state.anchor_create(master, follower, kind));
+			Command::CouplerCreate { master, follower, kind, reply } => {
+				let _ = reply.send(state.coupler_create(master, follower, kind));
 			}
-			Command::AnchorRemove { anchor_id, reply } => {
-				let _ = reply.send(state.anchor_remove(anchor_id));
+			Command::CouplerRemove { coupler_id, reply } => {
+				let _ = reply.send(state.coupler_remove(coupler_id));
 			}
-			Command::AnchorList { process_id, reply } => {
-				let _ = reply.send(state.anchor_list(process_id));
+			Command::CouplerList { process_id, reply } => {
+				let _ = reply.send(state.coupler_list(process_id));
 			}
 			Command::Subscribe { process_id, topic, reply } => {
 				let _ = reply.send(state.subscribe(process_id, topic));
@@ -1139,15 +1139,15 @@ mod tests {
 	}
 
 	#[test]
-	fn register_capabilities_includes_all_anchor_kinds() {
+	fn register_capabilities_includes_all_coupler_kinds() {
 		let mut state = make_state();
 		let reply = state
 			.register(make_register_params(ProcessKind::External), dummy_outbound())
 			.unwrap();
-		for kind in all_anchor_kinds() {
+		for kind in all_coupler_kinds() {
 			let name = kind.type_name();
 			assert!(
-				reply.capabilities.anchor_kinds.iter().any(|k| k == name),
+				reply.capabilities.coupler_kinds.iter().any(|k| k == name),
 				"expected capability '{}' present",
 				name,
 			);
@@ -1155,17 +1155,17 @@ mod tests {
 	}
 
 	#[test]
-	fn unregister_drops_anchors_involving_process() {
+	fn unregister_drops_couplers_involving_process() {
 		let mut state = make_state();
 		let p1 = register_compatible(&mut state);
 		let p2 = register_compatible(&mut state);
-		let anchor_id = state
-			.anchor_create(p1, p2, AnchorKind::SentenceMirror)
+		let coupler_id = state
+			.coupler_create(p1, p2, CouplerKind::SentenceMirror)
 			.unwrap();
-		assert!(state.anchors.contains_key(&anchor_id));
+		assert!(state.couplers.contains_key(&coupler_id));
 
 		state.unregister(p1);
-		assert!(!state.anchors.contains_key(&anchor_id));
+		assert!(!state.couplers.contains_key(&coupler_id));
 	}
 
 	#[test]
@@ -1180,69 +1180,69 @@ mod tests {
 	}
 
 	#[test]
-	fn anchor_create_unknown_master_rejected() {
+	fn coupler_create_unknown_master_rejected() {
 		let mut state = make_state();
 		let p = register(&mut state);
 		let err = state
-			.anchor_create(999, p, AnchorKind::SentenceMirror)
+			.coupler_create(999, p, CouplerKind::SentenceMirror)
 			.unwrap_err();
 		assert_eq!(err.code, error_codes::PROCESS_NOT_FOUND);
 	}
 
 	#[test]
-	fn anchor_create_unknown_follower_rejected() {
+	fn coupler_create_unknown_follower_rejected() {
 		let mut state = make_state();
 		let p = register(&mut state);
 		let err = state
-			.anchor_create(p, 999, AnchorKind::SentenceMirror)
+			.coupler_create(p, 999, CouplerKind::SentenceMirror)
 			.unwrap_err();
 		assert_eq!(err.code, error_codes::PROCESS_NOT_FOUND);
 	}
 
 	#[test]
-	fn anchor_create_self_loop_rejected_as_cycle() {
+	fn coupler_create_self_loop_rejected_as_cycle() {
 		let mut state = make_state();
 		let p = register(&mut state);
 		let err = state
-			.anchor_create(p, p, AnchorKind::SentenceMirror)
+			.coupler_create(p, p, CouplerKind::SentenceMirror)
 			.unwrap_err();
-		assert_eq!(err.code, error_codes::ANCHOR_CYCLE);
+		assert_eq!(err.code, error_codes::COUPLER_CYCLE);
 	}
 
 	#[test]
-	fn anchor_create_two_node_cycle_rejected() {
+	fn coupler_create_two_node_cycle_rejected() {
 		let mut state = make_state();
 		let p1 = register_compatible(&mut state);
 		let p2 = register_compatible(&mut state);
 		state
-			.anchor_create(p1, p2, AnchorKind::SentenceMirror)
+			.coupler_create(p1, p2, CouplerKind::SentenceMirror)
 			.unwrap();
 		let err = state
-			.anchor_create(p2, p1, AnchorKind::SentenceMirror)
+			.coupler_create(p2, p1, CouplerKind::SentenceMirror)
 			.unwrap_err();
-		assert_eq!(err.code, error_codes::ANCHOR_CYCLE);
+		assert_eq!(err.code, error_codes::COUPLER_CYCLE);
 	}
 
 	#[test]
-	fn anchor_create_three_node_cycle_rejected() {
+	fn coupler_create_three_node_cycle_rejected() {
 		let mut state = make_state();
 		let p1 = register_compatible(&mut state);
 		let p2 = register_compatible(&mut state);
 		let p3 = register_compatible(&mut state);
 		state
-			.anchor_create(p1, p2, AnchorKind::SentenceMirror)
+			.coupler_create(p1, p2, CouplerKind::SentenceMirror)
 			.unwrap();
 		state
-			.anchor_create(p2, p3, AnchorKind::SentenceMirror)
+			.coupler_create(p2, p3, CouplerKind::SentenceMirror)
 			.unwrap();
 		let err = state
-			.anchor_create(p3, p1, AnchorKind::SentenceMirror)
+			.coupler_create(p3, p1, CouplerKind::SentenceMirror)
 			.unwrap_err();
-		assert_eq!(err.code, error_codes::ANCHOR_CYCLE);
+		assert_eq!(err.code, error_codes::COUPLER_CYCLE);
 	}
 
 	#[test]
-	fn anchor_create_incompatible_rejected() {
+	fn coupler_create_incompatible_rejected() {
 		let mut state = make_state();
 		let p_master = state
 			.register(
@@ -1271,17 +1271,17 @@ mod tests {
 			.unwrap()
 			.process_id;
 		let err = state
-			.anchor_create(p_master, p_follower, AnchorKind::SentenceMirror)
+			.coupler_create(p_master, p_follower, CouplerKind::SentenceMirror)
 			.unwrap_err();
-		assert_eq!(err.code, error_codes::ANCHOR_INCOMPATIBLE);
+		assert_eq!(err.code, error_codes::COUPLER_INCOMPATIBLE);
 		assert!(err.data.is_some());
 	}
 
 	#[test]
-	fn anchor_remove_unknown_rejected() {
+	fn coupler_remove_unknown_rejected() {
 		let mut state = make_state();
-		let err = state.anchor_remove(999).unwrap_err();
-		assert_eq!(err.code, error_codes::ANCHOR_NOT_FOUND);
+		let err = state.coupler_remove(999).unwrap_err();
+		assert_eq!(err.code, error_codes::COUPLER_NOT_FOUND);
 	}
 
 	#[test]
@@ -1464,78 +1464,78 @@ mod tests {
 	}
 
 	#[test]
-	fn anchor_kind_compat_sentence_mirror_accepts_position_to_sentence() {
-		assert!(anchor_kind_compat(
-			&AnchorKind::SentenceMirror,
+	fn coupler_kind_compat_sentence_mirror_accepts_position_to_sentence() {
+		assert!(coupler_kind_compat(
+			&CouplerKind::SentenceMirror,
 			&[InterestKind::Position],
 			&[InterestKind::Sentence],
 		));
 	}
 
 	#[test]
-	fn anchor_kind_compat_sentence_mirror_rejects_hit_provider() {
-		assert!(!anchor_kind_compat(
-			&AnchorKind::SentenceMirror,
+	fn coupler_kind_compat_sentence_mirror_rejects_hit_provider() {
+		assert!(!coupler_kind_compat(
+			&CouplerKind::SentenceMirror,
 			&[InterestKind::Hit],
 			&[InterestKind::Sentence],
 		));
 	}
 
 	#[test]
-	fn anchor_kind_compat_alignment_accepts_span_to_span() {
-		assert!(anchor_kind_compat(
-			&AnchorKind::Alignment { name: "labse".to_string() },
+	fn coupler_kind_compat_alignment_accepts_span_to_span() {
+		assert!(coupler_kind_compat(
+			&CouplerKind::Alignment { name: "labse".to_string() },
 			&[InterestKind::Span],
 			&[InterestKind::Span],
 		));
 	}
 
 	#[test]
-	fn anchor_kind_compat_kwic_requires_hit_provider() {
-		assert!(anchor_kind_compat(
-			&AnchorKind::KwicSelection,
+	fn coupler_kind_compat_kwic_requires_hit_provider() {
+		assert!(coupler_kind_compat(
+			&CouplerKind::KwicSelection,
 			&[InterestKind::Hit],
 			&[InterestKind::Sentence],
 		));
-		assert!(!anchor_kind_compat(
-			&AnchorKind::KwicSelection,
+		assert!(!coupler_kind_compat(
+			&CouplerKind::KwicSelection,
 			&[InterestKind::Sentence],
 			&[InterestKind::Sentence],
 		));
 	}
 
 	#[test]
-	fn anchor_kind_compat_rejects_empty_master_provides() {
-		assert!(!anchor_kind_compat(
-			&AnchorKind::SentenceMirror,
+	fn coupler_kind_compat_rejects_empty_master_provides() {
+		assert!(!coupler_kind_compat(
+			&CouplerKind::SentenceMirror,
 			&[],
 			&[InterestKind::Sentence],
 		));
 	}
 
 	#[test]
-	fn anchor_kind_compat_rejects_empty_follower_consumes() {
-		assert!(!anchor_kind_compat(
-			&AnchorKind::SentenceMirror,
+	fn coupler_kind_compat_rejects_empty_follower_consumes() {
+		assert!(!coupler_kind_compat(
+			&CouplerKind::SentenceMirror,
 			&[InterestKind::Position],
 			&[],
 		));
 	}
 
 	#[test]
-	fn anchor_kind_compat_tbd_kinds_self_to_self() {
-		assert!(anchor_kind_compat(
-			&AnchorKind::DocPickerSelection,
+	fn coupler_kind_compat_tbd_kinds_self_to_self() {
+		assert!(coupler_kind_compat(
+			&CouplerKind::DocPickerSelection,
 			&[InterestKind::Document],
 			&[InterestKind::Document],
 		));
-		assert!(anchor_kind_compat(
-			&AnchorKind::NamedResultsSelection,
+		assert!(coupler_kind_compat(
+			&CouplerKind::NamedResultsSelection,
 			&[InterestKind::Results],
 			&[InterestKind::Results],
 		));
-		assert!(anchor_kind_compat(
-			&AnchorKind::ConlluView,
+		assert!(coupler_kind_compat(
+			&CouplerKind::ConlluView,
 			&[InterestKind::Sentence],
 			&[InterestKind::Sentence],
 		));
@@ -1555,7 +1555,7 @@ mod tests {
 		let handle = make_handle();
 		let doc = find_doc(&handle.corpus, "la_maison");
 		let interest = Interest::Sentence { doc, sent: 0 };
-		let out = transform_interest(&handle, &interest, &AnchorKind::SentenceMirror);
+		let out = transform_interest(&handle, &interest, &CouplerKind::SentenceMirror);
 		assert_eq!(out.len(), 1);
 		match &out[0] {
 			Interest::Sentence { doc: d, sent: s } => {
@@ -1572,7 +1572,7 @@ mod tests {
 		let doc = find_doc(&handle.corpus, "la_maison");
 		let span = sentence_to_span(&handle, doc, 0).expect("sentence span");
 		let interest = Interest::Position { doc, position: span.start };
-		let out = transform_interest(&handle, &interest, &AnchorKind::SentenceMirror);
+		let out = transform_interest(&handle, &interest, &CouplerKind::SentenceMirror);
 		assert_eq!(out.len(), 1);
 		match &out[0] {
 			Interest::Sentence { doc: d, sent: s } => {
@@ -1589,7 +1589,7 @@ mod tests {
 		let doc = find_doc(&handle.corpus, "la_maison");
 		let span = sentence_to_span(&handle, doc, 0).expect("sentence span");
 		let interest = Interest::Span { doc, start: span.start, end: span.end };
-		let out = transform_interest(&handle, &interest, &AnchorKind::SentenceMirror);
+		let out = transform_interest(&handle, &interest, &CouplerKind::SentenceMirror);
 		assert_eq!(out.len(), 1);
 		match &out[0] {
 			Interest::Sentence { doc: d, sent: s } => {
@@ -1605,7 +1605,7 @@ mod tests {
 		let handle = make_handle();
 		let doc = find_doc(&handle.corpus, "la_maison");
 		let interest = Interest::Position { doc, position: u64::MAX };
-		let out = transform_interest(&handle, &interest, &AnchorKind::SentenceMirror);
+		let out = transform_interest(&handle, &interest, &CouplerKind::SentenceMirror);
 		assert!(out.is_empty());
 	}
 
@@ -1613,7 +1613,7 @@ mod tests {
 	fn transform_sentence_mirror_defensively_rejects_hit_input() {
 		let handle = make_handle();
 		let interest = Interest::Hit { result: "r-x".to_string(), hit_idx: 0 };
-		let out = transform_interest(&handle, &interest, &AnchorKind::SentenceMirror);
+		let out = transform_interest(&handle, &interest, &CouplerKind::SentenceMirror);
 		assert!(out.is_empty());
 	}
 
@@ -1623,7 +1623,7 @@ mod tests {
 		let source_doc = find_doc(&handle.corpus, "la_maison");
 		let target_doc = find_doc(&handle.corpus, "the_house");
 		let interest = Interest::Sentence { doc: source_doc, sent: 0 };
-		let kind = AnchorKind::Alignment { name: "sentence".to_string() };
+		let kind = CouplerKind::Alignment { name: "sentence".to_string() };
 		let out = transform_interest(&handle, &interest, &kind);
 		assert!(!out.is_empty());
 		for derived in &out {
@@ -1644,7 +1644,7 @@ mod tests {
 		let target_doc = find_doc(&handle.corpus, "the_house");
 		let span = sentence_to_span(&handle, source_doc, 0).expect("sentence span");
 		let interest = Interest::Span { doc: source_doc, start: span.start, end: span.end };
-		let kind = AnchorKind::Alignment { name: "sentence".to_string() };
+		let kind = CouplerKind::Alignment { name: "sentence".to_string() };
 		let out = transform_interest(&handle, &interest, &kind);
 		assert!(!out.is_empty());
 		for derived in &out {
@@ -1660,7 +1660,7 @@ mod tests {
 		let handle = make_handle();
 		let doc = find_doc(&handle.corpus, "la_maison");
 		let interest = Interest::Span { doc, start: 0, end: 5 };
-		let kind = AnchorKind::Alignment { name: "totally-not-an-alignment".to_string() };
+		let kind = CouplerKind::Alignment { name: "totally-not-an-alignment".to_string() };
 		let out = transform_interest(&handle, &interest, &kind);
 		assert!(out.is_empty());
 	}
@@ -1670,7 +1670,7 @@ mod tests {
 		let handle = make_handle();
 		let doc = find_doc(&handle.corpus, "la_maison");
 		let interest = Interest::Position { doc, position: 0 };
-		let kind = AnchorKind::Alignment { name: "sentence".to_string() };
+		let kind = CouplerKind::Alignment { name: "sentence".to_string() };
 		let out = transform_interest(&handle, &interest, &kind);
 		assert!(out.is_empty());
 	}
@@ -1689,7 +1689,7 @@ mod tests {
 		};
 		let result_handle = state.insert_result("test".to_string(), vec![executor_hit]);
 		let interest = Interest::Hit { result: result_handle, hit_idx: 0 };
-		let out = transform_interest(&state.handle, &interest, &AnchorKind::KwicSelection);
+		let out = transform_interest(&state.handle, &interest, &CouplerKind::KwicSelection);
 		assert_eq!(out.len(), 1);
 		match &out[0] {
 			Interest::Sentence { doc: d, sent: s } => {
@@ -1704,7 +1704,7 @@ mod tests {
 	fn transform_kwic_unknown_result_returns_empty() {
 		let handle = make_handle();
 		let interest = Interest::Hit { result: "r-bogus".to_string(), hit_idx: 0 };
-		let out = transform_interest(&handle, &interest, &AnchorKind::KwicSelection);
+		let out = transform_interest(&handle, &interest, &CouplerKind::KwicSelection);
 		assert!(out.is_empty());
 	}
 
@@ -1713,7 +1713,7 @@ mod tests {
 		let mut state = make_state();
 		let result_handle = state.insert_result("test".to_string(), vec![]);
 		let interest = Interest::Hit { result: result_handle, hit_idx: 99 };
-		let out = transform_interest(&state.handle, &interest, &AnchorKind::KwicSelection);
+		let out = transform_interest(&state.handle, &interest, &CouplerKind::KwicSelection);
 		assert!(out.is_empty());
 	}
 
@@ -1724,19 +1724,19 @@ mod tests {
 		assert!(transform_interest(
 			&handle,
 			&Interest::Document { doc },
-			&AnchorKind::DocPickerSelection,
+			&CouplerKind::DocPickerSelection,
 		)
 		.is_empty());
 		assert!(transform_interest(
 			&handle,
 			&Interest::Results { handle: "r-x".to_string() },
-			&AnchorKind::NamedResultsSelection,
+			&CouplerKind::NamedResultsSelection,
 		)
 		.is_empty());
 		assert!(transform_interest(
 			&handle,
 			&Interest::Sentence { doc, sent: 0 },
-			&AnchorKind::ConlluView,
+			&CouplerKind::ConlluView,
 		)
 		.is_empty());
 	}

@@ -76,7 +76,7 @@ fn client_register_and_corpus_info() {
 	assert_eq!(reply.process_id, 1);
 	assert_eq!(reply.protocol_version, PROTOCOL_VERSION);
 	assert_eq!(reply.daemon_epoch, 1);
-	assert!(reply.capabilities.anchor_kinds.iter().any(|k| k == "sentence_mirror"));
+	assert!(reply.capabilities.coupler_kinds.iter().any(|k| k == "sentence_mirror"));
 
 	let info = client.corpus_info().expect("corpus info");
 	assert_eq!(info.name, "test-parallel");
@@ -194,7 +194,7 @@ fn client_receives_roster_notifications() {
 }
 
 #[test]
-fn client_publish_interest_drives_anchor_notification() {
+fn client_publish_interest_drives_coupler_notification() {
 	let fx = boot_daemon();
 	let mut master = DaemonClient::connect(&fx.socket).expect("master connect");
 	let master_reply = master
@@ -218,13 +218,13 @@ fn client_publish_interest_drives_anchor_notification() {
 		})
 		.expect("follower register");
 
-	let anchor = follower
-		.anchor_create(AnchorCreateParams {
+	let coupler = follower
+		.coupler_create(CouplerCreateParams {
 			master_id: master_reply.process_id,
 			follower_id: follower_reply.process_id,
-			kind: AnchorKind::SentenceMirror,
+			kind: CouplerKind::SentenceMirror,
 		})
-		.expect("anchor create");
+		.expect("coupler create");
 
 	master
 		.publish_interest(PublishInterestParams {
@@ -235,10 +235,10 @@ fn client_publish_interest_drives_anchor_notification() {
 	let note = follower
 		.notifications()
 		.recv_timeout(Duration::from_secs(2))
-		.expect("anchor notification");
+		.expect("coupler notification");
 	match note {
-		NotificationEnvelope::AnchorUpdate { anchor_id, interest } => {
-			assert_eq!(anchor_id, anchor.anchor_id);
+		NotificationEnvelope::CouplerUpdate { coupler_id, interest } => {
+			assert_eq!(coupler_id, coupler.coupler_id);
 			assert!(matches!(interest, Interest::Sentence { doc: 0, sent: 0 }));
 		}
 		other => panic!("unexpected notification {other:?}"),

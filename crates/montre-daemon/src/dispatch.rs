@@ -5,7 +5,7 @@ use std::sync::mpsc::{sync_channel, Receiver, Sender, SyncSender};
 use std::sync::Arc;
 use std::thread;
 
-use crate::handlers::{alignment, anchor, corpus, daemon, query, session, subscription, text};
+use crate::handlers::{alignment, corpus, coupler, daemon, query, session, subscription, text};
 use crate::protocol::error_codes;
 use crate::protocol::{
 	ProcessId, ProtocolError, PublishInterestParams, RegisterParams,
@@ -334,9 +334,9 @@ pub(crate) fn dispatch_request(
 		"query.list_named" => query::handle_query_list_named(ctx),
 		"query.delete_named" => query::handle_query_delete_named(params, ctx),
 		"query.discard" => query::handle_query_discard(params, ctx),
-		"anchor.create" => anchor::handle_anchor_create(params, ctx),
-		"anchor.remove" => anchor::handle_anchor_remove(params, ctx),
-		"anchor.list" => anchor::handle_anchor_list(params, ctx),
+		"coupler.create" => coupler::handle_coupler_create(params, ctx),
+		"coupler.remove" => coupler::handle_coupler_remove(params, ctx),
+		"coupler.list" => coupler::handle_coupler_list(params, ctx),
 		"subscription.subscribe" => subscription::handle_subscription_subscribe(params, ctx),
 		"subscription.unsubscribe" => subscription::handle_subscription_unsubscribe(params, ctx),
 		"daemon.shutdown" => daemon::handle_daemon_shutdown(params, ctx),
@@ -828,14 +828,14 @@ mod tests {
 			let master_pid = master_ctx.process_id.unwrap();
 			let follower_pid = follower_ctx.process_id.unwrap();
 
-			let anchor_params = serde_json::json!({
+			let coupler_params = serde_json::json!({
 				"master_id": master_pid,
 				"follower_id": follower_pid,
 				"kind": { "type": "sentence_mirror" }
 			});
-			let reply = dispatch_request("anchor.create", Some(anchor_params), &mut master_ctx)
-				.expect("anchor.create");
-			let anchor_id = reply["anchor_id"].as_u64().expect("anchor_id");
+			let reply = dispatch_request("coupler.create", Some(coupler_params), &mut master_ctx)
+				.expect("coupler.create");
+			let coupler_id = reply["coupler_id"].as_u64().expect("coupler_id");
 
 			let source_doc = crate::dispatch::test_support::find_doc_index(
 				&handle.corpus,
@@ -855,8 +855,8 @@ mod tests {
 				.recv_timeout(Duration::from_millis(500))
 				.expect("follower should receive a notification");
 			assert_eq!(payload["jsonrpc"], "2.0");
-			assert_eq!(payload["method"], "notification.anchor_update");
-			assert_eq!(payload["params"]["anchor_id"], anchor_id);
+			assert_eq!(payload["method"], "notification.coupler_update");
+			assert_eq!(payload["params"]["coupler_id"], coupler_id);
 			assert_eq!(payload["params"]["interest"]["type"], "sentence");
 			assert_eq!(payload["params"]["interest"]["doc"], source_doc);
 			assert_eq!(payload["params"]["interest"]["sent"], 0);
@@ -888,14 +888,14 @@ mod tests {
 			let master_pid = master_ctx.process_id.unwrap();
 			let follower_pid = follower_ctx.process_id.unwrap();
 
-			let anchor_params = serde_json::json!({
+			let coupler_params = serde_json::json!({
 				"master_id": master_pid,
 				"follower_id": follower_pid,
 				"kind": { "type": "alignment", "name": "sentence" }
 			});
-			let reply = dispatch_request("anchor.create", Some(anchor_params), &mut master_ctx)
-				.expect("anchor.create");
-			let anchor_id = reply["anchor_id"].as_u64().expect("anchor_id");
+			let reply = dispatch_request("coupler.create", Some(coupler_params), &mut master_ctx)
+				.expect("coupler.create");
+			let coupler_id = reply["coupler_id"].as_u64().expect("coupler_id");
 
 			let source_doc = crate::dispatch::test_support::find_doc_index(
 				&handle.corpus,
@@ -946,8 +946,8 @@ mod tests {
 			);
 			for payload in &received {
 				assert_eq!(payload["jsonrpc"], "2.0");
-				assert_eq!(payload["method"], "notification.anchor_update");
-				assert_eq!(payload["params"]["anchor_id"], anchor_id);
+				assert_eq!(payload["method"], "notification.coupler_update");
+				assert_eq!(payload["params"]["coupler_id"], coupler_id);
 				assert_eq!(payload["params"]["interest"]["type"], "span");
 				assert_eq!(payload["params"]["interest"]["doc"], target_doc);
 			}

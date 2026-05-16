@@ -2,16 +2,16 @@
 
 Session daemon for the Montre corpus query engine. One process per corpus, serving multiple clients (TUI panes, FFI consumers, scripts) over a Unix domain socket using a length-prefixed JSON-RPC 2.0 protocol.
 
-The daemon is the substrate for any tool that needs more than a one-shot CLI invocation: anchored reading (multiple panes coordinating on a shared focus), persistent named results, the future REPL and TUI. Clients connect via `DaemonClient` (in `client.rs`); the daemon itself runs as `montre serve <corpus-path>`, typically spawned implicitly by the first client.
+The daemon is the substrate for any tool that needs more than a one-shot CLI invocation: coupled reading (multiple panes coordinating on a shared focus), persistent named results, the future REPL and TUI. Clients connect via `DaemonClient` (in `client.rs`); the daemon itself runs as `montre serve <corpus-path>`, typically spawned implicitly by the first client.
 
-See [`daemon-protocol.md`](../../daemon-protocol.md) (top-level) for the wire surface — error codes, message shapes, anchor kinds, the full operation reference. This README covers the implementation side: architecture, invariants, file layout, conventions.
+See [`daemon-protocol.md`](../../daemon-protocol.md) (top-level) for the wire surface — error codes, message shapes, coupler kinds, the full operation reference. This README covers the implementation side: architecture, invariants, file layout, conventions.
 
 ## Architecture
 
 ```
                   ┌─────────────────────────┐
                   │      state thread       │
-                  │  roster, anchors,       │
+                  │  roster, couplers,      │
                   │  subscriptions,         │
                   │  named_results,         │
                   │  counters,              │
@@ -42,11 +42,11 @@ These hold across all phases. Code review and new handlers should preserve them.
 
 **Hits move through the state thread exactly once.** `query.execute` parses, plans, and executes against the immutable corpus directly on its connection thread, then sends `Command::InsertResult { cql, hits }` through the channel. The `Vec<Hit>` traverses the channel by move, never by clone. This is what keeps a 70ms quantifier query from serializing all other clients. Any future code that touches stored hits must preserve the move-once invariant — for example, metadata mutations on `ResultEntry` should not re-clone the hits vector.
 
-**Query execution never blocks the state thread.** The state thread only owns coordination state (roster, anchors, results table, counters). Anything that scales with corpus size (parser, planner, executor, surface text reconstruction, alignment projection inside handlers) runs on the connection thread. Notification transforms in `transform_interest` are the one current exception, called from within `Command::PublishInterest` and `Command::AnchorCreate` handlers; see "Known trade-offs" below.
+**Query execution never blocks the state thread.** The state thread only owns coordination state (roster, couplers, results table, counters). Anything that scales with corpus size (parser, planner, executor, surface text reconstruction, alignment projection inside handlers) runs on the connection thread. Notification transforms in `transform_interest` are the one current exception, called from within `Command::PublishInterest` and `Command::CouplerCreate` handlers; see "Known trade-offs" below.
 
-**`daemon_epoch` is the cache-invalidation contract.** Returned in `session.register`. Increments on daemon restart and on any persistent-state reset. Clients caching handle IDs, anchor IDs, or process IDs across reconnects must check epoch on each registration; if it changed, all prior cached IDs are invalid. The counter is persisted to `<state_dir>/epoch` (default `~/.local/share/montre/state/<corpus_id>/epoch`, override via `XDG_STATE_HOME`) and bumped on every daemon startup.
+**`daemon_epoch` is the cache-invalidation contract.** Returned in `session.register`. Increments on daemon restart and on any persistent-state reset. Clients caching handle IDs, coupler IDs, or process IDs across reconnects must check epoch on each registration; if it changed, all prior cached IDs are invalid. The counter is persisted to `<state_dir>/epoch` (default `~/.local/share/montre/state/<corpus_id>/epoch`, override via `XDG_STATE_HOME`) and bumped on every daemon startup.
 
-**Notifications carry no ID.** Strict JSON-RPC 2.0. `session.publish_interest` is a client-to-daemon notification (fire-and-forget). `notification.anchor_update`, `notification.roster_changed`, `notification.named_results_changed`, and `notification.shutdown` are daemon-to-client notifications.
+**Notifications carry no ID.** Strict JSON-RPC 2.0. `session.publish_interest` is a client-to-daemon notification (fire-and-forget). `notification.coupler_update`, `notification.roster_changed`, `notification.named_results_changed`, and `notification.shutdown` are daemon-to-client notifications.
 
 ### DaemonClient reader-thread invariant
 
@@ -63,7 +63,7 @@ src/
 ├── lib.rs            public API: serve(), DaemonError, ServeOptions, CorpusHandle, socket path derivation
 ├── protocol.rs       wire types: params, replies, enums, PROTOCOL_VERSION, error_codes module
 ├── dispatch.rs       framing, RPC dispatch, listener, reader/writer threads, RpcContext, handle_register
-├── state.rs          State, Command, run loop, anchor compat matrix, transform_interest
+├── state.rs          State, Command, run loop, coupler compat matrix, transform_interest
 ├── client.rs         DaemonClient (c4)
 ├── storage.rs        state-dir resolution, epoch persistence (c5)
 └── handlers/
@@ -74,7 +74,7 @@ src/
     ├── query.rs         query.execute, query.execute_count, query.hits, query.metadata,
     │                    query.save, query.materialize, query.load, query.list_named,
     │                    query.delete_named, query.discard
-    ├── anchor.rs        anchor.create, anchor.remove, anchor.list
+    ├── coupler.rs       coupler.create, coupler.remove, coupler.list
     ├── session.rs       session.unregister, session.update_label, session.roster
     └── subscription.rs  subscription.subscribe, subscription.unsubscribe
 ```
@@ -137,11 +137,11 @@ Integration tests in `tests/` use a real socket (`tests/c2_plumbing.rs` shows th
 
 ## Known trade-offs
 
-**Notification transforms run on the state thread.** `transform_interest` — including `project_alignment` walks for `Alignment` anchors — executes inside `Command::PublishInterest` handling. On the current test corpus this is microseconds; on a huge corpus with a wide `Interest::Span` master interest it scales as O(sentences_in_doc × edges) on the serialized state loop and can hold up other state operations behind it. Acceptable today. If anchor traffic ever becomes hot, the fix is to compute transforms off-thread and only route the resulting `(follower, payload)` tuples through state. Same parallelization argument as `query.execute`.
+**Notification transforms run on the state thread.** `transform_interest` — including `project_alignment` walks for `Alignment` couplers — executes inside `Command::PublishInterest` handling. On the current test corpus this is microseconds; on a huge corpus with a wide `Interest::Span` master interest it scales as O(sentences_in_doc × edges) on the serialized state loop and can hold up other state operations behind it. Acceptable today. If coupler traffic ever becomes hot, the fix is to compute transforms off-thread and only route the resulting `(follower, payload)` tuples through state. Same parallelization argument as `query.execute`.
 
-**1→many alignment fan-out emits N notifications.** One `notification.anchor_update` per projected target. Settled in c3-phase-2.
+**1→many alignment fan-out emits N notifications.** One `notification.coupler_update` per projected target. Settled in c3-phase-2.
 
-**Inert anchor kinds.** `DocPickerSelection`, `NamedResultsSelection`, and `ConlluView` compat-accept their self→self interest pair so `anchor.create` succeeds, but `transform_interest` returns empty for them pending UX design. Anchors of these kinds can be created and listed; they just don't push notifications. Documented in the spec; the daemon's behavior matches.
+**Inert coupler kinds.** `DocPickerSelection`, `NamedResultsSelection`, and `ConlluView` compat-accept their self→self interest pair so `coupler.create` succeeds, but `transform_interest` returns empty for them pending UX design. Couplers of these kinds can be created and listed; they just don't push notifications. Documented in the spec; the daemon's behavior matches.
 
 **Single connection per client.** Each `DaemonClient` opens one socket. Clients that need to coordinate on more than one corpus open one client per corpus. v1 does not support cross-corpus operations.
 
@@ -154,7 +154,7 @@ Integration tests in `tests/` use a real socket (`tests/c2_plumbing.rs` shows th
 
 ## Related docs
 
-- [`daemon-protocol.md`](../../daemon-protocol.md) — wire protocol, error codes, anchor kinds, full operation reference.
+- [`daemon-protocol.md`](../../daemon-protocol.md) — wire protocol, error codes, coupler kinds, full operation reference.
 - [`api.md`](../../api.md) — public Rust API of `montre-index::Corpus` and friends. Read this before touching anything that calls into the corpus.
 - [`DEVELOPMENT.md`](../../DEVELOPMENT.md) — workspace conventions, test corpus location, build/test commands.
 

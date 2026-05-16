@@ -79,7 +79,7 @@ fn register_round_trip_over_socket() {
 	assert_eq!(response.process_id, 1);
 	assert_eq!(response.protocol_version, PROTOCOL_VERSION);
 	assert_eq!(response.daemon_epoch, 1);
-	assert!(response.capabilities.anchor_kinds.iter().any(|k| k == "sentence_mirror"));
+	assert!(response.capabilities.coupler_kinds.iter().any(|k| k == "sentence_mirror"));
 }
 
 #[test]

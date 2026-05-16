@@ -42,7 +42,7 @@ impl From<ProtocolError> for DaemonClientError {
 
 #[derive(Debug, Clone)]
 pub enum NotificationEnvelope {
-	AnchorUpdate { anchor_id: AnchorId, interest: Interest },
+	CouplerUpdate { coupler_id: CouplerId, interest: Interest },
 	RosterChanged { event: String, process: ProcessInfo },
 	NamedResultsChanged { event: String, name: String, metadata: Option<ResultMetadata> },
 	Shutdown { reason: String, in_seconds: u32 },
@@ -213,16 +213,16 @@ impl DaemonClient {
 		self.request("alignment.project", Some(params))
 	}
 
-	pub fn anchor_create(&mut self, params: AnchorCreateParams) -> Result<AnchorCreateReply> {
-		self.request("anchor.create", Some(params))
+	pub fn coupler_create(&mut self, params: CouplerCreateParams) -> Result<CouplerCreateReply> {
+		self.request("coupler.create", Some(params))
 	}
 
-	pub fn anchor_remove(&mut self, params: AnchorRemoveParams) -> Result<OkReply> {
-		self.request("anchor.remove", Some(params))
+	pub fn coupler_remove(&mut self, params: CouplerRemoveParams) -> Result<OkReply> {
+		self.request("coupler.remove", Some(params))
 	}
 
-	pub fn anchor_list(&mut self, params: AnchorListParams) -> Result<AnchorListReply> {
-		self.request("anchor.list", Some(params))
+	pub fn coupler_list(&mut self, params: CouplerListParams) -> Result<CouplerListReply> {
+		self.request("coupler.list", Some(params))
 	}
 
 	pub fn subscription_subscribe(&mut self, params: SubscriptionParams) -> Result<OkReply> {
@@ -433,7 +433,7 @@ fn dispatch_notification(value: serde_json::Value, tx: &SyncSender<NotificationE
 	};
 	let params = value.get("params").cloned().unwrap_or(serde_json::Value::Null);
 	let envelope = match method {
-		"notification.anchor_update" => parse_anchor_update(params),
+		"notification.coupler_update" => parse_coupler_update(params),
 		"notification.roster_changed" => parse_roster_changed(params),
 		"notification.named_results_changed" => parse_named_results_changed(params),
 		"notification.shutdown" => parse_shutdown(params),
@@ -452,14 +452,14 @@ fn dispatch_notification(value: serde_json::Value, tx: &SyncSender<NotificationE
 	}
 }
 
-fn parse_anchor_update(params: serde_json::Value) -> std::result::Result<NotificationEnvelope, serde_json::Error> {
+fn parse_coupler_update(params: serde_json::Value) -> std::result::Result<NotificationEnvelope, serde_json::Error> {
 	#[derive(serde::Deserialize)]
 	struct Params {
-		anchor_id: AnchorId,
+		coupler_id: CouplerId,
 		interest: Interest,
 	}
 	let p: Params = serde_json::from_value(params)?;
-	Ok(NotificationEnvelope::AnchorUpdate { anchor_id: p.anchor_id, interest: p.interest })
+	Ok(NotificationEnvelope::CouplerUpdate { coupler_id: p.coupler_id, interest: p.interest })
 }
 
 fn parse_roster_changed(params: serde_json::Value) -> std::result::Result<NotificationEnvelope, serde_json::Error> {
