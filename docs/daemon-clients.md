@@ -46,7 +46,7 @@ The `client` module of `montre-daemon` exposes `DaemonClient`, a synchronous cli
 ### Hello world
 
 ```rust
-use montre_daemon::client::DaemonClient;
+use montre_daemon::client::{DaemonClient, NotificationEnvelope};
 use montre_daemon::protocol::{
 	ProcessKind, QueryExecuteParams, QueryHitsParams, RegisterParams,
 };
@@ -76,11 +76,18 @@ for hit in &page.hits {
 }
 ```
 
-Every protocol RPC has a typed method on `DaemonClient`. Each method takes its corresponding `*Params` struct (e.g. `QueryExecuteParams`, `QueryHitsParams`) and returns a `*Reply` (e.g. `QueryExecuteReply`, `QueryHitsReply`). For the full method list, see the rustdoc or `crates/montre-daemon/src/client.rs`.
+Every protocol RPC has a typed method on `DaemonClient`. The convention is one-Params-struct in, one-Reply-struct out:
+
+- Each method (with four exceptions noted below) takes exactly one positional argument: the operation's `*Params` struct from `montre_daemon::protocol`. For example, `client.query_execute(QueryExecuteParams { cql: "...".into() })`.
+- Each method returns `Result<*Reply, DaemonClientError>` where `*Reply` is the operation's reply struct, also in `montre_daemon::protocol`. Field names match the JSON shape in `daemon-protocol.md`.
+- Operations with no params (`corpus.info`, `session.unregister`, `alignment.list`, `query.list_named`) expose a zero-argument method. Their reply types are the same `*Reply` convention.
+- `publish_interest` is the lone fire-and-forget notification. It returns `Result<(), std::io::Error>`: there is no protocol response to wait for, but the underlying socket write can still fail. Don't swallow the result.
+
+For the full operation → params/reply map, see "Rust API reference" at the end of `daemon-protocol.md`.
 
 ### Notifications
 
-`DaemonClient::notifications()` returns a `Receiver<NotificationEnvelope>` fed by the client's background reader thread. The application polls or selects on it:
+`DaemonClient::notifications()` returns a `&std::sync::mpsc::Receiver<NotificationEnvelope>` fed by the client's background reader thread. The receiver is held by reference (not owned) and lives as long as the `DaemonClient`. The application polls or selects on it:
 
 ```rust
 let notifications = client.notifications();
@@ -101,7 +108,15 @@ The reader is the only code path that receives frames. If it exits — EOF, fram
 
 ### Sending notifications
 
-`session.publish_interest` is the lone client-to-daemon notification (fire-and-forget, no reply). `DaemonClient::publish_interest(interest)` sends it. Use this whenever the calling process is the master in one or more anchor relationships and its focus has moved.
+`session.publish_interest` is the lone client-to-daemon notification (fire-and-forget, no reply). `DaemonClient::publish_interest(params)` sends it. Use this whenever the calling process is the master in one or more anchor relationships and its focus has moved.
+
+The method returns `Result<(), std::io::Error>`. There is no protocol response, but the socket write can still fail (broken pipe, kernel buffer issues, etc.) — handle the error rather than dropping it.
+
+### Thread safety
+
+`DaemonClient` is `Send`: you can transfer ownership to another thread. It is **not** `Sync`: the notifications receiver is `!Sync`, and request methods take `&mut self`, so two threads cannot use the same `DaemonClient` simultaneously even with shared references.
+
+If you want a layout where one thread pumps notifications and another issues requests against the same connection, wrap the client in `Arc<Mutex<DaemonClient>>`. This serializes all access (notifications and requests both go through the mutex); for most current consumer shapes that's fine, since per-request hold times are short. If finer-grained concurrency becomes a problem, future API work could split the request side from the notification side.
 
 ### Cleanup
 

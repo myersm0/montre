@@ -167,17 +167,30 @@ The idle timeout is configurable via `montre serve --idle-timeout <seconds>` and
 
 Wire types referenced throughout the operation reference. JSON forms shown.
 
+### Rust mapping
+
+The Rust types backing the wire format live in `montre_daemon::protocol` (params, replies, shared types) and `montre_daemon::client` (notifications, errors). Mapping rules:
+
+- **Params and replies.** Each operation `namespace.method` has matching Rust structs `NamespaceMethodParams` and `NamespaceMethodReply` in `montre_daemon::protocol`. JSON field names match the Rust field names directly; integer types use the widths listed under "Primitives" above. A complete operation → Params/Reply table is in "Rust API reference" at the end of this document.
+- **Tagged enums.** JSON shapes with a `"type"` discriminator (`Interest`, `AnchorKind`) map to Rust enums with `#[serde(tag = "type")]`. Variant names and field names in the Rust type match the JSON exactly: e.g. `{ "type": "sentence", "doc": 3, "sent": 142 }` corresponds to `Interest::Sentence { doc: 3, sent: 142 }`.
+- **Enum string values.** Enums serialized as plain strings (`ProcessKind`, `ShutdownReason`, `ResultForm`, `LayerKind`, `Topic`, `InterestKind`, `AnchorKind` tag values) all use `snake_case` on the wire. The Rust identifiers are `UpperCamelCase`: `ProcessKind::External` ↔ `"external"`, `AnchorKind::KwicSelection` ↔ `"kwic_selection"`, etc.
+- **Notifications.** Server-pushed messages with method names `notification.snake_case_name` map to variants `NotificationEnvelope::UpperCamelName` in `montre_daemon::client` — for example `notification.anchor_update` → `NotificationEnvelope::AnchorUpdate`.
+- **Optional fields.** JSON `null` values map to Rust `Option<T>` with `None`. Some optional input fields can also be omitted entirely (serde `#[serde(default)]`) — both forms produce the same `None`.
+
 ### Primitives
 
 ```
-ProcessId       integer (assigned by daemon, unique within daemon's lifetime)
-AnchorId        integer (assigned by daemon, unique within daemon's lifetime)
-ResultHandle    string  (UUID v4, e.g. "r-3a7f8e2c-...")
-DocumentIndex   integer (u32, corpus-wide)
-SentenceIndex   integer (u32, corpus-wide)
-TokenPosition   integer (u64, corpus-wide global position)
+ProcessId       integer, u32 (assigned by daemon, unique within daemon's lifetime)
+AnchorId        integer, u32 (assigned by daemon, unique within daemon's lifetime)
+DaemonEpoch     integer, u64 (monotonically incremented on each daemon startup; see session.register)
+ResultHandle    string  (UUID v4 prefixed with `r-`, e.g. "r-3a7f8e2c-...")
+DocumentIndex   integer, u32 (corpus-wide)
+SentenceIndex   integer, u32 (corpus-wide; also used for within-document sentence indexing — context disambiguates)
+TokenPosition   integer, u64 (corpus-wide global position)
 Timestamp       string  (RFC 3339, e.g. "2026-05-10T14:30:00Z")
 ```
+
+Wire-side these are all JSON Numbers (subject to JSON's 2^53 integer precision limit, which the daemon's actual ranges fit comfortably). Rust clients should use the listed widths for direct deserialization via the `*Params` / `*Reply` types in `montre_daemon::protocol`.
 
 ### `Span`
 
@@ -224,6 +237,8 @@ String enum: `"reader" | "kwic" | "conllu" | "docs" | "vocab" | "results" | "ext
 ```
 
 `current_interest` is `null` if the process hasn't published one yet.
+
+`label` is `null` when the client passed no label at registration (and has not subsequently called `session.update_label`). The daemon does not substitute a default — it returns `null` to clients verbatim. Roster-rendering consumers may choose to display something like `unlabeled-{id}` for display, but the wire value remains `null`.
 
 ### `AnchorKind`
 
@@ -822,6 +837,83 @@ The response is sent before the daemon begins the broadcast-and-close sequence. 
 
 ---
 
+## Rust API reference
+
+Each operation has a typed method on `montre_daemon::DaemonClient`. The table maps the wire method to its Rust method, the params struct it takes, and the reply struct it returns. All struct types live in `montre_daemon::protocol` unless otherwise noted.
+
+For operations with **no params**, the client method takes no arguments — there is no zero-field `*Params` struct.
+
+| Method | Rust call | Params type | Reply type |
+|---|---|---|---|
+| `session.register` | `client.register(params)` | `RegisterParams` | `RegisterReply` |
+| `session.unregister` | `client.unregister()` | (none) | `OkReply` |
+| `session.update_label` | `client.update_label(params)` | `SessionUpdateLabelParams` | `OkReply` |
+| `session.roster` | `client.roster(params)` | `SessionRosterParams` | `SessionRosterReply` |
+| `session.publish_interest` | `client.publish_interest(params)` | `PublishInterestParams` | `Result<(), io::Error>` (notification) |
+| `corpus.info` | `client.corpus_info()` | (none) | `CorpusInfo` |
+| `corpus.documents` | `client.corpus_documents(params)` | `CorpusDocumentsParams` | `CorpusDocumentsReply` |
+| `corpus.layer_info` | `client.corpus_layer_info(params)` | `CorpusLayerInfoParams` | `LayerInfo` |
+| `text.surface` | `client.text_surface(params)` | `TextSurfaceParams` | `TextSurfaceReply` |
+| `text.sentence` | `client.text_sentence(params)` | `TextSentenceParams` | `TextSentenceReply` |
+| `text.sentences` | `client.text_sentences(params)` | `TextSentencesParams` | `TextSentencesReply` |
+| `text.document` | `client.text_document(params)` | `TextDocumentParams` | `TextDocumentReply` |
+| `text.annotations` | `client.text_annotations(params)` | `TextAnnotationsParams` | `TextAnnotationsReply` |
+| `text.annotations_range` | `client.text_annotations_range(params)` | `TextAnnotationsRangeParams` | `TextAnnotationsRangeReply` |
+| `alignment.list` | `client.alignment_list()` | (none) | `AlignmentListReply` |
+| `alignment.project` | `client.alignment_project(params)` | `AlignmentProjectParams` | `AlignmentProjectReply` |
+| `query.execute` | `client.query_execute(params)` | `QueryExecuteParams` | `QueryExecuteReply` |
+| `query.execute_count` | `client.query_execute_count(params)` | `QueryExecuteParams` (reused) | `QueryExecuteCountReply` |
+| `query.hits` | `client.query_hits(params)` | `QueryHitsParams` | `QueryHitsReply` |
+| `query.metadata` | `client.query_metadata(params)` | `QueryMetadataParams` | `ResultMetadata` |
+| `query.save` | `client.query_save(params)` | `QuerySaveParams` | `QuerySaveReply` |
+| `query.materialize` | `client.query_materialize(params)` | `QueryMaterializeParams` | `QueryMaterializeReply` |
+| `query.load` | `client.query_load(params)` | `QueryLoadParams` | `QueryLoadReply` |
+| `query.list_named` | `client.query_list_named()` | (none) | `QueryListNamedReply` |
+| `query.delete_named` | `client.query_delete_named(params)` | `QueryDeleteNamedParams` | `OkReply` |
+| `query.discard` | `client.query_discard(params)` | `QueryDiscardParams` | `OkReply` |
+| `anchor.create` | `client.anchor_create(params)` | `AnchorCreateParams` | `AnchorCreateReply` |
+| `anchor.remove` | `client.anchor_remove(params)` | `AnchorRemoveParams` | `OkReply` |
+| `anchor.list` | `client.anchor_list(params)` | `AnchorListParams` | `AnchorListReply` |
+| `subscription.subscribe` | `client.subscription_subscribe(params)` | `SubscriptionParams` | `OkReply` |
+| `subscription.unsubscribe` | `client.subscription_unsubscribe(params)` | `SubscriptionParams` | `OkReply` |
+| `daemon.shutdown` | (no client method in v1; clients use raw JSON-RPC if needed) | `DaemonShutdownParams` | `OkReply` |
+
+### Notifications
+
+Server-pushed notifications surface as variants of `NotificationEnvelope` (in `montre_daemon::client`):
+
+| Wire method | Rust variant | Payload struct |
+|---|---|---|
+| `notification.anchor_update` | `NotificationEnvelope::AnchorUpdate` | inline fields: `anchor_id`, `interest` |
+| `notification.roster_changed` | `NotificationEnvelope::RosterChanged` | inline fields: `event`, `process` |
+| `notification.named_results_changed` | `NotificationEnvelope::NamedResultsChanged` | inline fields: `event`, `name`, `metadata` |
+| `notification.shutdown` | `NotificationEnvelope::Shutdown` | inline fields: `reason`, `in_seconds` |
+
+### Shared types
+
+Types referenced from multiple params/replies (in `montre_daemon::protocol`):
+
+| Type | JSON shape | Notes |
+|---|---|---|
+| `Interest` | `{ "type": <kind>, ... }` | tagged enum, see "Interest" above |
+| `InterestKind` | string | one of `position` / `span` / `sentence` / `hit` / `results` / `document` |
+| `ProcessKind` | string | one of `reader` / `kwic` / `conllu` / `docs` / `vocab` / `results` / `external` |
+| `ProcessInfo` | object | full process descriptor |
+| `AnchorKind` | `{ "type": <kind>, ... }` | tagged enum, see "AnchorKind" above |
+| `Anchor` | object | `{ id, master, follower, kind }` |
+| `Hit` | object | `{ span, document_index, sentence_index, captures }` |
+| `Span` | object | `{ start, end }` |
+| `ResultMetadata` | object | full named-result descriptor |
+| `ResultForm` | string | one of `session` / `query_backed` / `materialized` |
+| `LayerInfo` | object | `{ name, kind, value_count }` |
+| `LayerKind` | string | one of `string` / `int` (also `unknown` for forward-compatibility) |
+| `AlignmentInfo` | object | full alignment descriptor |
+| `CorpusInfo` | object | full corpus descriptor |
+| `ShutdownReason` | string | one of `requested` / `idle_timeout` / `signal` / `fatal_error` |
+| `Topic` | string | one of `roster_changed` / `named_results_changed` |
+
+---
+
 ## Notification reference
 
 Server-pushed messages. Always JSON-RPC notifications (no `id`, no response expected).
@@ -878,7 +970,7 @@ Sent to all clients when daemon is shutting down. No subscription required.
 { "reason": "idle_timeout", "in_seconds": 0 }
 ```
 
-`reason` values: `"idle_timeout" | "signal" | "fatal_error"`. `in_seconds` is a hint about how long the daemon will wait before closing connections: `0` means immediate close (current v1 behavior for all reasons), positive values reserved for a future graceful-shutdown window. Clients should not rely on `in_seconds > 0` for anything load-bearing.
+`reason` values: `"requested" | "idle_timeout" | "signal" | "fatal_error"`. `requested` corresponds to a `daemon.shutdown` call from a registered client; `idle_timeout` and `signal` originate inside the daemon. `fatal_error` is reserved for an unexpected-error path; v1 daemons never currently emit it. `in_seconds` is a hint about how long the daemon will wait before closing connections: `0` means immediate close (current v1 behavior for all reasons), positive values reserved for a future graceful-shutdown window. Clients should not rely on `in_seconds > 0` for anything load-bearing.
 
 ---
 
