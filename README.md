@@ -270,4 +270,7 @@ A paper describing Montre is in preparation. In the meantime, if you use Montre 
 
 ## License
 
-Apache-2.0
+Apache-2.0. See `LICENSE`.
+
+Copyright 2026 Michael J. Myers 
+
