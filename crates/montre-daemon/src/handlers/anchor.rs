@@ -68,21 +68,21 @@ mod tests {
 				state_tx.clone(),
 				Arc::clone(&handle),
 				ProcessKind::External,
-				&["Position", "Span", "Sentence"],
-				&["Sentence"],
+				&["position", "span", "sentence"],
+				&["sentence"],
 			);
 			let (ctx_b, _rx_b) = register_context(
 				state_tx,
 				handle,
 				ProcessKind::External,
 				&[],
-				&["Sentence"],
+				&["sentence"],
 			);
 
 			let params = serde_json::json!({
 				"master_id": ctx_a.process_id.unwrap(),
 				"follower_id": ctx_b.process_id.unwrap(),
-				"kind": { "type": "SentenceMirror" },
+				"kind": { "type": "sentence_mirror" },
 			});
 			let result =
 				dispatch_request("anchor.create", Some(params), &mut ctx_a).unwrap();
@@ -98,7 +98,7 @@ mod tests {
 				state_tx.clone(),
 				Arc::clone(&handle),
 				ProcessKind::External,
-				&["Hit"],
+				&["hit"],
 				&[],
 			);
 			let (ctx_b, _rx_b) = register_context(
@@ -106,13 +106,13 @@ mod tests {
 				handle,
 				ProcessKind::External,
 				&[],
-				&["Sentence"],
+				&["sentence"],
 			);
 
 			let params = serde_json::json!({
 				"master_id": ctx_a.process_id.unwrap(),
 				"follower_id": ctx_b.process_id.unwrap(),
-				"kind": { "type": "SentenceMirror" },
+				"kind": { "type": "sentence_mirror" },
 			});
 			let err = dispatch_request("anchor.create", Some(params), &mut ctx_a).unwrap_err();
 			assert_eq!(err.code, error_codes::ANCHOR_INCOMPATIBLE);
@@ -127,13 +127,13 @@ mod tests {
 				state_tx,
 				handle,
 				ProcessKind::External,
-				&["Sentence"],
-				&["Sentence"],
+				&["sentence"],
+				&["sentence"],
 			);
 			let params = serde_json::json!({
 				"master_id": 9999,
 				"follower_id": ctx_a.process_id.unwrap(),
-				"kind": { "type": "SentenceMirror" },
+				"kind": { "type": "sentence_mirror" },
 			});
 			let err = dispatch_request("anchor.create", Some(params), &mut ctx_a).unwrap_err();
 			assert_eq!(err.code, error_codes::PROCESS_NOT_FOUND);
@@ -162,21 +162,21 @@ mod tests {
 				state_tx.clone(),
 				Arc::clone(&handle),
 				ProcessKind::External,
-				&["Position", "Span", "Sentence"],
-				&["Sentence"],
+				&["position", "span", "sentence"],
+				&["sentence"],
 			);
 			let (ctx_b, _rx_b) = register_context(
 				state_tx,
 				handle,
 				ProcessKind::External,
 				&[],
-				&["Sentence"],
+				&["sentence"],
 			);
 
 			let create_params = serde_json::json!({
 				"master_id": ctx_a.process_id.unwrap(),
 				"follower_id": ctx_b.process_id.unwrap(),
-				"kind": { "type": "SentenceMirror" },
+				"kind": { "type": "sentence_mirror" },
 			});
 			let create_result =
 				dispatch_request("anchor.create", Some(create_params), &mut ctx_a).unwrap();
@@ -230,21 +230,21 @@ mod tests {
 				state_tx.clone(),
 				Arc::clone(&handle),
 				ProcessKind::External,
-				&["Position", "Span", "Sentence"],
-				&["Sentence"],
+				&["position", "span", "sentence"],
+				&["sentence"],
 			);
 			let (ctx_b, _rx_b) = register_context(
 				state_tx,
 				handle,
 				ProcessKind::External,
 				&[],
-				&["Sentence"],
+				&["sentence"],
 			);
 
 			let create_params = serde_json::json!({
 				"master_id": ctx_a.process_id.unwrap(),
 				"follower_id": ctx_b.process_id.unwrap(),
-				"kind": { "type": "SentenceMirror" },
+				"kind": { "type": "sentence_mirror" },
 			});
 			dispatch_request("anchor.create", Some(create_params), &mut ctx_a).unwrap();
 
@@ -261,15 +261,15 @@ mod tests {
 				state_tx.clone(),
 				Arc::clone(&handle),
 				ProcessKind::External,
-				&["Position", "Span", "Sentence"],
-				&["Sentence"],
+				&["position", "span", "sentence"],
+				&["sentence"],
 			);
 			let (ctx_b, _rx_b) = register_context(
 				state_tx.clone(),
 				Arc::clone(&handle),
 				ProcessKind::External,
 				&[],
-				&["Sentence"],
+				&["sentence"],
 			);
 			let (ctx_c, _rx_c) = register_context(
 				state_tx,
@@ -282,7 +282,7 @@ mod tests {
 			let create_params = serde_json::json!({
 				"master_id": ctx_a.process_id.unwrap(),
 				"follower_id": ctx_b.process_id.unwrap(),
-				"kind": { "type": "SentenceMirror" },
+				"kind": { "type": "sentence_mirror" },
 			});
 			dispatch_request("anchor.create", Some(create_params), &mut ctx_a).unwrap();
 

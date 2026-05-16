@@ -783,7 +783,7 @@ mod tests {
 		let ctx = make_context(state_tx, outbound_tx, handle);
 
 		let params = serde_json::json!({
-			"interest": { "type": "Sentence", "doc": 0, "sent": 0 }
+			"interest": { "type": "sentence", "doc": 0, "sent": 0 }
 		});
 		dispatch_notification("session.publish_interest", Some(params), &ctx);
 
@@ -814,7 +814,7 @@ mod tests {
 				state_tx.clone(),
 				Arc::clone(&handle),
 				ProcessKind::External,
-				&["Position", "Span", "Sentence"],
+				&["position", "span", "sentence"],
 				&[],
 			);
 			let (follower_ctx, follower_outbound) = register_context(
@@ -822,7 +822,7 @@ mod tests {
 				Arc::clone(&handle),
 				ProcessKind::External,
 				&[],
-				&["Sentence"],
+				&["sentence"],
 			);
 
 			let master_pid = master_ctx.process_id.unwrap();
@@ -831,7 +831,7 @@ mod tests {
 			let anchor_params = serde_json::json!({
 				"master_id": master_pid,
 				"follower_id": follower_pid,
-				"kind": { "type": "SentenceMirror" }
+				"kind": { "type": "sentence_mirror" }
 			});
 			let reply = dispatch_request("anchor.create", Some(anchor_params), &mut master_ctx)
 				.expect("anchor.create");
@@ -847,7 +847,7 @@ mod tests {
 			let position = sent_reply["span"]["start"].as_u64().expect("span.start");
 
 			let publish_params = serde_json::json!({
-				"interest": { "type": "Position", "doc": source_doc, "position": position }
+				"interest": { "type": "position", "doc": source_doc, "position": position }
 			});
 			dispatch_notification("session.publish_interest", Some(publish_params), &master_ctx);
 
@@ -857,7 +857,7 @@ mod tests {
 			assert_eq!(payload["jsonrpc"], "2.0");
 			assert_eq!(payload["method"], "notification.anchor_update");
 			assert_eq!(payload["params"]["anchor_id"], anchor_id);
-			assert_eq!(payload["params"]["interest"]["type"], "Sentence");
+			assert_eq!(payload["params"]["interest"]["type"], "sentence");
 			assert_eq!(payload["params"]["interest"]["doc"], source_doc);
 			assert_eq!(payload["params"]["interest"]["sent"], 0);
 		});
@@ -874,7 +874,7 @@ mod tests {
 				state_tx.clone(),
 				Arc::clone(&handle),
 				ProcessKind::External,
-				&["Sentence", "Span"],
+				&["sentence", "span"],
 				&[],
 			);
 			let (follower_ctx, follower_outbound) = register_context(
@@ -882,7 +882,7 @@ mod tests {
 				Arc::clone(&handle),
 				ProcessKind::External,
 				&[],
-				&["Span"],
+				&["span"],
 			);
 
 			let master_pid = master_ctx.process_id.unwrap();
@@ -891,7 +891,7 @@ mod tests {
 			let anchor_params = serde_json::json!({
 				"master_id": master_pid,
 				"follower_id": follower_pid,
-				"kind": { "type": "Alignment", "name": "sentence" }
+				"kind": { "type": "alignment", "name": "sentence" }
 			});
 			let reply = dispatch_request("anchor.create", Some(anchor_params), &mut master_ctx)
 				.expect("anchor.create");
@@ -926,7 +926,7 @@ mod tests {
 			assert!(expected_count > 0, "test corpus must align this sentence to at least one target");
 
 			let publish_params = serde_json::json!({
-				"interest": { "type": "Sentence", "doc": source_doc, "sent": 0 }
+				"interest": { "type": "sentence", "doc": source_doc, "sent": 0 }
 			});
 			dispatch_notification("session.publish_interest", Some(publish_params), &master_ctx);
 
@@ -948,7 +948,7 @@ mod tests {
 				assert_eq!(payload["jsonrpc"], "2.0");
 				assert_eq!(payload["method"], "notification.anchor_update");
 				assert_eq!(payload["params"]["anchor_id"], anchor_id);
-				assert_eq!(payload["params"]["interest"]["type"], "Span");
+				assert_eq!(payload["params"]["interest"]["type"], "span");
 				assert_eq!(payload["params"]["interest"]["doc"], target_doc);
 			}
 		});

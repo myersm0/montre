@@ -23,6 +23,7 @@ pub enum ProcessKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum InterestKind {
 	Position,
 	Span,
@@ -33,7 +34,7 @@ pub enum InterestKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Interest {
 	Position { doc: u32, position: u64 },
 	Span { doc: u32, start: u64, end: u64 },
@@ -67,7 +68,7 @@ pub struct ProcessInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum AnchorKind {
 	SentenceMirror,
 	Alignment { name: String },
@@ -80,12 +81,12 @@ pub enum AnchorKind {
 impl AnchorKind {
 	pub fn type_name(&self) -> &'static str {
 		match self {
-			AnchorKind::SentenceMirror => "SentenceMirror",
-			AnchorKind::Alignment { .. } => "Alignment",
-			AnchorKind::KwicSelection => "KwicSelection",
-			AnchorKind::DocPickerSelection => "DocPickerSelection",
-			AnchorKind::NamedResultsSelection => "NamedResultsSelection",
-			AnchorKind::ConlluView => "ConlluView",
+			AnchorKind::SentenceMirror => "sentence_mirror",
+			AnchorKind::Alignment { .. } => "alignment",
+			AnchorKind::KwicSelection => "kwic_selection",
+			AnchorKind::DocPickerSelection => "doc_picker_selection",
+			AnchorKind::NamedResultsSelection => "named_results_selection",
+			AnchorKind::ConlluView => "conllu_view",
 		}
 	}
 }

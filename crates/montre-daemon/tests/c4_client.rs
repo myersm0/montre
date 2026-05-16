@@ -76,7 +76,7 @@ fn client_register_and_corpus_info() {
 	assert_eq!(reply.process_id, 1);
 	assert_eq!(reply.protocol_version, PROTOCOL_VERSION);
 	assert_eq!(reply.daemon_epoch, 1);
-	assert!(reply.capabilities.anchor_kinds.iter().any(|k| k == "SentenceMirror"));
+	assert!(reply.capabilities.anchor_kinds.iter().any(|k| k == "sentence_mirror"));
 
 	let info = client.corpus_info().expect("corpus info");
 	assert_eq!(info.name, "test-parallel");

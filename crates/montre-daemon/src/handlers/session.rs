@@ -120,14 +120,14 @@ mod tests {
 				state_tx.clone(),
 				Arc::clone(&handle),
 				ProcessKind::Reader,
-				&["Sentence"],
-				&["Sentence"],
+				&["sentence"],
+				&["sentence"],
 			);
 			let (_ctx_b, _rx_b) = register_context(
 				state_tx,
 				handle,
 				ProcessKind::Kwic,
-				&["Hit"],
+				&["hit"],
 				&[],
 			);
 
