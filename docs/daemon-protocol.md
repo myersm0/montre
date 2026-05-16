@@ -882,35 +882,38 @@ For operations with **no params**, the client method takes no arguments — ther
 
 Server-pushed notifications surface as variants of `NotificationEnvelope` (in `montre_daemon::client`):
 
-| Wire method | Rust variant | Payload struct |
+| Wire method | Rust variant | Payload fields |
 |---|---|---|
-| `notification.anchor_update` | `NotificationEnvelope::AnchorUpdate` | inline fields: `anchor_id`, `interest` |
-| `notification.roster_changed` | `NotificationEnvelope::RosterChanged` | inline fields: `event`, `process` |
-| `notification.named_results_changed` | `NotificationEnvelope::NamedResultsChanged` | inline fields: `event`, `name`, `metadata` |
-| `notification.shutdown` | `NotificationEnvelope::Shutdown` | inline fields: `reason`, `in_seconds` |
+| `notification.anchor_update` | `NotificationEnvelope::AnchorUpdate` | `anchor_id: AnchorId`, `interest: Interest` |
+| `notification.roster_changed` | `NotificationEnvelope::RosterChanged` | `event: String`, `process: ProcessInfo` |
+| `notification.named_results_changed` | `NotificationEnvelope::NamedResultsChanged` | `event: String`, `name: String`, `metadata: Option<ResultMetadata>` |
+| `notification.shutdown` | `NotificationEnvelope::Shutdown` | `reason: String`, `in_seconds: u32` |
+
+The `event` fields on `RosterChanged` and `NamedResultsChanged`, and the `reason` field on `Shutdown`, are typed as `String` on the client side even though the daemon emits values from a closed set (the wire-format values listed in the corresponding `*Reason`/`Topic`/etc. enums elsewhere in this document). Clients that want to pattern-match should compare against the documented string values directly.
 
 ### Shared types
 
-Types referenced from multiple params/replies (in `montre_daemon::protocol`):
+Types referenced from multiple params/replies. Rust types live in `montre_daemon::protocol` unless noted. For string-typed enums, the Rust variant identifiers follow the snake_case ↔ UpperCamelCase rule above; they are repeated parenthetically here for convenience.
 
 | Type | JSON shape | Notes |
 |---|---|---|
 | `Interest` | `{ "type": <kind>, ... }` | tagged enum, see "Interest" above |
-| `InterestKind` | string | one of `position` / `span` / `sentence` / `hit` / `results` / `document` |
-| `ProcessKind` | string | one of `reader` / `kwic` / `conllu` / `docs` / `vocab` / `results` / `external` |
+| `InterestKind` | string | `"position" / "span" / "sentence" / "hit" / "results" / "document"` (Rust: `InterestKind::Position / Span / Sentence / Hit / Results / Document`) |
+| `ProcessKind` | string | `"reader" / "kwic" / "conllu" / "docs" / "vocab" / "results" / "external"` (Rust: `ProcessKind::Reader / Kwic / Conllu / Docs / Vocab / Results / External`) |
 | `ProcessInfo` | object | full process descriptor |
 | `AnchorKind` | `{ "type": <kind>, ... }` | tagged enum, see "AnchorKind" above |
 | `Anchor` | object | `{ id, master, follower, kind }` |
 | `Hit` | object | `{ span, document_index, sentence_index, captures }` |
 | `Span` | object | `{ start, end }` |
 | `ResultMetadata` | object | full named-result descriptor |
-| `ResultForm` | string | one of `session` / `query_backed` / `materialized` |
+| `ResultForm` | string | `"session" / "query_backed" / "materialized"` (Rust: `ResultForm::Session / QueryBacked / Materialized`) |
 | `LayerInfo` | object | `{ name, kind, value_count }` |
-| `LayerKind` | string | one of `string` / `int` (also `unknown` for forward-compatibility) |
+| `LayerKind` | string | `"string" / "int"` (also `"unknown"` for forward-compatibility) (Rust: `LayerKind::String / Int / Unknown`) |
 | `AlignmentInfo` | object | full alignment descriptor |
 | `CorpusInfo` | object | full corpus descriptor |
-| `ShutdownReason` | string | one of `requested` / `idle_timeout` / `signal` / `fatal_error` |
-| `Topic` | string | one of `roster_changed` / `named_results_changed` |
+| `ShutdownReason` | string | `"requested" / "idle_timeout" / "signal" / "fatal_error"` (Rust: `ShutdownReason::Requested / IdleTimeout / Signal / FatalError`). Daemon-side emit type; client-side `NotificationEnvelope::Shutdown.reason` is typed as `String`. |
+| `Topic` | string | `"roster_changed" / "named_results_changed"` (Rust: `Topic::RosterChanged / NamedResultsChanged`) |
+| `OkReply` | object | `{ "ok": true }` — used for operations that confirm success with no other payload. Always emits `ok: true`; if you receive a successful response at all, the field will be `true`. |
 
 ---
 
@@ -1078,7 +1081,7 @@ The client side of the protocol — auto-spawn dance, length-prefix framing, JSO
 
 - `connect_or_spawn(corpus_path)` / `connect(socket_path)` for setup.
 - One typed method per protocol operation. Each method takes the operation's `*Params` struct (from `montre_daemon::protocol`) and returns the operation's `*Reply` struct. For example: `client.query_execute(QueryExecuteParams { cql: "...".into() })` returns `Result<QueryExecuteReply>`.
-- `notifications()` returns a `Receiver<NotificationEnvelope>` for server-pushed notifications (anchor updates, roster changes, named-results changes, shutdown).
+- `notifications()` returns a `&std::sync::mpsc::Receiver<NotificationEnvelope>` for server-pushed notifications (anchor updates, roster changes, named-results changes, shutdown).
 - `publish_interest(params)` is fire-and-forget; no reply.
 - `close(self)` for an explicit unregister-and-shutdown sequence.
 
