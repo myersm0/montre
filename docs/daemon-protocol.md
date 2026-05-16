@@ -155,11 +155,11 @@ After registration, the client sends requests and notifications; the daemon send
 
 ### Idle shutdown
 
-When the last registered process disconnects, daemon starts an idle timer (default: 600 seconds). If no client connects before expiry, daemon exits.
+When the last registered process disconnects, daemon starts an idle timer (default: 1800 seconds, i.e. 30 minutes). If no client connects before expiry, daemon exits.
 
 Reconnects within the window cancel the timer.
 
-The idle timeout is configurable via `montre serve --idle-timeout <seconds>` and defaults to 600 (10 minutes). Setting `0` disables idle shutdown.
+The idle timeout is configurable via `montre serve --idle-timeout <seconds>` and defaults to 1800 (30 minutes). Setting `0` disables idle shutdown.
 
 ---
 
@@ -340,6 +340,13 @@ Note: `Anchor` uses `master` / `follower`; `anchor.create` params use `master_id
 
 Organized by namespace. Each operation lists method name, params shape, result shape, and possible error codes.
 
+**Conventions applied across every operation:**
+
+- Every operation other than `session.register` may return error `1002` (not registered) if called before registration completes. Per-operation error lists below do not repeat this.
+- Every operation may return `-32602` (invalid params) when the params object fails to deserialize or fails operation-specific validation, and `-32603` (internal error) when daemon-internal invariants are violated (missing index layer, lookup inconsistency, etc.). Per-operation error lists below cover application-code paths only.
+- `session.publish_interest` is the only client→daemon method that may be sent as a JSON-RPC notification (no `id`). All other methods sent without an `id` are silently dropped. Notifications received before `session.register` completes are also silently dropped.
+- Triggers for `notification.roster_changed` and `notification.named_results_changed` are listed in the "Subscription topics" table; per-operation pages below do not repeat them.
+
 ### `session`
 
 #### `session.register`
@@ -364,13 +371,18 @@ Initial handshake. Must be the first message on a new connection.
   "server_version": "0.6.0",
   "protocol_version": 1,
   "daemon_epoch": 17,
-  "capabilities": { "observations": false, "workspaces": false }
+  "capabilities": {
+    "observations": false,
+    "workspaces": false,
+    "anchor_kinds": ["sentence_mirror", "alignment", "kwic_selection",
+                     "doc_picker_selection", "named_results_selection", "conllu_view"]
+  }
 }
 ```
 
-`daemon_epoch` increments on daemon restart and on any persistent state reset. Clients that cache handle IDs, anchor IDs, or process IDs across reconnects must check this on each registration: if the epoch has changed, all prior cached IDs are invalid and must be re-acquired.
+See "Capability advertisement" below for the schema. `daemon_epoch` increments on daemon restart and on any persistent state reset. Clients that cache handle IDs, anchor IDs, or process IDs across reconnects must check this on each registration: if the epoch has changed, all prior cached IDs are invalid and must be re-acquired.
 
-**Errors**: `1000` (protocol mismatch), `1001` (corpus load failure).
+**Errors**: `1000` (protocol mismatch), `-32600` (called twice on the same connection — a connection accepts exactly one `session.register`). Corpus load failure is *not* a wire error: if the corpus fails to load, the daemon never starts, and the client sees a connect failure (ENOENT or ECONNREFUSED) instead.
 
 #### `session.unregister`
 
@@ -770,7 +782,7 @@ Anchors automatically generate `notification.anchor_update` for followers; no su
 
 **Result**: `{ "ok": true }`
 
-**Errors**: `1600` (unknown topic).
+**Errors**: `1500` (caller's process not found in roster — typically can't happen unless the registration was torn down concurrently), `1600` (unknown topic).
 
 #### `subscription.unsubscribe`
 
@@ -783,9 +795,30 @@ Anchors automatically generate `notification.anchor_update` for followers; no su
 | Topic | Notification | Trigger |
 |---|---|---|
 | `roster_changed` | `notification.roster_changed` | Process registers, unregisters, or updates label |
-| `named_results_changed` | `notification.named_results_changed` | `query.save`, `query.delete_named` |
+| `named_results_changed` | `notification.named_results_changed` | `query.save`, `query.materialize`, `query.delete_named` |
 
 Future topics (v2): `observations_changed`, `workspaces_changed`.
+
+### `daemon`
+
+#### `daemon.shutdown`
+
+Request that the daemon shut down. Any registered client may call this; access is not gated. Daemon side-effects:
+1. Broadcasts `notification.shutdown` to every registered client with the supplied `reason`.
+2. Waits 500ms for clients to drain.
+3. Closes all active connections.
+4. Exits.
+
+**Params**:
+```json
+{ "reason": "requested" }
+```
+
+`reason` is optional and defaults to `"requested"`. Accepted values: `"requested" | "idle_timeout" | "signal" | "fatal_error"`. The value flows through to `notification.shutdown.reason` so clients can distinguish a user-initiated shutdown from one triggered by other paths. In practice clients call this with the default and let the other reasons originate inside the daemon (signal handler, idle timer, fatal-path).
+
+**Result**: `{ "ok": true }`
+
+The response is sent before the daemon begins the broadcast-and-close sequence. Clients should expect EOF on their connection shortly after receiving the response.
 
 ---
 
@@ -872,7 +905,6 @@ JSON-RPC standard error structure:
 | Code | Meaning |
 |---|---|
 | 1000 | Protocol version mismatch |
-| 1001 | Corpus load failure |
 | 1002 | Not registered (operation called before `session.register`) |
 | 1100 | CQL parse error |
 | 1101 | Plan error |
@@ -923,48 +955,42 @@ Other application codes use `data` for context as appropriate.
 
 ### Daemon layout
 
-The daemon is invoked as `montre serve`, a subcommand of the main `montre` binary. The implementation lives in a library crate `montre-daemon` (workspace member of the `montre` repo), which exposes a `run(corpus_path, options)` entry point. `montre-cli` adds a `serve` subcommand that calls into it. One binary, no separate `montre-daemon` executable — keeps auto-spawn straightforward (`Command::new(current_exe).arg("serve")...`), keeps distribution to a single artifact, and keeps daemon and CLI versions in lockstep.
+The daemon is invoked as `montre serve`, a subcommand of the main `montre` binary. The implementation lives in a library crate `montre-daemon` (workspace member of the `montre` repo), which exposes a `serve(options)` entry point. `montre-cli` adds a `serve` subcommand that calls into it. One binary, no separate `montre-daemon` executable — keeps auto-spawn straightforward (`Command::new(current_exe).arg("serve")...`), keeps distribution to a single artifact, and keeps daemon and CLI versions in lockstep.
 
-Recommended starting layout (single crate, no submodule subdirectories at first):
+As-implemented layout:
 
 ```
-src/
-├── main.rs       — entry, signal handling, listener
-├── rpc.rs        — wire framing, JSON-RPC dispatch
-├── state.rs      — corpus + results + roster + anchors + subscriptions
-├── client.rs     — shared client module (see below)
-└── lib.rs
+crates/montre-daemon/
+├── src/
+│   ├── lib.rs        — entry point (`serve`), corpus open, state directory, listener wire-up
+│   ├── dispatch.rs   — wire framing, JSON-RPC parsing, request/notification dispatch, per-connection reader/writer threads
+│   ├── state.rs      — state-owning thread: roster, anchors, subscriptions, named results, idle-shutdown timer
+│   ├── client.rs     — `DaemonClient`: shared client module (see below)
+│   ├── protocol.rs   — wire types (params/replies, error codes, enums)
+│   ├── storage.rs    — atomic file writes, epoch persistence, named-results persistence
+│   ├── shutdown.rs   — coordinator that closes active streams during shutdown
+│   ├── signals.rs    — SIGHUP/SIGINT/SIGTERM handling
+│   └── handlers/     — per-namespace request handlers (alignment, anchor, corpus, daemon, query, session, subscription, text)
+├── examples/
+│   └── serve_local.rs — bare daemon launcher for protocol-exploration tooling
+└── tests/            — integration tests (over real Unix sockets)
 ```
 
-Split modules out as concerns grow apart: `storage.rs` (results, history, observations) vs `coordination.rs` (roster, anchors, subscriptions) is the natural first split. Subdirectory layout (`session/`, `anchors/`, etc.) only when individual modules want their own files.
-
-Discipline that matters from day one: don't put unrelated concepts in the same function. Module reorganization is mechanical when the boundaries are honest.
+See `crates/montre-daemon/README.md` for the architectural rationale (state-thread invariants, the move-once Hit channel, query execution staying off the state thread, etc.).
 
 ### Shared client module
 
-The client side of the protocol — auto-spawn dance, length-prefix framing, JSON-RPC dispatch, response correlation, notification routing — lives as a `client` module within `montre-daemon`, exposed publicly. Every consumer uses it: TUI binaries, the FFI surface, future Rust scripts, integration tests. Writing it once keeps protocol adherence centralized; a wire-format change happens in one place.
+The client side of the protocol — auto-spawn dance, length-prefix framing, JSON-RPC dispatch, response correlation, notification routing — lives as a `client` module within `montre-daemon`, exposed publicly as `montre_daemon::DaemonClient`. Every consumer uses it: TUI binaries, the FFI surface, future Rust scripts, integration tests. Writing it once keeps protocol adherence centralized; a wire-format change happens in one place.
 
-Sketch of the public surface:
+`DaemonClient`'s public surface exposes:
 
-```rust
-pub struct DaemonClient { /* connection + handle */ }
+- `connect_or_spawn(corpus_path)` / `connect(socket_path)` for setup.
+- One typed method per protocol operation. Each method takes the operation's `*Params` struct (from `montre_daemon::protocol`) and returns the operation's `*Reply` struct. For example: `client.query_execute(QueryExecuteParams { cql: "...".into() })` returns `Result<QueryExecuteReply>`.
+- `notifications()` returns a `Receiver<NotificationEnvelope>` for server-pushed notifications (anchor updates, roster changes, named-results changes, shutdown).
+- `publish_interest(params)` is fire-and-forget; no reply.
+- `close(self)` for an explicit unregister-and-shutdown sequence.
 
-impl DaemonClient {
-    pub fn connect_or_spawn(corpus_path: &Path) -> Result<Self>;
-    pub fn connect(socket_path: &Path) -> Result<Self>;
-
-    pub fn register(&mut self, params: RegisterParams) -> Result<RegisterResult>;
-    pub fn query_execute(&mut self, cql: &str) -> Result<QueryExecuteResult>;
-    pub fn query_hits(&mut self, handle: &ResultHandle, offset: u64, limit: u64) -> Result<HitPage>;
-    pub fn publish_interest(&mut self, interest: Interest);  // notification, no Result
-    // ... one method per protocol operation
-
-    pub fn notifications(&self) -> &Receiver<Notification>;
-    pub fn close(self) -> Result<()>;
-}
-```
-
-FFI exposes a couple of thin entry points wrapping `DaemonClient` (`montre_client_open`, `montre_client_query`, etc.). Julia and Python bindings call these and don't reimplement the handshake. Direct Rust consumers (TUI binaries) use `DaemonClient` natively.
+Method signatures, parameter types, and return types are all in `crates/montre-daemon/src/client.rs`. Companion guide for client authors: `daemon-clients.md`. FFI entry points wrapping `DaemonClient` for Julia/Python are planned but not yet shipped.
 
 Co-locating the client with the daemon (rather than as a separate `montre-daemon-client` crate) keeps the wire types in one place — same `serde`-derived structs serialize on both sides. If a downstream consumer ever wants the client without pulling in the daemon's storage/coordination code, the module can be split out then; not premature now.
 
@@ -1001,13 +1027,18 @@ JSONL (newline-delimited JSON, one record per line). Append-only. Crash-tolerant
 **Named results store queries by default, not hit lists.** A saved result records the CQL plus metadata; hits are re-derived on access via `query.hits`. Re-execution costs are negligible at current corpus sizes (milliseconds), the on-disk record is tiny (a CQL string), and a query-backed result survives corpus rebuilds gracefully — it may produce different hits after rebuild, but it doesn't break.
 
 ```rust
-enum StoredResult {
-    QueryBacked { cql: String, hit_count: u64, created_at: Timestamp },
-    Materialized { cql: String, hits: Vec<Hit>, materialized_at: Timestamp },
+// On-disk record (one JSON object per line in named_results.jsonl):
+struct StoredNamedResult {
+    cql: String,
+    hit_count: u64,
+    created_at: Timestamp,
+    // ... and the standard ResultMetadata fields
 }
 ```
 
-Materialization is an explicit opt-in via `query.materialize(name)`, for cases where snapshot semantics matter: "preserve exactly the hits I had on this date, regardless of corpus changes." Materialized results are larger on disk but fully reproducible.
+Only the query-backed form is persisted. `query.materialize` produces an in-memory snapshot that is *not* written to disk: across a daemon restart, a previously-materialized result reloads as query-backed and re-executes against the current corpus.
+
+Materialization is an explicit opt-in via `query.materialize(name)`, for cases where snapshot semantics matter within a daemon's lifetime: "preserve exactly the hits I had since this morning's daemon start, regardless of corpus changes." Once the daemon exits, the snapshot is gone — clients that need durable point-in-time hits should export them externally (e.g., write the CQL plus the current hit list to their own file). Persistent materialization is a v2 consideration; it would require either storing the full hit list on disk (large) or storing the corpus revision the snapshot was taken against (requires versioned corpus metadata).
 
 **Failure mode for query-backed results**: if a saved query's CQL no longer parses or executes against a rebuilt corpus (e.g., a layer was renamed), `query.hits` for that handle returns error `1204` (stored query invalid). This is a feature, not a bug — the alternative would be silently incorrect results. The user can re-save the result with updated CQL or migrate to materialized form before the rebuild.
 
@@ -1100,7 +1131,7 @@ User runs `montre reader corpus/`. Reader binary:
 1. Computes socket path `~/.local/share/montre/sockets/9c2f8e3a4b1d7f06.sock`.
 2. Attempts `connect()` → `ENOENT`.
 3. Spawns `montre serve corpus/` detached.
-4. Polls `connect()` every 100ms with backoff.
+4. Polls `connect()` starting at 50ms, doubling with exponential backoff up to a 250ms ceiling per attempt; 10-second total deadline.
 5. After ~2 seconds, daemon is ready; connect succeeds.
 6. Reader sends `session.register`.
 

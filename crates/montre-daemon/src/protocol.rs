@@ -620,7 +620,6 @@ impl ProtocolError {
 
 pub mod error_codes {
 	pub const PROTOCOL_VERSION_MISMATCH: i32 = 1000;
-	pub const CORPUS_LOAD_FAILURE: i32 = 1001;
 	pub const NOT_REGISTERED: i32 = 1002;
 	pub const CQL_PARSE_ERROR: i32 = 1100;
 	pub const PLAN_ERROR: i32 = 1101;
