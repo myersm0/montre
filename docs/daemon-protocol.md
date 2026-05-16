@@ -192,17 +192,17 @@ Half-open `[start, end)` over global token positions.
 Tagged union by `type` field:
 
 ```json
-{ "type": "Position",  "doc": 3,  "position": 1247 }
-{ "type": "Span",      "doc": 3,  "start": 1247, "end": 1289 }
-{ "type": "Sentence",  "doc": 3,  "sent": 142 }
-{ "type": "Hit",       "result": "r-3a7f...", "hit_idx": 17 }
-{ "type": "Results",   "handle": "r-3a7f..." }
-{ "type": "Document",  "doc": 3 }
+{ "type": "position",  "doc": 3,  "position": 1247 }
+{ "type": "span",      "doc": 3,  "start": 1247, "end": 1289 }
+{ "type": "sentence",  "doc": 3,  "sent": 142 }
+{ "type": "hit",       "result": "r-3a7f...", "hit_idx": 17 }
+{ "type": "results",   "handle": "r-3a7f..." }
+{ "type": "document",  "doc": 3 }
 ```
 
 ### `InterestKind`
 
-String enum: `"Position" | "Span" | "Sentence" | "Hit" | "Results" | "Document"`.
+String enum: `"position" | "span" | "sentence" | "hit" | "results" | "document"`.
 
 ### `ProcessKind`
 
@@ -217,9 +217,9 @@ String enum: `"reader" | "kwic" | "conllu" | "docs" | "vocab" | "results" | "ext
   "id": 4,
   "kind": "reader",
   "label": "fr/la-parure",
-  "provides": ["Position", "Span", "Sentence", "Document"],
-  "consumes": ["Position", "Span", "Sentence", "Document"],
-  "current_interest": { "type": "Sentence", "doc": 3, "sent": 142 }
+  "provides": ["position", "span", "sentence", "document"],
+  "consumes": ["position", "span", "sentence", "document"],
+  "current_interest": { "type": "sentence", "doc": 3, "sent": 142 }
 }
 ```
 
@@ -230,12 +230,12 @@ String enum: `"reader" | "kwic" | "conllu" | "docs" | "vocab" | "results" | "ext
 Tagged union by `type` field:
 
 ```json
-{ "type": "SentenceMirror" }
-{ "type": "Alignment", "name": "labse" }
-{ "type": "KwicSelection" }
-{ "type": "DocPickerSelection" }
-{ "type": "NamedResultsSelection" }
-{ "type": "ConlluView" }
+{ "type": "sentence_mirror" }
+{ "type": "alignment", "name": "labse" }
+{ "type": "kwic_selection" }
+{ "type": "doc_picker_selection" }
+{ "type": "named_results_selection" }
+{ "type": "conllu_view" }
 ```
 
 #### Transformation matrix
@@ -260,7 +260,7 @@ Each anchor kind defines (a) which master `provides` `InterestKind`s it accepts,
   "id": 7,
   "master": 4,
   "follower": 9,
-  "kind": { "type": "Alignment", "name": "labse" }
+  "kind": { "type": "alignment", "name": "labse" }
 }
 ```
 
@@ -352,8 +352,8 @@ Initial handshake. Must be the first message on a new connection.
   "protocol_version": 1,
   "kind": "reader",
   "label": "fr/la-parure",
-  "provides": ["Position", "Span", "Sentence", "Document"],
-  "consumes": ["Position", "Span", "Sentence", "Document"]
+  "provides": ["position", "span", "sentence", "document"],
+  "consumes": ["position", "span", "sentence", "document"]
 }
 ```
 
@@ -386,7 +386,7 @@ Notification (no response). Sent by master processes whenever their focus change
 
 **Params**:
 ```json
-{ "interest": { "type": "Sentence", "doc": 3, "sent": 142 } }
+{ "interest": { "type": "sentence", "doc": 3, "sent": 142 } }
 ```
 
 Daemon walks anchor table, applies transformations, pushes `notification.anchor_update` to followers.
@@ -397,7 +397,7 @@ List all currently-connected processes.
 
 **Params**:
 ```json
-{ "filter": { "provides_any_of": ["Sentence", "Span"] } }
+{ "filter": { "provides_any_of": ["sentence", "span"] } }
 ```
 
 `filter` is optional. Subfields:
@@ -728,7 +728,7 @@ Empty array if no edge exists from the source span (gap).
 {
   "master_id": 4,
   "follower_id": 9,
-  "kind": { "type": "Alignment", "name": "labse" }
+  "kind": { "type": "alignment", "name": "labse" }
 }
 ```
 
@@ -801,7 +801,7 @@ Sent to followers when their master's interest changes. Daemon has already appli
 ```json
 {
   "anchor_id": 7,
-  "interest": { "type": "Span", "doc": 7, "start": 980, "end": 1010 }
+  "interest": { "type": "span", "doc": 7, "start": 980, "end": 1010 }
 }
 ```
 
@@ -909,8 +909,8 @@ For `1400` (anchor incompatibility):
   "code": 1400,
   "message": "Anchor incompatibility",
   "data": {
-    "master_provides": ["Position", "Span"],
-    "follower_consumes": ["Hit", "Results"]
+    "master_provides": ["position", "span"],
+    "follower_consumes": ["hit", "results"]
   }
 }
 ```
@@ -1019,8 +1019,8 @@ The `capabilities` object in `session.register` response advertises optional fea
 {
   "observations": false,
   "workspaces": false,
-  "anchor_kinds": ["SentenceMirror", "Alignment", "KwicSelection",
-                   "DocPickerSelection", "NamedResultsSelection", "ConlluView"]
+  "anchor_kinds": ["sentence_mirror", "alignment", "kwic_selection",
+                   "doc_picker_selection", "named_results_selection", "conllu_view"]
 }
 ```
 
@@ -1076,19 +1076,19 @@ Two clients connected. KWIC at `process_id: 4`, reader at `process_id: 9`.
 Reader establishes the anchor:
 ```json
 { "jsonrpc": "2.0", "id": 17, "method": "anchor.create",
-  "params": { "master_id": 4, "follower_id": 9, "kind": { "type": "KwicSelection" } } }
+  "params": { "master_id": 4, "follower_id": 9, "kind": { "type": "kwic_selection" } } }
 ```
 
 Daemon responds with `anchor_id`. KWIC user navigates to a different hit; KWIC publishes:
 ```json
 { "jsonrpc": "2.0", "method": "session.publish_interest",
-  "params": { "interest": { "type": "Hit", "result": "r-3a7f...", "hit_idx": 23 } } }
+  "params": { "interest": { "type": "hit", "result": "r-3a7f...", "hit_idx": 23 } } }
 ```
 
 Daemon transforms `Hit -> Sentence` (resolves the hit's containing sentence) and pushes to the reader:
 ```json
 { "jsonrpc": "2.0", "method": "notification.anchor_update",
-  "params": { "anchor_id": 7, "interest": { "type": "Sentence", "doc": 3, "sent": 142 } } }
+  "params": { "anchor_id": 7, "interest": { "type": "sentence", "doc": 3, "sent": 142 } } }
 ```
 
 Reader scrolls to the new sentence and highlights it.

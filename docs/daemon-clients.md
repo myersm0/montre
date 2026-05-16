@@ -33,7 +33,7 @@ A daemon exits when any one of these happens:
 
 - a registered client sends `daemon.shutdown` (with `reason: "requested"`)
 - the daemon receives SIGHUP, SIGINT, or SIGTERM (`reason: "signal"`)
-- the idle timeout elapses with no clients registered (`reason: "idle_timeout"`, default 600s, configurable, `0` disables)
+- the idle timeout elapses with no clients registered (`reason: "idle_timeout"`, default 30 minutes (1800s), configurable, `0` disables)
 
 All three paths go through the same sequence: broadcast `notification.shutdown` to every registered client, wait 500ms, close active streams, exit. Clients see one notification carrying the `reason`, then EOF.
 
@@ -47,11 +47,13 @@ The `client` module of `montre-daemon` exposes `DaemonClient`, a synchronous cli
 
 ```rust
 use montre_daemon::client::DaemonClient;
-use montre_daemon::protocol::{RegisterParams, ProcessKind};
+use montre_daemon::protocol::{
+	ProcessKind, QueryExecuteParams, QueryHitsParams, RegisterParams,
+};
 use std::path::Path;
 
 let mut client = DaemonClient::connect_or_spawn(Path::new("./my-corpus"))?;
-let session = client.register(RegisterParams {
+let register_reply = client.register(RegisterParams {
 	protocol_version: 1,
 	kind: ProcessKind::External,
 	label: Some("my-script".into()),
@@ -59,36 +61,40 @@ let session = client.register(RegisterParams {
 	consumes: vec![],
 })?;
 
-let result = client.query_execute(r#"[pos="NOUN"]"#)?;
+let result = client.query_execute(QueryExecuteParams {
+	cql: r#"[pos="NOUN"]"#.into(),
+})?;
 println!("{} hits", result.hit_count);
 
-let page = client.query_hits(&result.handle, 0, 100)?;
+let page = client.query_hits(QueryHitsParams {
+	handle: result.handle.clone(),
+	offset: 0,
+	limit: 100,
+})?;
 for hit in &page.hits {
 	println!("{}..{}", hit.span.start, hit.span.end);
 }
 ```
 
-Every protocol RPC has a typed method on `DaemonClient`. Type names match `protocol.rs` (e.g. `QueryExecuteResult`, `HitPage`, `Interest`). For the full method list, see the rustdoc or `crates/montre-daemon/src/client.rs`.
+Every protocol RPC has a typed method on `DaemonClient`. Each method takes its corresponding `*Params` struct (e.g. `QueryExecuteParams`, `QueryHitsParams`) and returns a `*Reply` (e.g. `QueryExecuteReply`, `QueryHitsReply`). For the full method list, see the rustdoc or `crates/montre-daemon/src/client.rs`.
 
 ### Notifications
 
-`DaemonClient::notifications()` returns a `Receiver<Notification>` fed by the client's background reader thread. The application polls or selects on it:
+`DaemonClient::notifications()` returns a `Receiver<NotificationEnvelope>` fed by the client's background reader thread. The application polls or selects on it:
 
 ```rust
 let notifications = client.notifications();
 
-std::thread::spawn(move || {
-	while let Ok(notif) = notifications.recv() {
-		match notif {
-			Notification::AnchorUpdate { anchor_id, interest } => {
-				handle_focus_change(anchor_id, interest);
-			}
-			Notification::RosterChanged { event, process } => { /* ... */ }
-			Notification::Shutdown { reason, .. } => break,
-			_ => {}
+while let Ok(notif) = notifications.recv() {
+	match notif {
+		NotificationEnvelope::AnchorUpdate { anchor_id, interest } => {
+			handle_focus_change(anchor_id, interest);
 		}
+		NotificationEnvelope::RosterChanged { event, process } => { /* ... */ }
+		NotificationEnvelope::Shutdown { reason, .. } => break,
+		_ => {}
 	}
-});
+}
 ```
 
 The reader is the only code path that receives frames. If it exits — EOF, framing error, protocol error, panic — it marks the client closed and releases all pending response waiters before terminating. Request methods on a closed client return an error rather than blocking forever.
@@ -142,7 +148,7 @@ daemon> corpus.info
 daemon> query.execute {"cql": "[pos=\"NOUN\"]"}
 daemon> query.hits {"handle": "r-3a7f...", "offset": 0, "limit": 5}
 daemon> subscription.subscribe {"topic": "roster_changed"}
-daemon> .notify session.publish_interest {"interest": {"type": "Sentence", "doc": 0, "sent": 0}}
+daemon> .notify session.publish_interest {"interest": {"type": "sentence", "doc": 0, "sent": 0}}
 ```
 
 Notifications from the daemon (anchor updates, roster changes, named-results changes, shutdown) print asynchronously as they arrive; the REPL stays usable.
@@ -161,12 +167,18 @@ The `.notify` form is the primary way to exercise master-side anchor behavior fr
 ### Run a query and page through hits
 
 ```rust
-let result = client.query_execute(r#"[pos="ADJ"] [pos="NOUN"]"#)?;
+let result = client.query_execute(QueryExecuteParams {
+	cql: r#"[pos="ADJ"] [pos="NOUN"]"#.into(),
+})?;
 let total = result.hit_count;
 
 let mut offset = 0;
 while offset < total {
-	let page = client.query_hits(&result.handle, offset, 1000)?;
+	let page = client.query_hits(QueryHitsParams {
+		handle: result.handle.clone(),
+		offset,
+		limit: 1000,
+	})?;
 	for hit in &page.hits {
 		process(hit);
 	}
@@ -179,12 +191,23 @@ while offset < total {
 ### Save and reuse a named result
 
 ```rust
-let result = client.query_execute(r#"[pos="ADJ"] [pos="NOUN"]"#)?;
-client.query_save(&result.handle, "adj-noun-pairs")?;
+let result = client.query_execute(QueryExecuteParams {
+	cql: r#"[pos="ADJ"] [pos="NOUN"]"#.into(),
+})?;
+client.query_save(QuerySaveParams {
+	handle: result.handle.clone(),
+	name: "adj-noun-pairs".into(),
+})?;
 
 // later, in any session:
-let loaded = client.query_load("adj-noun-pairs")?;
-let page = client.query_hits(&loaded.handle, 0, 100)?;
+let loaded = client.query_load(QueryLoadParams {
+	name: "adj-noun-pairs".into(),
+})?;
+let page = client.query_hits(QueryHitsParams {
+	handle: loaded.handle.clone(),
+	offset: 0,
+	limit: 100,
+})?;
 ```
 
 Named results are query-backed by default: the daemon persists the CQL plus metadata, and re-executes on `query.load`. This survives daemon restarts and corpus rebuilds gracefully (the query may produce different hits after a rebuild, but doesn't break). For snapshot semantics — preserving exactly the hit list as it stood at a point in time — call `query.materialize` to freeze the current hits. Materialization is session-scoped and does not persist across daemon restarts.
@@ -197,7 +220,7 @@ The protocol's anchor mechanism lets one process (the master) drive another (the
 
 ```rust
 // Follower: register with consumes=[Sentence], wait for anchor_update notifications
-let follower_session = follower.register(RegisterParams {
+let follower_reply = follower.register(RegisterParams {
 	protocol_version: 1,
 	kind: ProcessKind::External,
 	label: Some("reader".into()),
@@ -206,7 +229,7 @@ let follower_session = follower.register(RegisterParams {
 })?;
 
 // Master: register with provides=[Hit], create an anchor between us
-let master_session = master.register(RegisterParams {
+let master_reply = master.register(RegisterParams {
 	protocol_version: 1,
 	kind: ProcessKind::External,
 	label: Some("kwic".into()),
@@ -215,16 +238,18 @@ let master_session = master.register(RegisterParams {
 })?;
 
 let anchor = master.anchor_create(AnchorCreateParams {
-	master_id: master_session.process_id,
-	follower_id: follower_session.process_id,
+	master_id: master_reply.process_id,
+	follower_id: follower_reply.process_id,
 	kind: AnchorKind::KwicSelection,
 })?;
 
 // Master: when the user selects a hit in the KWIC, publish it
-master.publish_interest(Interest::Hit {
-	result: result_handle.clone(),
-	hit_idx: 23,
-});
+master.publish_interest(PublishInterestParams {
+	interest: Interest::Hit {
+		result: result_handle.clone(),
+		hit_idx: 23,
+	},
+})?;
 // → daemon transforms (KwicSelection: Hit → containing Sentence)
 // → follower receives notification.anchor_update with Interest::Sentence
 ```
@@ -240,9 +265,11 @@ Each `AnchorKind` defines what the master can publish (`provides`) and what the 
 ### Subscribe to roster changes
 
 ```rust
-client.subscription_subscribe("roster_changed")?;
+client.subscription_subscribe(SubscriptionParams {
+	topic: "roster_changed".into(),
+})?;
 // notifications appear on the channel as processes come and go:
-// Notification::RosterChanged { event: "registered", process: ProcessInfo { ... } }
+// NotificationEnvelope::RosterChanged { event: "registered", process: ProcessInfo { ... } }
 ```
 
 Topics in v1: `roster_changed`, `named_results_changed`. Anchor updates do not require a subscription — they flow automatically to the follower of each anchor.
