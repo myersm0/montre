@@ -7,8 +7,27 @@ asynchronous notification handling.
 
 usage:
     python3 dclient.py [--socket /path/to/sock]
+                       [--kind KIND] [--label LABEL]
+                       [--provides KINDS] [--consumes KINDS]
 
 defaults to /tmp/montre-daemon.sock (matches `cargo run --example serve_local`).
+
+registration flags control how this client registers with the daemon:
+    --kind        ProcessKind (default: external)
+    --label       optional roster label
+    --provides    comma-separated InterestKinds this process publishes
+    --consumes    comma-separated InterestKinds this process consumes
+
+to exercise coupler behavior end-to-end, launch two instances: a follower
+with the InterestKinds it consumes, and a master that provides them.
+example:
+    # terminal 1 (follower)
+    python3 dclient.py --kind reader --consumes sentence
+
+    # terminal 2 (master)
+    python3 dclient.py --kind kwic --provides hit
+    daemon> coupler.create {"master_id": 2, "follower_id": 1, "kind": {"type": "sentence_mirror"}}
+    daemon> .notify session.publish_interest {"interest": {"type": "hit", ...}}
 
 REPL commands:
     method                       send method as a request (waits for response)
@@ -17,16 +36,8 @@ REPL commands:
     .help                        list available methods
     .quit / exit / EOF           disconnect
 
-server-pushed notifications (anchor_update, roster_changed,
+server-pushed notifications (coupler_update, roster_changed,
 named_results_changed, shutdown) print as they arrive.
-
-examples:
-    daemon> corpus.info
-    daemon> query.execute {"cql": "[pos=\\"NOUN\\"]"}
-    daemon> query.hits {"handle": "r-...", "offset": 0, "limit": 10}
-    daemon> subscription.subscribe {"topic": "roster_changed"}
-    daemon> .notify session.publish_interest {"interest": {"type": "Sentence", "doc": 0, "sent": 0}}
-    daemon> daemon.shutdown {"reason": "requested"}
 """
 
 import argparse
@@ -64,9 +75,9 @@ methods = [
 	"query.discard",
 	"alignment.list",
 	"alignment.project",
-	"anchor.create",
-	"anchor.remove",
-	"anchor.list",
+	"coupler.create",
+	"coupler.remove",
+	"coupler.list",
 	"subscription.subscribe",
 	"subscription.unsubscribe",
 	"daemon.shutdown",
@@ -144,7 +155,7 @@ def parse_method_and_params(text):
 	try:
 		return method, json.loads(params_text)
 	except json.JSONDecodeError as e:
-		raise ValueError(f"bad params JSON: {e}")
+		raise ValueError(f"bad params JSON: {e}\n  input: {params_text}")
 
 
 def parse_command(line):
@@ -203,6 +214,27 @@ def main():
 		epilog=__doc__,
 	)
 	parser.add_argument("--socket", default="/tmp/montre-daemon.sock")
+	parser.add_argument(
+		"--kind",
+		default="external",
+		choices=["external", "reader", "kwic", "conllu", "docs", "vocab", "results"],
+		help="ProcessKind to register as (default: external)",
+	)
+	parser.add_argument(
+		"--label",
+		help="optional process label shown in roster",
+	)
+	parser.add_argument(
+		"--provides",
+		default="",
+		help="comma-separated InterestKinds published by this process "
+			"(position, span, sentence, hit, results, document)",
+	)
+	parser.add_argument(
+		"--consumes",
+		default="",
+		help="comma-separated InterestKinds consumed by this process",
+	)
 	args = parser.parse_args()
 
 	sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -227,11 +259,19 @@ def main():
 	)
 	reader.start()
 
+	register_params = {"protocol_version": 1, "kind": args.kind}
+	if args.label:
+		register_params["label"] = args.label
+	if args.provides:
+		register_params["provides"] = [k.strip() for k in args.provides.split(",") if k.strip()]
+	if args.consumes:
+		register_params["consumes"] = [k.strip() for k in args.consumes.split(",") if k.strip()]
+
 	try:
 		reply = send_request(
 			sock, responses, 0,
 			"session.register",
-			{"protocol_version": 1, "kind": "external"},
+			register_params,
 		)
 	except (ConnectionError, queue.Empty) as e:
 		print(f"register failed: {e}")

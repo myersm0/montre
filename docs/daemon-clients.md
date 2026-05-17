@@ -151,7 +151,12 @@ Use cases: a known socket path for `dclient.py`, no auto-spawn race during debug
 
 ### `dclient.py`
 
-Pure-stdlib Python REPL. Connects to a running daemon, auto-registers as a `ProcessKind::External` client, and accepts method invocations.
+Pure-stdlib Python REPL. Connects to a running daemon, auto-registers, and accepts method invocations. Registration is shaped by CLI flags:
+
+- `--kind` — one of `external` (default), `reader`, `kwic`, `conllu`, `docs`, `vocab`, `results`
+- `--label` — optional roster label
+- `--provides` — comma-separated `InterestKind`s the process publishes
+- `--consumes` — comma-separated `InterestKind`s the process consumes
 
 ```
 $ python3 tools/dclient.py --socket /tmp/montre-daemon.sock
@@ -175,7 +180,19 @@ REPL commands:
 - `.help` — list known methods
 - `.quit` / `exit` / EOF — disconnect
 
-The `.notify` form is the primary way to exercise master-side coupler behavior from the REPL: register a follower in another `dclient.py` instance, create a coupler between them, then `.notify session.publish_interest` from the master and watch the follower receive transformed `notification.coupler_update` messages.
+The `.notify` form is the primary way to exercise master-side coupler behavior from the REPL. Launch two `dclient.py` instances with appropriate registration shape:
+
+```
+# terminal 1 — follower
+python3 dclient.py --kind reader --consumes sentence
+
+# terminal 2 — master
+python3 dclient.py --kind kwic --provides hit
+daemon> coupler.create {"master_id": 2, "follower_id": 1, "kind": {"type": "sentence_mirror"}}
+daemon> .notify session.publish_interest {"interest": {"type": "hit", "result": "r-...", "hit_idx": 0}}
+```
+
+The follower receives transformed `notification.coupler_update` messages.
 
 ## Common patterns
 
