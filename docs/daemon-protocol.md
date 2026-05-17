@@ -192,6 +192,17 @@ Timestamp       string  (RFC 3339, e.g. "2026-05-10T14:30:00Z")
 
 Wire-side these are all JSON Numbers (subject to JSON's 2^53 integer precision limit, which the daemon's actual ranges fit comfortably). Rust clients should use the listed widths for direct deserialization via the `*Params` / `*Reply` types in `montre_daemon::protocol`.
 
+### Identifier field naming
+
+Identifier values (`ProcessId`, `CouplerId`, `ResultHandle`, ...) appear as JSON fields under two conventions:
+
+- **Bare `id`** inside a typed struct, for that struct's own identifier — `ProcessInfo.id`, `Coupler.id`.
+- **`<concept>_id`** everywhere else — in flat replies returning an identifier (`session.register` → `process_id`, `coupler.create` → `coupler_id`), in notification payloads (`notification.coupler_update.coupler_id`), and as a parameter referring to an existing entity (`coupler.remove` params → `coupler_id`).
+
+The Rust types in `montre_daemon::protocol` reflect this via per-field serde naming where needed; clients deserializing into the typed structs see the same shape as the wire.
+
+Exception: `Coupler.master` and `Coupler.follower` are bare `ProcessId` references with no `_id` suffix, while the `coupler.create` params side uses `master_id` / `follower_id`. This historical divergence is noted at the `Coupler` definition; new types should follow the rule above.
+
 ### `Span`
 
 ```json
