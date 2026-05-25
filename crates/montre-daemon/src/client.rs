@@ -96,11 +96,12 @@ impl DaemonClient {
 
 		match UnixStream::connect(&socket) {
 			Ok(stream) => return Self::connect_inner(stream),
-			Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => {}
+			Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+			Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
+				confirm_stale_then_unlink(&socket, &state_dir)?;
+			}
 			Err(e) => return Err(e.into()),
 		}
-
-		let _ = std::fs::remove_file(&socket);
 
 		let binary = resolve_daemon_binary(options.daemon_binary.as_deref())?;
 		let stderr_capture = spawn_daemon_with_stderr_capture(&binary, corpus_path)?;
@@ -692,6 +693,22 @@ fn acquire_spawn_lock(state_dir: &Path) -> io::Result<SpawnLockGuard> {
 	Ok(SpawnLockGuard { _file: file })
 }
 
+fn confirm_stale_then_unlink(socket: &Path, state_dir: &Path) -> Result<()> {
+	if crate::storage::daemon_lock_held(state_dir)? {
+		return Err(DaemonClientError::Transport(io::Error::new(
+			io::ErrorKind::ConnectionRefused,
+			format!(
+				"daemon appears alive at {} (daemon.lock held) but the socket is \
+				 refusing connections, likely a saturated accept queue or a daemon \
+				 mid-startup. Retry shortly.",
+				socket.display(),
+			),
+		)));
+	}
+	let _ = std::fs::remove_file(socket);
+	Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -853,6 +870,52 @@ mod tests {
 			Err(other) => panic!("expected SpawnFailed, got {:?}", other),
 			Ok(_) => panic!("expected SpawnFailed, got Ok(_)"),
 		}
+	}
+
+	#[test]
+	fn confirm_stale_refuses_to_unlink_when_daemon_lock_is_held() {
+		let temp = tempfile::TempDir::new().expect("tempdir");
+		let state_dir = temp.path();
+		let socket = state_dir.join("stand-in.sock");
+		std::fs::write(&socket, b"placeholder").expect("create placeholder socket file");
+
+		let live_lock = crate::storage::acquire_daemon_lock(state_dir).expect("acquire");
+
+		let result = confirm_stale_then_unlink(&socket, state_dir);
+		match result {
+			Err(DaemonClientError::Transport(e)) => {
+				assert_eq!(e.kind(), io::ErrorKind::ConnectionRefused);
+			}
+			Err(other) => panic!("expected Transport(ConnectionRefused), got {:?}", other),
+			Ok(()) => panic!("expected error, got Ok"),
+		}
+		assert!(
+			socket.exists(),
+			"socket placeholder must not be unlinked while daemon.lock is held",
+		);
+
+		drop(live_lock);
+	}
+
+	#[test]
+	fn confirm_stale_unlinks_when_daemon_lock_is_free() {
+		let temp = tempfile::TempDir::new().expect("tempdir");
+		let state_dir = temp.path();
+		let socket = state_dir.join("stand-in.sock");
+		std::fs::write(&socket, b"placeholder").expect("create placeholder socket file");
+
+		confirm_stale_then_unlink(&socket, state_dir).expect("should succeed");
+		assert!(!socket.exists(), "stale socket should be unlinked");
+	}
+
+	#[test]
+	fn confirm_stale_is_a_noop_when_socket_already_absent() {
+		let temp = tempfile::TempDir::new().expect("tempdir");
+		let state_dir = temp.path();
+		let socket = state_dir.join("never-existed.sock");
+
+		confirm_stale_then_unlink(&socket, state_dir).expect("should succeed");
+		assert!(!socket.exists());
 	}
 }
 

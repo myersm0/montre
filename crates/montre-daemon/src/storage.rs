@@ -41,6 +41,20 @@ pub(crate) fn acquire_daemon_lock(state_dir: &Path) -> io::Result<DaemonLock> {
 	}
 }
 
+pub(crate) fn daemon_lock_held(state_dir: &Path) -> io::Result<bool> {
+	let path = state_dir.join("daemon.lock");
+	let file = OpenOptions::new()
+		.create(true)
+		.write(true)
+		.read(true)
+		.truncate(false)
+		.open(&path)?;
+	match file.try_lock_exclusive()? {
+		true => Ok(false),
+		false => Ok(true),
+	}
+}
+
 fn state_dir_under(root: &Path, corpus_id: &str) -> io::Result<PathBuf> {
 	let dir = root.join(corpus_id);
 	std::fs::create_dir_all(&dir)?;
@@ -222,6 +236,16 @@ mod tests {
 		drop(first);
 		let second = acquire_daemon_lock(temp.path()).expect("second after release");
 		drop(second);
+	}
+
+	#[test]
+	fn daemon_lock_held_reflects_acquisition_state() {
+		let temp = TempDir::new().expect("tempdir");
+		assert!(!daemon_lock_held(temp.path()).expect("probe before acquire"));
+		let held = acquire_daemon_lock(temp.path()).expect("acquire");
+		assert!(daemon_lock_held(temp.path()).expect("probe while held"));
+		drop(held);
+		assert!(!daemon_lock_held(temp.path()).expect("probe after release"));
 	}
 
 	#[test]
