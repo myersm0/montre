@@ -121,16 +121,16 @@ When a client tries to connect to a corpus and finds no daemon:
 
 1. Client computes the expected socket path.
 2. Attempts `connect()`. If it succeeds: skip to handshake.
-3. On `ENOENT` (no socket file) or `ECONNREFUSED` (stale socket file with no listener):
-   - If a stale socket file exists, the client unlinks it.
-   - Client spawns `montre serve <corpus_path>` as a detached process (double-fork or platform equivalent).
-   - Client polls `connect()` with exponential backoff, 10-second total timeout.
-4. On successful connect, proceed to handshake.
-5. On timeout, fail with a daemon-unreachable error.
+3. On `ENOENT` (no socket file): no daemon exists. Spawn `montre serve <corpus_path>` as a detached process (double-fork or platform equivalent), then poll `connect()` with exponential backoff, 10-second total timeout.
+4. On `ECONNREFUSED` (socket file exists but refuses connection): the file could be a stale leftover from a crashed daemon, or a live daemon with a saturated accept queue, or a daemon mid-startup that has acquired `daemon.lock` but not yet bound the socket. The client distinguishes by probing `<state_dir>/daemon.lock`:
+   - If the lock is free: no daemon owns the socket, the file is stale. Unlink it and proceed as in step 3.
+   - If the lock is held: a daemon is alive. Do **not** unlink the socket. Return an error suggesting retry (the saturation or startup transient should clear in milliseconds).
+5. On successful connect, proceed to handshake.
+6. On spawn-poll timeout, fail with a daemon-unreachable error including any captured stderr from the spawned process.
 
 Race condition (two clients spawn simultaneously): file-locking on a sentinel file in the sockets directory. Loser of the race connects to the winner's daemon.
 
-Daemon-side exclusion is independent of the client-side spawn lock: the daemon itself acquires an exclusive `fs4` flock on `<state_dir>/daemon.lock` immediately after resolving the state directory and holds it for the process's lifetime. Any second `montre serve` invocation against the same corpus — whether via auto-spawn racing past the sentinel, a direct manual invocation, or a separate tool — fails fast rather than clobbering the running listener. The two layers protect against different failure modes: the client-side lock keeps auto-spawn races to a single winner; the daemon-side lock prevents split-brain regardless of how the second daemon was launched.
+Daemon-side exclusion is independent of the client-side spawn lock: the daemon itself acquires an exclusive `fs4` flock on `<state_dir>/daemon.lock` immediately after resolving the state directory and holds it for the process's lifetime. Any second `montre serve` invocation against the same corpus — whether via auto-spawn racing past the sentinel, a direct manual invocation, or a separate tool — fails fast rather than clobbering the running listener. The two layers protect against different failure modes: the client-side lock keeps auto-spawn races to a single winner; the daemon-side lock prevents split-brain regardless of how the second daemon was launched. The `daemon.lock`-probe in step 4 above is the third related mechanism: it lets the client side use the same lock as a non-destructive liveness signal so a saturated daemon's socket isn't accidentally unlinked.
 
 ### Handshake
 
