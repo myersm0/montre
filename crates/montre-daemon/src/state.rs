@@ -20,6 +20,8 @@ use crate::CorpusHandle;
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+const SHUTDOWN_NOTIFY_BUDGET: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub(crate) type ResultsTable = HashMap<ResultHandle, Arc<ResultEntry>>;
 
 pub(crate) struct ResultEntry {
@@ -627,17 +629,6 @@ impl State {
 		}
 	}
 
-	fn broadcast_to_all(&self, payload: serde_json::Value) {
-		let recipients: Vec<(ProcessId, SyncSender<Outbound>)> = self
-			.roster
-			.iter()
-			.map(|(pid, c)| (*pid, c.outbound.clone()))
-			.collect();
-		for (pid, outbound) in recipients {
-			let _ = try_send_outbound(&outbound, payload.clone(), pid);
-		}
-	}
-
 	fn initiate_shutdown(&self, reason: ShutdownReason) {
 		if !self.coordinator.mark_shutting_down() {
 			tracing::debug!("shutdown already in progress; ignoring duplicate initiate");
@@ -679,7 +670,19 @@ impl State {
 			"method": "notification.shutdown",
 			"params": serde_json::to_value(params).unwrap_or(serde_json::Value::Null),
 		});
-		self.broadcast_to_all(payload);
+		let recipients: Vec<(ProcessId, SyncSender<Outbound>)> = self
+			.roster
+			.iter()
+			.map(|(pid, c)| (*pid, c.outbound.clone()))
+			.collect();
+		for (pid, outbound) in recipients {
+			let _ = send_outbound_with_timeout(
+				&outbound,
+				payload.clone(),
+				SHUTDOWN_NOTIFY_BUDGET,
+				pid,
+			);
+		}
 	}
 }
 
@@ -878,6 +881,33 @@ fn try_send_outbound(
 			Err(())
 		}
 		Err(std::sync::mpsc::TrySendError::Disconnected(_)) => Err(()),
+	}
+}
+
+fn send_outbound_with_timeout(
+	tx: &SyncSender<Outbound>,
+	mut payload: serde_json::Value,
+	timeout: std::time::Duration,
+	process_id: ProcessId,
+) -> Result<(), ()> {
+	let deadline = std::time::Instant::now() + timeout;
+	loop {
+		match tx.try_send(payload) {
+			Ok(()) => return Ok(()),
+			Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return Err(()),
+			Err(std::sync::mpsc::TrySendError::Full(returned)) => {
+				payload = returned;
+			}
+		}
+		if std::time::Instant::now() >= deadline {
+			tracing::warn!(
+				process_id = process_id,
+				timeout_ms = timeout.as_millis() as u64,
+				"outbound send timed out; dropping critical notification",
+			);
+			return Err(());
+		}
+		std::thread::sleep(std::time::Duration::from_millis(5));
 	}
 }
 
@@ -1823,6 +1853,64 @@ mod tests {
 		assert_eq!(message_b["method"], "notification.shutdown");
 		assert_eq!(message_a["params"]["reason"], "requested");
 		assert_eq!(message_a["params"]["in_seconds"], 0);
+	}
+
+	#[test]
+	fn notify_shutdown_waits_for_outbound_drain_under_backpressure() {
+		use std::time::Duration;
+
+		let coordinator = ShutdownCoordinator::dummy();
+		let mut state = State::new(1, make_handle(), Arc::clone(&coordinator));
+
+		let (tx, rx) = sync_channel::<Outbound>(1);
+		state.register(make_register_params(ProcessKind::Reader), tx.clone()).unwrap();
+
+		tx.send(serde_json::json!({"filler": true}))
+			.expect("filler fits in the fresh empty channel");
+
+		let drainer = std::thread::spawn(move || {
+			std::thread::sleep(Duration::from_millis(60));
+			let mut messages = Vec::new();
+			while let Ok(message) = rx.recv_timeout(Duration::from_millis(150)) {
+				messages.push(message);
+			}
+			messages
+		});
+
+		state.initiate_shutdown(ShutdownReason::Requested);
+
+		let drained = drainer.join().expect("drainer join");
+		assert!(
+			drained.iter().any(|m| m["method"] == "notification.shutdown"),
+			"shutdown notification must arrive after the channel drains; got {:?}",
+			drained,
+		);
+	}
+
+	#[test]
+	fn notify_shutdown_bounded_when_outbound_never_drains() {
+		use std::time::{Duration, Instant};
+
+		let coordinator = ShutdownCoordinator::dummy();
+		let mut state = State::new(1, make_handle(), Arc::clone(&coordinator));
+
+		let (tx, rx) = sync_channel::<Outbound>(1);
+		state.register(make_register_params(ProcessKind::Reader), tx.clone()).unwrap();
+
+		tx.send(serde_json::json!({"filler": true}))
+			.expect("filler fits in the fresh empty channel");
+
+		let _block = rx;
+
+		let start = Instant::now();
+		state.initiate_shutdown(ShutdownReason::Requested);
+		let elapsed = start.elapsed();
+
+		assert!(
+			elapsed < Duration::from_secs(1),
+			"initiate_shutdown must be bounded even when a recipient is wedged; took {:?}",
+			elapsed,
+		);
 	}
 
 	#[test]
