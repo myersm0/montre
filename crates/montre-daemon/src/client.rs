@@ -18,6 +18,8 @@ use crate::protocol::*;
 pub type Result<T> = std::result::Result<T, DaemonClientError>;
 type PendingMap = Arc<Mutex<HashMap<u64, SyncSender<ResponseMessage>>>>;
 
+const CLOSE_UNREGISTER_DEADLINE: Duration = Duration::from_millis(100);
+
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonClientError {
 	#[error("transport error: {0}")]
@@ -30,6 +32,8 @@ pub enum DaemonClientError {
 	Protocol(ProtocolError),
 	#[error("timed out waiting for daemon socket")]
 	SpawnTimeout,
+	#[error("timed out waiting for daemon response")]
+	RequestTimeout,
 	#[error("reader thread closed")]
 	ReaderClosed,
 }
@@ -246,6 +250,32 @@ impl DaemonClient {
 		P: serde::Serialize,
 		R: serde::de::DeserializeOwned,
 	{
+		self.request_inner(method, params, None)
+	}
+
+	fn request_with_timeout<P, R>(
+		&mut self,
+		method: &str,
+		params: Option<P>,
+		timeout: Duration,
+	) -> Result<R>
+	where
+		P: serde::Serialize,
+		R: serde::de::DeserializeOwned,
+	{
+		self.request_inner(method, params, Some(timeout))
+	}
+
+	fn request_inner<P, R>(
+		&mut self,
+		method: &str,
+		params: Option<P>,
+		timeout: Option<Duration>,
+	) -> Result<R>
+	where
+		P: serde::Serialize,
+		R: serde::de::DeserializeOwned,
+	{
 		if self.reader_closed.load(Ordering::SeqCst) {
 			return Err(DaemonClientError::ReaderClosed);
 		}
@@ -263,7 +293,19 @@ impl DaemonClient {
 			return Err(e);
 		}
 
-		let response = reply_rx.recv().map_err(|_| DaemonClientError::ReaderClosed)?;
+		let response = match timeout {
+			Some(deadline) => match reply_rx.recv_timeout(deadline) {
+				Ok(message) => message,
+				Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+					lock_pending(&self.pending).remove(&id);
+					return Err(DaemonClientError::RequestTimeout);
+				}
+				Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+					return Err(DaemonClientError::ReaderClosed);
+				}
+			},
+			None => reply_rx.recv().map_err(|_| DaemonClientError::ReaderClosed)?,
+		};
 		match response {
 			ResponseMessage::Result(value) => serde_json::from_value(value)
 				.map_err(|e| DaemonClientError::Envelope(format!("invalid result for {}: {}", method, e))),
@@ -320,7 +362,13 @@ impl DaemonClient {
 			return Ok(());
 		}
 
-		let _ = self.unregister();
+		if !self.reader_closed.load(Ordering::SeqCst) {
+			let _ = self.request_with_timeout::<(), OkReply>(
+				"session.unregister",
+				None,
+				CLOSE_UNREGISTER_DEADLINE,
+			);
+		}
 		if let Ok(writer) = self.writer.lock() {
 			let _ = writer.shutdown(std::net::Shutdown::Both);
 		}
