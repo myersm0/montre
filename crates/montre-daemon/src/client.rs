@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
@@ -18,6 +18,11 @@ use crate::protocol::*;
 pub type Result<T> = std::result::Result<T, DaemonClientError>;
 type PendingMap = Arc<Mutex<HashMap<u64, SyncSender<ResponseMessage>>>>;
 
+const CLOSE_UNREGISTER_DEADLINE: Duration = Duration::from_millis(100);
+const SPAWN_POLL_TIMEOUT_DEFAULT: Duration = Duration::from_secs(10);
+const DAEMON_BINARY_NAME: &str = "montre";
+const MONTRE_BINARY_ENV: &str = "MONTRE_BINARY";
+
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonClientError {
 	#[error("transport error: {0}")]
@@ -28,8 +33,12 @@ pub enum DaemonClientError {
 	Envelope(String),
 	#[error("protocol error {0:?}")]
 	Protocol(ProtocolError),
-	#[error("timed out waiting for daemon socket")]
-	SpawnTimeout,
+	#[error("could not locate the `montre` daemon binary: {0}")]
+	DaemonBinaryNotFound(String),
+	#[error("daemon failed to start within the spawn deadline\n--- daemon stderr ---\n{stderr}\n---")]
+	SpawnFailed { stderr: String },
+	#[error("timed out waiting for daemon response")]
+	RequestTimeout,
 	#[error("reader thread closed")]
 	ReaderClosed,
 }
@@ -58,6 +67,12 @@ pub struct DaemonClient {
 	closed: AtomicBool,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ConnectOptions {
+	pub daemon_binary: Option<PathBuf>,
+	pub spawn_timeout: Option<Duration>,
+}
+
 impl DaemonClient {
 	pub fn connect(socket_path: &Path) -> Result<Self> {
 		let stream = UnixStream::connect(socket_path)?;
@@ -65,6 +80,10 @@ impl DaemonClient {
 	}
 
 	pub fn connect_or_spawn(corpus_path: &Path) -> Result<Self> {
+		Self::connect_or_spawn_with(corpus_path, ConnectOptions::default())
+	}
+
+	pub fn connect_or_spawn_with(corpus_path: &Path, options: ConnectOptions) -> Result<Self> {
 		let socket = crate::socket_path_for(corpus_path)?;
 		match UnixStream::connect(&socket) {
 			Ok(stream) => return Self::connect_inner(stream),
@@ -77,13 +96,17 @@ impl DaemonClient {
 
 		match UnixStream::connect(&socket) {
 			Ok(stream) => return Self::connect_inner(stream),
-			Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => {}
+			Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+			Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
+				confirm_stale_then_unlink(&socket, &state_dir)?;
+			}
 			Err(e) => return Err(e.into()),
 		}
 
-		let _ = std::fs::remove_file(&socket);
-		spawn_daemon_detached(corpus_path)?;
-		poll_connect_with_backoff(&socket, Duration::from_secs(10))
+		let binary = resolve_daemon_binary(options.daemon_binary.as_deref())?;
+		let stderr_capture = spawn_daemon_with_stderr_capture(&binary, corpus_path)?;
+		let timeout = options.spawn_timeout.unwrap_or(SPAWN_POLL_TIMEOUT_DEFAULT);
+		poll_connect_with_backoff(&socket, timeout, stderr_capture)
 	}
 
 	fn connect_inner(stream: UnixStream) -> Result<Self> {
@@ -246,6 +269,32 @@ impl DaemonClient {
 		P: serde::Serialize,
 		R: serde::de::DeserializeOwned,
 	{
+		self.request_inner(method, params, None)
+	}
+
+	fn request_with_timeout<P, R>(
+		&mut self,
+		method: &str,
+		params: Option<P>,
+		timeout: Duration,
+	) -> Result<R>
+	where
+		P: serde::Serialize,
+		R: serde::de::DeserializeOwned,
+	{
+		self.request_inner(method, params, Some(timeout))
+	}
+
+	fn request_inner<P, R>(
+		&mut self,
+		method: &str,
+		params: Option<P>,
+		timeout: Option<Duration>,
+	) -> Result<R>
+	where
+		P: serde::Serialize,
+		R: serde::de::DeserializeOwned,
+	{
 		if self.reader_closed.load(Ordering::SeqCst) {
 			return Err(DaemonClientError::ReaderClosed);
 		}
@@ -263,7 +312,19 @@ impl DaemonClient {
 			return Err(e);
 		}
 
-		let response = reply_rx.recv().map_err(|_| DaemonClientError::ReaderClosed)?;
+		let response = match timeout {
+			Some(deadline) => match reply_rx.recv_timeout(deadline) {
+				Ok(message) => message,
+				Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+					lock_pending(&self.pending).remove(&id);
+					return Err(DaemonClientError::RequestTimeout);
+				}
+				Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+					return Err(DaemonClientError::ReaderClosed);
+				}
+			},
+			None => reply_rx.recv().map_err(|_| DaemonClientError::ReaderClosed)?,
+		};
 		match response {
 			ResponseMessage::Result(value) => serde_json::from_value(value)
 				.map_err(|e| DaemonClientError::Envelope(format!("invalid result for {}: {}", method, e))),
@@ -320,7 +381,13 @@ impl DaemonClient {
 			return Ok(());
 		}
 
-		let _ = self.unregister();
+		if !self.reader_closed.load(Ordering::SeqCst) {
+			let _ = self.request_with_timeout::<(), OkReply>(
+				"session.unregister",
+				None,
+				CLOSE_UNREGISTER_DEADLINE,
+			);
+		}
 		if let Ok(writer) = self.writer.lock() {
 			let _ = writer.shutdown(std::net::Shutdown::Both);
 		}
@@ -494,33 +561,120 @@ fn parse_shutdown(params: serde_json::Value) -> std::result::Result<Notification
 	Ok(NotificationEnvelope::Shutdown { reason: p.reason, in_seconds: p.in_seconds })
 }
 
-fn spawn_daemon_detached(corpus_path: &Path) -> io::Result<()> {
-	let exe = std::env::current_exe()?;
-	Command::new(exe)
+fn spawn_daemon_with_stderr_capture(
+	binary: &Path,
+	corpus_path: &Path,
+) -> io::Result<tempfile::NamedTempFile> {
+	let stderr_capture = tempfile::Builder::new()
+		.prefix("montre-spawn-")
+		.suffix(".log")
+		.tempfile()?;
+	let stderr_handle = stderr_capture.reopen()?;
+	Command::new(binary)
 		.arg("serve")
 		.arg(corpus_path)
 		.stdin(std::process::Stdio::null())
 		.stdout(std::process::Stdio::null())
-		.stderr(std::process::Stdio::null())
+		.stderr(std::process::Stdio::from(stderr_handle))
 		.spawn()?;
-	Ok(())
+	Ok(stderr_capture)
 }
 
-fn poll_connect_with_backoff(socket: &Path, timeout: Duration) -> Result<DaemonClient> {
+fn poll_connect_with_backoff(
+	socket: &Path,
+	timeout: Duration,
+	stderr_capture: tempfile::NamedTempFile,
+) -> Result<DaemonClient> {
 	let deadline = Instant::now() + timeout;
 	let mut sleep = Duration::from_millis(50);
 	loop {
 		match UnixStream::connect(socket) {
-			Ok(stream) => return DaemonClient::connect_inner(stream),
+			Ok(stream) => {
+				drop(stderr_capture);
+				return DaemonClient::connect_inner(stream);
+			}
 			Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => {}
-			Err(e) => return Err(e.into()),
+			Err(e) => {
+				drop(stderr_capture);
+				return Err(e.into());
+			}
 		}
 		if Instant::now() >= deadline {
-			return Err(DaemonClientError::SpawnTimeout);
+			let stderr = std::fs::read_to_string(stderr_capture.path()).unwrap_or_default();
+			return Err(DaemonClientError::SpawnFailed { stderr });
 		}
 		thread::sleep(sleep);
 		sleep = std::cmp::min(sleep * 2, Duration::from_millis(250));
 	}
+}
+
+fn resolve_daemon_binary(explicit: Option<&Path>) -> Result<PathBuf> {
+	resolve_daemon_binary_inner(
+		explicit,
+		|k| std::env::var(k).ok().filter(|v| !v.is_empty()),
+		std::env::current_exe,
+	)
+}
+
+fn resolve_daemon_binary_inner(
+	explicit: Option<&Path>,
+	env_lookup: impl Fn(&str) -> Option<String>,
+	current_exe: impl FnOnce() -> io::Result<PathBuf>,
+) -> Result<PathBuf> {
+	if let Some(path) = explicit {
+		if path.is_file() {
+			return Ok(path.to_path_buf());
+		}
+		return Err(DaemonClientError::DaemonBinaryNotFound(format!(
+			"explicit binary path does not exist: {}",
+			path.display(),
+		)));
+	}
+
+	if let Some(value) = env_lookup(MONTRE_BINARY_ENV) {
+		let path = PathBuf::from(&value);
+		if path.is_file() {
+			return Ok(path);
+		}
+		return Err(DaemonClientError::DaemonBinaryNotFound(format!(
+			"{} points to a missing file: {}",
+			MONTRE_BINARY_ENV,
+			path.display(),
+		)));
+	}
+
+	if let Some(found) = find_on_path(&env_lookup, DAEMON_BINARY_NAME) {
+		return Ok(found);
+	}
+
+	if let Ok(exe) = current_exe() {
+		if let Some(parent) = exe.parent() {
+			let sibling = parent.join(DAEMON_BINARY_NAME);
+			if sibling.is_file() {
+				return Ok(sibling);
+			}
+		}
+	}
+
+	Err(DaemonClientError::DaemonBinaryNotFound(format!(
+		"`{}` not found on PATH and no sibling exists next to the current executable; \
+		 set {} to specify a path explicitly",
+		DAEMON_BINARY_NAME, MONTRE_BINARY_ENV,
+	)))
+}
+
+fn find_on_path(
+	env_lookup: &impl Fn(&str) -> Option<String>,
+	name: &str,
+) -> Option<PathBuf> {
+	let path = env_lookup("PATH")?;
+	for directory in path.split(':').filter(|d| !d.is_empty()) {
+		let candidate = Path::new(directory).join(name);
+		if candidate.is_file() {
+			return Some(candidate);
+		}
+	}
+	None
 }
 
 struct SpawnLockGuard {
@@ -537,6 +691,22 @@ fn acquire_spawn_lock(state_dir: &Path) -> io::Result<SpawnLockGuard> {
 		.open(&path)?;
 	file.lock_exclusive()?;
 	Ok(SpawnLockGuard { _file: file })
+}
+
+fn confirm_stale_then_unlink(socket: &Path, state_dir: &Path) -> Result<()> {
+	if crate::storage::daemon_lock_held(state_dir)? {
+		return Err(DaemonClientError::Transport(io::Error::new(
+			io::ErrorKind::ConnectionRefused,
+			format!(
+				"daemon appears alive at {} (daemon.lock held) but the socket is \
+				 refusing connections, likely a saturated accept queue or a daemon \
+				 mid-startup. Retry shortly.",
+				socket.display(),
+			),
+		)));
+	}
+	let _ = std::fs::remove_file(socket);
+	Ok(())
 }
 
 #[cfg(test)]
@@ -565,6 +735,187 @@ mod tests {
 
 		let acquired = second_file.try_lock_exclusive().expect("try lock after release");
 		assert!(acquired, "second lock should succeed after first released");
+	}
+
+	fn no_env(_: &str) -> Option<String> {
+		None
+	}
+
+	fn no_exe() -> io::Result<PathBuf> {
+		Err(io::Error::new(io::ErrorKind::NotFound, "test: no current_exe"))
+	}
+
+	fn create_executable_stub(path: &Path, body: &str) {
+		use std::os::unix::fs::PermissionsExt;
+		std::fs::write(path, body).expect("write stub");
+		let mut permissions = std::fs::metadata(path).expect("stat stub").permissions();
+		permissions.set_mode(0o755);
+		std::fs::set_permissions(path, permissions).expect("chmod stub");
+	}
+
+	#[test]
+	fn resolve_uses_explicit_path_when_it_exists() {
+		let temp = tempfile::TempDir::new().expect("tempdir");
+		let binary = temp.path().join("montre");
+		std::fs::write(&binary, "").unwrap();
+
+		let result = resolve_daemon_binary_inner(Some(&binary), no_env, no_exe).unwrap();
+		assert_eq!(result, binary);
+	}
+
+	#[test]
+	fn resolve_rejects_explicit_path_that_does_not_exist() {
+		let temp = tempfile::TempDir::new().expect("tempdir");
+		let missing = temp.path().join("missing-montre");
+
+		let result = resolve_daemon_binary_inner(Some(&missing), no_env, no_exe);
+		assert!(matches!(result, Err(DaemonClientError::DaemonBinaryNotFound(_))));
+	}
+
+	#[test]
+	fn resolve_uses_env_when_no_explicit() {
+		let temp = tempfile::TempDir::new().expect("tempdir");
+		let binary = temp.path().join("montre");
+		std::fs::write(&binary, "").unwrap();
+		let binary_string = binary.to_string_lossy().into_owned();
+
+		let result = resolve_daemon_binary_inner(
+			None,
+			|key| if key == MONTRE_BINARY_ENV { Some(binary_string.clone()) } else { None },
+			no_exe,
+		)
+		.unwrap();
+		assert_eq!(result, binary);
+	}
+
+	#[test]
+	fn resolve_rejects_env_pointing_at_missing_file() {
+		let temp = tempfile::TempDir::new().expect("tempdir");
+		let missing = temp.path().join("nope");
+		let missing_string = missing.to_string_lossy().into_owned();
+
+		let result = resolve_daemon_binary_inner(
+			None,
+			|key| if key == MONTRE_BINARY_ENV { Some(missing_string.clone()) } else { None },
+			no_exe,
+		);
+		assert!(matches!(result, Err(DaemonClientError::DaemonBinaryNotFound(_))));
+	}
+
+	#[test]
+	fn resolve_falls_back_to_path() {
+		let temp = tempfile::TempDir::new().expect("tempdir");
+		let binary = temp.path().join("montre");
+		std::fs::write(&binary, "").unwrap();
+		let path_string = temp.path().to_string_lossy().into_owned();
+
+		let result = resolve_daemon_binary_inner(
+			None,
+			|key| if key == "PATH" { Some(path_string.clone()) } else { None },
+			no_exe,
+		)
+		.unwrap();
+		assert_eq!(result, binary);
+	}
+
+	#[test]
+	fn resolve_falls_back_to_current_exe_sibling() {
+		let temp = tempfile::TempDir::new().expect("tempdir");
+		let sibling_binary = temp.path().join("montre");
+		std::fs::write(&sibling_binary, "").unwrap();
+		let exe_path = temp.path().join("some-other-binary");
+		std::fs::write(&exe_path, "").unwrap();
+
+		let result = resolve_daemon_binary_inner(
+			None,
+			no_env,
+			|| Ok(exe_path.clone()),
+		)
+		.unwrap();
+		assert_eq!(result, sibling_binary);
+	}
+
+	#[test]
+	fn resolve_errors_when_nothing_found() {
+		let result = resolve_daemon_binary_inner(None, no_env, no_exe);
+		assert!(matches!(result, Err(DaemonClientError::DaemonBinaryNotFound(_))));
+	}
+
+	#[test]
+	fn spawn_with_stderr_capture_surfaces_child_output_on_timeout() {
+		let temp = tempfile::TempDir::new().expect("tempdir");
+		let binary = temp.path().join("fake-daemon");
+		create_executable_stub(
+			&binary,
+			"#!/bin/sh\necho 'synthetic spawn failure' >&2\nexit 1\n",
+		);
+
+		let stderr_capture = spawn_daemon_with_stderr_capture(&binary, temp.path())
+			.expect("spawn fake daemon");
+
+		let unreachable_socket = temp.path().join("never-bound.sock");
+		let result = poll_connect_with_backoff(
+			&unreachable_socket,
+			Duration::from_millis(500),
+			stderr_capture,
+		);
+		match result {
+			Err(DaemonClientError::SpawnFailed { stderr }) => {
+				assert!(
+					stderr.contains("synthetic spawn failure"),
+					"captured stderr should contain the fake message: {:?}",
+					stderr,
+				);
+			}
+			Err(other) => panic!("expected SpawnFailed, got {:?}", other),
+			Ok(_) => panic!("expected SpawnFailed, got Ok(_)"),
+		}
+	}
+
+	#[test]
+	fn confirm_stale_refuses_to_unlink_when_daemon_lock_is_held() {
+		let temp = tempfile::TempDir::new().expect("tempdir");
+		let state_dir = temp.path();
+		let socket = state_dir.join("stand-in.sock");
+		std::fs::write(&socket, b"placeholder").expect("create placeholder socket file");
+
+		let live_lock = crate::storage::acquire_daemon_lock(state_dir).expect("acquire");
+
+		let result = confirm_stale_then_unlink(&socket, state_dir);
+		match result {
+			Err(DaemonClientError::Transport(e)) => {
+				assert_eq!(e.kind(), io::ErrorKind::ConnectionRefused);
+			}
+			Err(other) => panic!("expected Transport(ConnectionRefused), got {:?}", other),
+			Ok(()) => panic!("expected error, got Ok"),
+		}
+		assert!(
+			socket.exists(),
+			"socket placeholder must not be unlinked while daemon.lock is held",
+		);
+
+		drop(live_lock);
+	}
+
+	#[test]
+	fn confirm_stale_unlinks_when_daemon_lock_is_free() {
+		let temp = tempfile::TempDir::new().expect("tempdir");
+		let state_dir = temp.path();
+		let socket = state_dir.join("stand-in.sock");
+		std::fs::write(&socket, b"placeholder").expect("create placeholder socket file");
+
+		confirm_stale_then_unlink(&socket, state_dir).expect("should succeed");
+		assert!(!socket.exists(), "stale socket should be unlinked");
+	}
+
+	#[test]
+	fn confirm_stale_is_a_noop_when_socket_already_absent() {
+		let temp = tempfile::TempDir::new().expect("tempdir");
+		let state_dir = temp.path();
+		let socket = state_dir.join("never-existed.sock");
+
+		confirm_stale_then_unlink(&socket, state_dir).expect("should succeed");
+		assert!(!socket.exists());
 	}
 }
 

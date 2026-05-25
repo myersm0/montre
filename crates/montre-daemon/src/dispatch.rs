@@ -158,6 +158,7 @@ pub(crate) fn state_roundtrip<R>(
 
 pub(crate) struct RpcContext {
 	pub process_id: Option<ProcessId>,
+	pub ever_registered: bool,
 	pub state_tx: Sender<Command>,
 	pub outbound_tx: SyncSender<Outbound>,
 	pub handle: Arc<CorpusHandle>,
@@ -246,6 +247,7 @@ fn run_reader(
 ) {
 	let mut ctx = RpcContext {
 		process_id: None,
+		ever_registered: false,
 		state_tx: state_tx.clone(),
 		outbound_tx: outbound_tx.clone(),
 		handle,
@@ -387,10 +389,10 @@ fn handle_register(
 	params: Option<serde_json::Value>,
 	ctx: &mut RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	if ctx.process_id.is_some() {
+	if ctx.ever_registered {
 		return Err(ProtocolError::new(
 			-32600,
-			"connection is already registered",
+			"connection has already registered; a connection accepts exactly one session.register",
 		));
 	}
 
@@ -403,6 +405,7 @@ fn handle_register(
 		reply: tx,
 	})??;
 	ctx.process_id = Some(reply.process_id);
+	ctx.ever_registered = true;
 
 	serialize_reply(reply)
 }
@@ -468,6 +471,7 @@ pub(crate) mod test_support {
 	) -> RpcContext {
 		RpcContext {
 			process_id: None,
+			ever_registered: false,
 			state_tx,
 			outbound_tx,
 			handle,
@@ -769,6 +773,40 @@ mod tests {
 
 			let err = dispatch_request("does.not.exist", None, &mut ctx).unwrap_err();
 			assert_eq!(err.code, -32601);
+		}
+
+		drop(state_tx);
+		let _ = state_handle.join();
+	}
+
+	#[test]
+	fn dispatch_rejects_register_after_unregister() {
+		let handle = make_handle();
+		let st = state::State::new(1, Arc::clone(&handle), crate::shutdown::ShutdownCoordinator::dummy());
+		let (state_tx, state_rx) = channel();
+		let state_handle = thread::spawn(move || state::run(st, state_rx));
+
+		{
+			let (outbound_tx, _outbound_rx) = sync_channel(OUTBOUND_QUEUE_DEPTH);
+			let mut ctx = make_context(state_tx.clone(), outbound_tx, handle);
+
+			let params = serde_json::json!({
+				"protocol_version": 1,
+				"kind": "external",
+			});
+			dispatch_request("session.register", Some(params.clone()), &mut ctx)
+				.expect("first register");
+			assert!(ctx.process_id.is_some());
+			assert!(ctx.ever_registered);
+
+			dispatch_request("session.unregister", None, &mut ctx).expect("unregister");
+			assert!(ctx.process_id.is_none(), "unregister should clear process_id");
+			assert!(ctx.ever_registered, "ever_registered must remain set after unregister");
+
+			let err = dispatch_request("session.register", Some(params), &mut ctx)
+				.expect_err("second register should be rejected");
+			assert_eq!(err.code, -32600);
+			assert!(ctx.process_id.is_none(), "rejected register must not allocate a new process_id");
 		}
 
 		drop(state_tx);

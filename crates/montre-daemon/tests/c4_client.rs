@@ -39,13 +39,14 @@ fn boot_daemon() -> Fixture {
 }
 
 fn wait_for_socket_path(path: &Path, timeout: Duration) {
+	use std::os::unix::net::UnixStream;
 	let deadline = Instant::now() + timeout;
 	loop {
-		if path.exists() {
+		if UnixStream::connect(path).is_ok() {
 			return;
 		}
 		if Instant::now() >= deadline {
-			panic!("daemon socket never appeared at {}", path.display());
+			panic!("daemon never became connectable at {}", path.display());
 		}
 		thread::sleep(Duration::from_millis(20));
 	}

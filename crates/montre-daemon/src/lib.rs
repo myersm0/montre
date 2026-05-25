@@ -35,6 +35,8 @@ pub enum DaemonError {
 	NotImplemented,
 	#[error("failed to open corpus: {0}")]
 	CorpusLoad(#[from] montre_index::IndexError),
+	#[error("another daemon is already running for this corpus")]
+	AlreadyRunning,
 	#[error("io error: {0}")]
 	Io(#[from] std::io::Error),
 }
@@ -55,13 +57,31 @@ pub fn serve(options: ServeOptions) -> Result<(), DaemonError> {
 	let corpus_id = derive_corpus_id(&canonical_path);
 
 	let state_dir = storage::state_dir_for(&corpus_id)?;
-	let daemon_epoch = storage::load_and_bump_epoch(&state_dir)?;
-	tracing::info!(epoch = daemon_epoch, "daemon epoch bumped");
+
+	let _daemon_lock = match storage::acquire_daemon_lock(&state_dir) {
+		Ok(lock) => lock,
+		Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+			return Err(DaemonError::AlreadyRunning);
+		}
+		Err(error) => return Err(error.into()),
+	};
+	tracing::info!(state_dir = %state_dir.display(), "acquired daemon lock");
 
 	let socket_path = match &options.socket_path {
 		Some(p) => p.clone(),
 		None => default_socket_path(&canonical_path)?,
 	};
+
+	if socket_path_has_listener(&socket_path)? {
+		tracing::warn!(
+			socket = %socket_path.display(),
+			"socket path is already serving connections; refusing to clobber",
+		);
+		return Err(DaemonError::AlreadyRunning);
+	}
+
+	let daemon_epoch = storage::load_and_bump_epoch(&state_dir)?;
+	tracing::info!(epoch = daemon_epoch, "daemon epoch bumped");
 
 	let handle = Arc::new(CorpusHandle {
 		corpus,
@@ -167,6 +187,29 @@ fn data_dir() -> Option<PathBuf> {
 		.map(|h| PathBuf::from(h).join(".local/share"))
 }
 
+fn socket_path_has_listener(socket_path: &Path) -> io::Result<bool> {
+	use std::os::unix::net::UnixStream;
+	match UnixStream::connect(socket_path) {
+		Ok(_) => Ok(true),
+		Err(error)
+			if matches!(
+				error.kind(),
+				io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused,
+			) =>
+		{
+			Ok(false)
+		}
+		Err(error) => {
+			tracing::warn!(
+				error = %error,
+				kind = ?error.kind(),
+				"unexpected error probing socket path; treating as no listener",
+			);
+			Ok(false)
+		}
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -205,5 +248,33 @@ mod tests {
 		let a = derive_corpus_id(Path::new("/path/one"));
 		let b = derive_corpus_id(Path::new("/path/two"));
 		assert_ne!(a, b);
+	}
+
+	#[test]
+	fn socket_path_has_listener_returns_false_for_missing_path() {
+		let temp = tempfile::TempDir::new().expect("tempdir");
+		let missing = temp.path().join("does-not-exist.sock");
+		assert!(!socket_path_has_listener(&missing).expect("probe"));
+	}
+
+	#[test]
+	fn socket_path_has_listener_returns_false_for_stale_socket() {
+		use std::os::unix::net::UnixListener;
+		let temp = tempfile::TempDir::new().expect("tempdir");
+		let socket = temp.path().join("stale.sock");
+		{
+			let _stale = UnixListener::bind(&socket).expect("bind stale");
+		}
+		assert!(socket.exists());
+		assert!(!socket_path_has_listener(&socket).expect("probe"));
+	}
+
+	#[test]
+	fn socket_path_has_listener_returns_true_for_live_listener() {
+		use std::os::unix::net::UnixListener;
+		let temp = tempfile::TempDir::new().expect("tempdir");
+		let socket = temp.path().join("live.sock");
+		let _listener = UnixListener::bind(&socket).expect("bind live");
+		assert!(socket_path_has_listener(&socket).expect("probe"));
 	}
 }
