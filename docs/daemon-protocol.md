@@ -130,6 +130,8 @@ When a client tries to connect to a corpus and finds no daemon:
 
 Race condition (two clients spawn simultaneously): file-locking on a sentinel file in the sockets directory. Loser of the race connects to the winner's daemon.
 
+Daemon-side exclusion is independent of the client-side spawn lock: the daemon itself acquires an exclusive `fs4` flock on `<state_dir>/daemon.lock` immediately after resolving the state directory and holds it for the process's lifetime. Any second `montre serve` invocation against the same corpus — whether via auto-spawn racing past the sentinel, a direct manual invocation, or a separate tool — fails fast rather than clobbering the running listener. The two layers protect against different failure modes: the client-side lock keeps auto-spawn races to a single winner; the daemon-side lock prevents split-brain regardless of how the second daemon was launched.
+
 ### Handshake
 
 First message from client must be `session.register`. Daemon responds with the assigned `process_id`, server version, and capabilities object. Until registration succeeds, no other operations are accepted.
