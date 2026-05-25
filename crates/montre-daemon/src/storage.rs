@@ -374,4 +374,42 @@ mod tests {
 		assert!(!path.with_extension("tmp").exists());
 		assert!(path.exists());
 	}
+
+	#[test]
+	fn load_skips_truncated_last_line_from_crash_mid_write() {
+		let temp = TempDir::new().expect("tempdir");
+		let path = named_results_path(temp.path());
+		let good = serde_json::to_string(&ResultMetadata {
+			handle: "r-alpha".to_string(),
+			query: "[]".to_string(),
+			created_at: "2026-05-12T00:00:00Z".to_string(),
+			materialized_at: None,
+			hit_count: 1,
+			corpus_id: "c".to_string(),
+			name: Some("alpha".to_string()),
+			form: ResultForm::QueryBacked,
+		})
+		.unwrap();
+		let truncated = r#"{"handle":"r-trunc","query":"[]","created_at":"2026"#;
+		let content = format!("{}\n{}", good, truncated);
+		std::fs::write(&path, content).unwrap();
+
+		let loaded = load_named_results(temp.path()).expect("load");
+		assert_eq!(loaded.len(), 1, "good prefix record should load, truncated last line skipped");
+		assert!(loaded.contains_key("alpha"));
+	}
+
+	#[test]
+	fn load_is_unaffected_by_orphan_temporary_file() {
+		let temp = TempDir::new().expect("tempdir");
+		let alpha = record("r-alpha", "[]", 1);
+		persist_named_results(temp.path(), "c", vec![("alpha", &alpha)]).unwrap();
+
+		let temporary_path = named_results_path(temp.path()).with_extension("tmp");
+		std::fs::write(&temporary_path, b"completely different garbage").unwrap();
+
+		let loaded = load_named_results(temp.path()).expect("load");
+		assert_eq!(loaded.len(), 1, "canonical content should load; orphan .tmp ignored");
+		assert!(loaded.contains_key("alpha"));
+	}
 }
