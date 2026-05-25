@@ -1,6 +1,9 @@
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+
+use fs4::fs_std::FileExt;
 
 use crate::protocol::{ResultForm, ResultHandle, ResultMetadata};
 
@@ -11,8 +14,31 @@ pub(crate) struct NamedResultRecord {
 	pub created_at: String,
 }
 
+#[derive(Debug)]
+pub(crate) struct DaemonLock {
+	_file: File,
+}
+
 pub(crate) fn state_dir_for(corpus_id: &str) -> io::Result<PathBuf> {
 	state_dir_under(&state_root_from_env()?, corpus_id)
+}
+
+pub(crate) fn acquire_daemon_lock(state_dir: &Path) -> io::Result<DaemonLock> {
+	let path = state_dir.join("daemon.lock");
+	let file = OpenOptions::new()
+		.create(true)
+		.write(true)
+		.read(true)
+		.truncate(false)
+		.open(&path)?;
+	if file.try_lock_exclusive()? {
+		Ok(DaemonLock { _file: file })
+	} else {
+		Err(io::Error::new(
+			io::ErrorKind::WouldBlock,
+			"daemon lock already held for this corpus",
+		))
+	}
 }
 
 fn state_dir_under(root: &Path, corpus_id: &str) -> io::Result<PathBuf> {
@@ -169,6 +195,33 @@ mod tests {
 		let second = state_dir_under(temp.path(), "abc123").expect("second");
 		assert_eq!(first, second);
 		assert!(first.is_dir());
+	}
+
+	#[test]
+	fn acquire_daemon_lock_creates_lockfile() {
+		let temp = TempDir::new().expect("tempdir");
+		let lock = acquire_daemon_lock(temp.path()).expect("acquire");
+		assert!(temp.path().join("daemon.lock").exists());
+		drop(lock);
+	}
+
+	#[test]
+	fn acquire_daemon_lock_blocks_while_held() {
+		let temp = TempDir::new().expect("tempdir");
+		let first = acquire_daemon_lock(temp.path()).expect("first");
+		let error = acquire_daemon_lock(temp.path())
+			.expect_err("second should fail while first held");
+		assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+		drop(first);
+	}
+
+	#[test]
+	fn acquire_daemon_lock_available_after_release() {
+		let temp = TempDir::new().expect("tempdir");
+		let first = acquire_daemon_lock(temp.path()).expect("first");
+		drop(first);
+		let second = acquire_daemon_lock(temp.path()).expect("second after release");
+		drop(second);
 	}
 
 	#[test]
