@@ -198,6 +198,16 @@ impl State {
 		let Some(connection) = self.roster.get_mut(&process_id) else {
 			return;
 		};
+		let kind = interest.kind();
+		if !connection.info.provides.contains(&kind) {
+			tracing::debug!(
+				process_id,
+				interest_kind = ?kind,
+				provides = ?connection.info.provides,
+				"publish_interest: interest kind not in declared provides; dropping",
+			);
+			return;
+		}
 		connection.info.current_interest = Some(interest.clone());
 
 		let derivative_targets: Vec<(CouplerId, ProcessId, CouplerKind)> = self
