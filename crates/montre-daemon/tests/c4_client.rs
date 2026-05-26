@@ -245,3 +245,36 @@ fn client_publish_interest_drives_coupler_notification() {
 		other => panic!("unexpected notification {other:?}"),
 	}
 }
+
+#[test]
+fn client_daemon_shutdown_returns_ok_and_broadcasts_notification() {
+	let (_fx, mut client) = client();
+	register(&mut client);
+
+	let reply = client
+		.daemon_shutdown(DaemonShutdownParams { reason: Some(ShutdownReason::Requested) })
+		.expect("daemon shutdown");
+	assert!(reply.ok);
+
+	let note = client
+		.notifications()
+		.recv_timeout(Duration::from_secs(2))
+		.expect("shutdown notification");
+	match note {
+		NotificationEnvelope::Shutdown { reason, .. } => {
+			assert_eq!(reason, "requested");
+		}
+		other => panic!("unexpected notification {other:?}"),
+	}
+}
+
+#[test]
+fn client_daemon_shutdown_default_reason_succeeds() {
+	let (_fx, mut client) = client();
+	register(&mut client);
+
+	let reply = client
+		.daemon_shutdown(DaemonShutdownParams::default())
+		.expect("daemon shutdown with default reason");
+	assert!(reply.ok);
+}

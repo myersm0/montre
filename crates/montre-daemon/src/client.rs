@@ -256,6 +256,10 @@ impl DaemonClient {
 		self.request("subscription.unsubscribe", Some(params))
 	}
 
+	pub fn daemon_shutdown(&mut self, params: DaemonShutdownParams) -> Result<OkReply> {
+		self.request("daemon.shutdown", Some(params))
+	}
+
 	pub fn notifications(&self) -> &Receiver<NotificationEnvelope> {
 		&self.notifications_rx
 	}
