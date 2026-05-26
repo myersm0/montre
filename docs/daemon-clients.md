@@ -31,7 +31,7 @@ The production form is `montre serve <corpus-path>` via the CLI, which uses the 
 
 A daemon exits when any one of these happens:
 
-- a registered client sends `daemon.shutdown` (with `reason: "requested"`)
+- a registered client calls `client.daemon_shutdown(DaemonShutdownParams { reason: ... })` (wire method `daemon.shutdown`, `reason: "requested"` if not specified)
 - the daemon receives SIGHUP, SIGINT, or SIGTERM (`reason: "signal"`)
 - the idle timeout elapses with no clients registered (`reason: "idle_timeout"`, default 30 minutes (1800s), configurable, `0` disables)
 
@@ -111,6 +111,8 @@ The reader is the only code path that receives frames. If it exits — EOF, fram
 `session.publish_interest` is the lone client-to-daemon notification (fire-and-forget, no reply). `DaemonClient::publish_interest(params)` sends it. Use this whenever the calling process is the master in one or more coupler relationships and its focus has moved.
 
 The method returns `Result<(), std::io::Error>`. There is no protocol response, but the socket write can still fail (broken pipe, kernel buffer issues, etc.) — handle the error rather than dropping it.
+
+The daemon silently drops a publish whose `interest` kind is not in the publishing process's declared `provides` (with a debug-level trace log on the daemon side). Because the operation is fire-and-forget, there is no error surfaced to the client — clients that intend to publish a given `InterestKind` must declare it at `session.register`.
 
 ### Thread safety
 

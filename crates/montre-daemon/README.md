@@ -71,14 +71,16 @@ src/
 └── handlers/
     ├── mod.rs
     ├── corpus.rs        corpus.info, corpus.documents, corpus.layer_info
-    ├── text.rs          text.surface, text.sentence, text.sentences, text.document, text.annotations[_range]
+    ├── text.rs          text.surface, text.surface_with_token_spans, text.sentence, text.sentences,
+    │                    text.document, text.annotations[_range]
     ├── alignment.rs     alignment.list, alignment.project; shared project_alignment helper
     ├── query.rs         query.execute, query.execute_count, query.hits, query.metadata,
     │                    query.save, query.materialize, query.load, query.list_named,
     │                    query.delete_named, query.discard
     ├── coupler.rs       coupler.create, coupler.remove, coupler.list
     ├── session.rs       session.unregister, session.update_label, session.roster
-    └── subscription.rs  subscription.subscribe, subscription.unsubscribe
+    ├── subscription.rs  subscription.subscribe, subscription.unsubscribe
+    └── daemon.rs        daemon.shutdown
 ```
 
 `session.register` lives in `dispatch.rs` rather than `handlers/session.rs` because it sets `RpcContext::process_id` and is gated separately from the registration check applied to every other method.
@@ -135,7 +137,7 @@ Two seams. Unit tests in each module use `#[cfg(test)] mod tests` against the sa
 
 The pattern for testing notification fan-out is `with_state_thread` → two `register_context` calls (one master, one follower) → bind both `Receiver<Outbound>`s → drive the master through `dispatch_request` / `dispatch_notification` → drain the follower's receiver with `recv_timeout` and assert on the payloads. See `publish_interest_alignment_fans_out_to_follower` in `dispatch.rs::tests` for the canonical example.
 
-Integration tests in `tests/` use a real socket (`tests/c2_plumbing.rs` shows the form: bind, spawn `serve` in a thread, connect with raw `UnixStream`, write framed JSON-RPC). Once `DaemonClient` lands in c4, integration tests will exercise it instead of raw framing.
+Integration tests in `tests/` use a real socket. `tests/c2_plumbing.rs` exercises the wire directly (bind, spawn `serve` in a thread, connect with raw `UnixStream`, write framed JSON-RPC) — useful for protocol-level regression coverage. `tests/c4_client.rs` exercises the same shape via `DaemonClient`. New integration tests should generally use `DaemonClient`; reach for raw framing only when the test is specifically about the wire protocol itself.
 
 ## Known trade-offs
 
