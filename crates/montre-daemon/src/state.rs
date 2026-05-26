@@ -1504,6 +1504,45 @@ mod tests {
 	}
 
 	#[test]
+	fn roster_filter_within_field_is_or() {
+		let info = make_info(ProcessKind::Reader, vec![InterestKind::Sentence]);
+		let filter = RosterFilter {
+			provides_any_of: vec![InterestKind::Sentence, InterestKind::Hit],
+			..Default::default()
+		};
+		assert!(filter.matches(&info));
+
+		let filter = RosterFilter {
+			provides_any_of: vec![InterestKind::Document, InterestKind::Hit],
+			..Default::default()
+		};
+		assert!(!filter.matches(&info));
+	}
+
+	#[test]
+	fn roster_filter_consumes_any_of() {
+		let info = ProcessInfo {
+			id: 1,
+			kind: ProcessKind::Reader,
+			label: None,
+			provides: vec![],
+			consumes: vec![InterestKind::Sentence],
+			current_interest: None,
+		};
+		let filter = RosterFilter {
+			consumes_any_of: vec![InterestKind::Sentence, InterestKind::Span],
+			..Default::default()
+		};
+		assert!(filter.matches(&info));
+
+		let filter = RosterFilter {
+			consumes_any_of: vec![InterestKind::Hit],
+			..Default::default()
+		};
+		assert!(!filter.matches(&info));
+	}
+
+	#[test]
 	fn coupler_kind_compat_sentence_mirror_accepts_position_to_sentence() {
 		assert!(coupler_kind_compat(
 			&CouplerKind::SentenceMirror,
