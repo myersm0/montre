@@ -62,15 +62,12 @@ pub(crate) fn handle_text_surface(
 	if parsed.start > parsed.end {
 		return Err(ProtocolError::new(-32602, "start must be <= end"));
 	}
-	if parsed.end > ctx.handle.corpus.token_count() {
-		return Err(ProtocolError::new(
-			-32602,
-			format!("end {} exceeds token count {}", parsed.end, ctx.handle.corpus.token_count()),
-		));
-	}
+	let token_count = ctx.handle.corpus.token_count();
+	let start = parsed.start.min(token_count);
+	let end = parsed.end.min(token_count);
 
 	serialize_reply(TextSurfaceReply {
-		surface: ctx.handle.corpus.surface_text(parsed.start, parsed.end),
+		surface: ctx.handle.corpus.surface_text(start, end),
 	})
 }
 
@@ -129,15 +126,8 @@ pub(crate) fn handle_text_sentences(
 		.last_sentence_of_document(doc_idx)
 		.ok_or_else(|| ProtocolError::new(-32602, "document has no sentences"))?;
 	let doc_sentence_count = (last - first + 1) as u32;
-	if parsed.sent_end > doc_sentence_count {
-		return Err(ProtocolError::new(
-			-32602,
-			format!(
-				"sent_end {} exceeds document sentence count {}",
-				parsed.sent_end, doc_sentence_count
-			),
-		));
-	}
+	let sent_start = parsed.sent_start.min(doc_sentence_count);
+	let sent_end = parsed.sent_end.min(doc_sentence_count);
 
 	let sentence_spans = ctx.handle
 		.corpus
@@ -145,8 +135,8 @@ pub(crate) fn handle_text_sentences(
 		.spans("sentence")
 		.ok_or_else(|| ProtocolError::new(-32603, "sentence span layer missing"))?;
 
-	let mut sentences = Vec::with_capacity((parsed.sent_end - parsed.sent_start) as usize);
-	for sent in parsed.sent_start..parsed.sent_end {
+	let mut sentences = Vec::with_capacity((sent_end - sent_start) as usize);
+	for sent in sent_start..sent_end {
 		let global_idx = first + sent as usize;
 		let span = sentence_spans
 			.get(global_idx)
@@ -229,20 +219,17 @@ pub(crate) fn handle_text_annotations_range(
 	if parsed.start > parsed.end {
 		return Err(ProtocolError::new(-32602, "start must be <= end"));
 	}
-	if parsed.end > ctx.handle.corpus.token_count() {
-		return Err(ProtocolError::new(
-			-32602,
-			format!("end {} exceeds token count {}", parsed.end, ctx.handle.corpus.token_count()),
-		));
-	}
+	let token_count = ctx.handle.corpus.token_count();
+	let start = parsed.start.min(token_count);
+	let end = parsed.end.min(token_count);
 
 	let layers: Vec<String> = match parsed.layers {
 		Some(ls) => ls,
 		None => ctx.handle.corpus.layers().to_vec(),
 	};
 
-	let mut rows = Vec::with_capacity((parsed.end - parsed.start) as usize);
-	for position in parsed.start..parsed.end {
+	let mut rows = Vec::with_capacity((end - start) as usize);
+	for position in start..end {
 		let mut values = std::collections::HashMap::new();
 		for layer in &layers {
 			if let Some(value) = fetch_annotation(&ctx.handle.corpus, position, layer) {
@@ -282,6 +269,43 @@ mod tests {
 	}
 
 	#[test]
+	fn text_surface_clamps_end_past_token_count() {
+		with_registered_context(|ctx| {
+			let token_count = ctx.handle.corpus.token_count();
+			let params = serde_json::json!({ "start": 0, "end": token_count + 100 });
+			let result = dispatch_request("text.surface", Some(params), ctx).unwrap();
+			let reply: TextSurfaceReply = serde_json::from_value(result).unwrap();
+			assert!(!reply.surface.is_empty());
+
+			let in_range_params = serde_json::json!({ "start": 0, "end": token_count });
+			let in_range = dispatch_request("text.surface", Some(in_range_params), ctx).unwrap();
+			let in_range_reply: TextSurfaceReply = serde_json::from_value(in_range).unwrap();
+			assert_eq!(reply.surface, in_range_reply.surface);
+		});
+	}
+
+	#[test]
+	fn text_surface_empty_range_returns_empty_surface() {
+		with_registered_context(|ctx| {
+			let params = serde_json::json!({ "start": 3, "end": 3 });
+			let result = dispatch_request("text.surface", Some(params), ctx).unwrap();
+			let reply: TextSurfaceReply = serde_json::from_value(result).unwrap();
+			assert!(reply.surface.is_empty());
+		});
+	}
+
+	#[test]
+	fn text_surface_start_past_token_count_clamps_to_empty() {
+		with_registered_context(|ctx| {
+			let token_count = ctx.handle.corpus.token_count();
+			let params = serde_json::json!({ "start": token_count + 50, "end": token_count + 100 });
+			let result = dispatch_request("text.surface", Some(params), ctx).unwrap();
+			let reply: TextSurfaceReply = serde_json::from_value(result).unwrap();
+			assert!(reply.surface.is_empty());
+		});
+	}
+
+	#[test]
 	fn text_sentence_returns_sentence_data() {
 		with_registered_context(|ctx| {
 			let doc = find_doc_index(&ctx.handle.corpus, "la_maison");
@@ -317,9 +341,45 @@ mod tests {
 	}
 
 	#[test]
-	fn text_sentences_exceeding_count_rejected() {
+	fn text_sentences_clamps_sent_end_to_doc_count() {
 		with_registered_context(|ctx| {
-			let params = serde_json::json!({ "doc": 0, "sent_start": 0, "sent_end": 999 });
+			let doc = find_doc_index(&ctx.handle.corpus, "la_maison");
+			let count_params = serde_json::json!({ "doc": doc });
+			let count_result = dispatch_request("text.document", Some(count_params), ctx).unwrap();
+			let document_reply: TextDocumentReply = serde_json::from_value(count_result).unwrap();
+			let count = document_reply.sentence_count;
+
+			let params = serde_json::json!({ "doc": doc, "sent_start": 0, "sent_end": 999 });
+			let result = dispatch_request("text.sentences", Some(params), ctx).unwrap();
+			let reply: TextSentencesReply = serde_json::from_value(result).unwrap();
+			assert_eq!(reply.sentences.len() as u32, count);
+		});
+	}
+
+	#[test]
+	fn text_sentences_empty_range_after_clamp_returns_empty() {
+		with_registered_context(|ctx| {
+			let doc = find_doc_index(&ctx.handle.corpus, "la_maison");
+			let params = serde_json::json!({ "doc": doc, "sent_start": 999, "sent_end": 999 });
+			let result = dispatch_request("text.sentences", Some(params), ctx).unwrap();
+			let reply: TextSentencesReply = serde_json::from_value(result).unwrap();
+			assert!(reply.sentences.is_empty());
+		});
+	}
+
+	#[test]
+	fn text_sentences_nonexistent_doc_rejected() {
+		with_registered_context(|ctx| {
+			let params = serde_json::json!({ "doc": 999, "sent_start": 0, "sent_end": 1 });
+			let err = dispatch_request("text.sentences", Some(params), ctx).unwrap_err();
+			assert_eq!(err.code, -32602);
+		});
+	}
+
+	#[test]
+	fn text_sentences_inverted_range_rejected() {
+		with_registered_context(|ctx| {
+			let params = serde_json::json!({ "doc": 0, "sent_start": 5, "sent_end": 1 });
 			let err = dispatch_request("text.sentences", Some(params), ctx).unwrap_err();
 			assert_eq!(err.code, -32602);
 		});
@@ -450,6 +510,63 @@ mod tests {
 			let params = serde_json::json!({ "start": 10, "end": 5 });
 			let err = dispatch_request("text.annotations_range", Some(params), ctx).unwrap_err();
 			assert_eq!(err.code, -32602);
+		});
+	}
+
+	#[test]
+	fn text_annotations_range_clamps_end_past_token_count() {
+		with_registered_context(|ctx| {
+			let token_count = ctx.handle.corpus.token_count();
+			let params = serde_json::json!({
+				"start": 0,
+				"end": token_count + 100,
+				"layers": ["upos"],
+			});
+			let result = dispatch_request("text.annotations_range", Some(params), ctx).unwrap();
+			let reply: TextAnnotationsRangeReply = serde_json::from_value(result).unwrap();
+			assert_eq!(reply.rows.len() as u64, token_count);
+		});
+	}
+
+	#[test]
+	fn text_annotations_range_empty_after_clamp_returns_no_rows() {
+		with_registered_context(|ctx| {
+			let token_count = ctx.handle.corpus.token_count();
+			let params = serde_json::json!({
+				"start": token_count + 10,
+				"end": token_count + 20,
+				"layers": ["upos"],
+			});
+			let result = dispatch_request("text.annotations_range", Some(params), ctx).unwrap();
+			let reply: TextAnnotationsRangeReply = serde_json::from_value(result).unwrap();
+			assert!(reply.rows.is_empty());
+		});
+	}
+
+	#[test]
+	fn text_annotations_empty_positions_returns_empty_values() {
+		with_registered_context(|ctx| {
+			let params = serde_json::json!({
+				"positions": [],
+				"layers": ["upos"],
+			});
+			let result = dispatch_request("text.annotations", Some(params), ctx).unwrap();
+			let reply: TextAnnotationsReply = serde_json::from_value(result).unwrap();
+			assert!(reply.values.is_empty());
+		});
+	}
+
+	#[test]
+	fn text_annotations_out_of_range_position_omitted() {
+		with_registered_context(|ctx| {
+			let token_count = ctx.handle.corpus.token_count();
+			let params = serde_json::json!({
+				"positions": [0, token_count + 5],
+				"layers": ["upos"],
+			});
+			let result = dispatch_request("text.annotations", Some(params), ctx).unwrap();
+			let reply: TextAnnotationsReply = serde_json::from_value(result).unwrap();
+			assert!(reply.values.iter().all(|e| e.position == 0));
 		});
 	}
 }
