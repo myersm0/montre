@@ -309,6 +309,30 @@ pub struct TextSurfaceReply {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextSurfaceWithTokenSpansParams {
+	pub ranges: Vec<Span>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SurfaceToken {
+	pub position: u64,
+	pub surface_start: u64,
+	pub surface_end: u64,
+	pub emitted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SurfaceWithTokens {
+	pub surface: String,
+	pub tokens: Vec<SurfaceToken>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextSurfaceWithTokenSpansReply {
+	pub results: Vec<SurfaceWithTokens>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextSentenceParams {
 	pub doc: u32,
 	pub sent: u32,

@@ -136,4 +136,57 @@ mod tests {
 			assert!(reply.ok);
 		});
 	}
+
+	#[test]
+	fn subscribe_is_idempotent_no_duplicate_delivery() {
+		use crate::dispatch::test_support::{register_context, with_state_thread};
+		use crate::protocol::ProcessKind;
+		use std::sync::Arc;
+		use std::time::Duration;
+
+		with_state_thread(|state_tx, handle| {
+			let (mut subscriber_ctx, subscriber_outbound) = register_context(
+				state_tx.clone(),
+				Arc::clone(&handle),
+				ProcessKind::External,
+				&[],
+				&[],
+			);
+
+			let subscribe_params = serde_json::json!({ "topic": "roster_changed" });
+			dispatch_request(
+				"subscription.subscribe",
+				Some(subscribe_params.clone()),
+				&mut subscriber_ctx,
+			)
+			.expect("first subscribe");
+			dispatch_request(
+				"subscription.subscribe",
+				Some(subscribe_params),
+				&mut subscriber_ctx,
+			)
+			.expect("second subscribe is idempotent");
+
+			let (_trigger_ctx, _trigger_outbound) = register_context(
+				state_tx,
+				handle,
+				ProcessKind::External,
+				&[],
+				&[],
+			);
+
+			let first = subscriber_outbound
+				.recv_timeout(Duration::from_millis(500))
+				.expect("subscriber should receive a roster_changed notification");
+			assert_eq!(first["method"], "notification.roster_changed");
+			assert_eq!(first["params"]["event"], "registered");
+
+			assert!(
+				subscriber_outbound
+					.recv_timeout(Duration::from_millis(100))
+					.is_err(),
+				"double-subscribe must not produce a second delivery",
+			);
+		});
+	}
 }

@@ -319,6 +319,7 @@ pub(crate) fn dispatch_request(
 		"corpus.documents" => corpus::handle_corpus_documents(params, ctx),
 		"corpus.layer_info" => corpus::handle_corpus_layer_info(params, ctx),
 		"text.surface" => text::handle_text_surface(params, ctx),
+		"text.surface_with_token_spans" => text::handle_text_surface_with_token_spans(params, ctx),
 		"text.sentence" => text::handle_text_sentence(params, ctx),
 		"text.sentences" => text::handle_text_sentences(params, ctx),
 		"text.document" => text::handle_text_document(params, ctx),
@@ -989,6 +990,67 @@ mod tests {
 				assert_eq!(payload["params"]["interest"]["type"], "span");
 				assert_eq!(payload["params"]["interest"]["doc"], target_doc);
 			}
+		});
+	}
+
+	#[test]
+	fn publish_interest_undeclared_kind_dropped_silently() {
+		use crate::dispatch::test_support::{register_context, with_state_thread};
+		use crate::protocol::ProcessKind;
+		use std::time::Duration;
+
+		with_state_thread(|state_tx, handle| {
+			let (mut master_ctx, _master_outbound) = register_context(
+				state_tx.clone(),
+				Arc::clone(&handle),
+				ProcessKind::External,
+				&["sentence"],
+				&[],
+			);
+			let (follower_ctx, follower_outbound) = register_context(
+				state_tx.clone(),
+				Arc::clone(&handle),
+				ProcessKind::External,
+				&[],
+				&["sentence"],
+			);
+
+			let master_pid = master_ctx.process_id.unwrap();
+			let follower_pid = follower_ctx.process_id.unwrap();
+
+			let coupler_params = serde_json::json!({
+				"master_id": master_pid,
+				"follower_id": follower_pid,
+				"kind": { "type": "sentence_mirror" }
+			});
+			dispatch_request("coupler.create", Some(coupler_params), &mut master_ctx)
+				.expect("coupler.create");
+
+			let source_doc = crate::dispatch::test_support::find_doc_index(
+				&handle.corpus,
+				"la_maison",
+			);
+			let publish_params = serde_json::json!({
+				"interest": { "type": "position", "doc": source_doc, "position": 0 }
+			});
+			dispatch_notification("session.publish_interest", Some(publish_params), &master_ctx);
+
+			assert!(
+				follower_outbound.recv_timeout(Duration::from_millis(100)).is_err(),
+				"follower must not receive a coupler_update for an undeclared interest kind",
+			);
+
+			let sentence_publish = serde_json::json!({
+				"interest": { "type": "sentence", "doc": source_doc, "sent": 0 }
+			});
+			dispatch_notification(
+				"session.publish_interest",
+				Some(sentence_publish),
+				&master_ctx,
+			);
+			follower_outbound
+				.recv_timeout(Duration::from_millis(500))
+				.expect("declared interest kind still propagates");
 		});
 	}
 }

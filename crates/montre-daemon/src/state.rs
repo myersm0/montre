@@ -198,6 +198,16 @@ impl State {
 		let Some(connection) = self.roster.get_mut(&process_id) else {
 			return;
 		};
+		let kind = interest.kind();
+		if !connection.info.provides.contains(&kind) {
+			tracing::debug!(
+				process_id,
+				interest_kind = ?kind,
+				provides = ?connection.info.provides,
+				"publish_interest: interest kind not in declared provides; dropping",
+			);
+			return;
+		}
 		connection.info.current_interest = Some(interest.clone());
 
 		let derivative_targets: Vec<(CouplerId, ProcessId, CouplerKind)> = self
@@ -1488,6 +1498,45 @@ mod tests {
 		let filter = RosterFilter {
 			kinds: vec![ProcessKind::Reader],
 			provides_any_of: vec![InterestKind::Hit],
+			..Default::default()
+		};
+		assert!(!filter.matches(&info));
+	}
+
+	#[test]
+	fn roster_filter_within_field_is_or() {
+		let info = make_info(ProcessKind::Reader, vec![InterestKind::Sentence]);
+		let filter = RosterFilter {
+			provides_any_of: vec![InterestKind::Sentence, InterestKind::Hit],
+			..Default::default()
+		};
+		assert!(filter.matches(&info));
+
+		let filter = RosterFilter {
+			provides_any_of: vec![InterestKind::Document, InterestKind::Hit],
+			..Default::default()
+		};
+		assert!(!filter.matches(&info));
+	}
+
+	#[test]
+	fn roster_filter_consumes_any_of() {
+		let info = ProcessInfo {
+			id: 1,
+			kind: ProcessKind::Reader,
+			label: None,
+			provides: vec![],
+			consumes: vec![InterestKind::Sentence],
+			current_interest: None,
+		};
+		let filter = RosterFilter {
+			consumes_any_of: vec![InterestKind::Sentence, InterestKind::Span],
+			..Default::default()
+		};
+		assert!(filter.matches(&info));
+
+		let filter = RosterFilter {
+			consumes_any_of: vec![InterestKind::Hit],
 			..Default::default()
 		};
 		assert!(!filter.matches(&info));

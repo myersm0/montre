@@ -208,6 +208,13 @@ impl DaemonClient {
 		self.request("text.surface", Some(params))
 	}
 
+	pub fn text_surface_with_token_spans(
+		&mut self,
+		params: TextSurfaceWithTokenSpansParams,
+	) -> Result<TextSurfaceWithTokenSpansReply> {
+		self.request("text.surface_with_token_spans", Some(params))
+	}
+
 	pub fn text_sentence(&mut self, params: TextSentenceParams) -> Result<TextSentenceReply> {
 		self.request("text.sentence", Some(params))
 	}
@@ -254,6 +261,10 @@ impl DaemonClient {
 
 	pub fn subscription_unsubscribe(&mut self, params: SubscriptionParams) -> Result<OkReply> {
 		self.request("subscription.unsubscribe", Some(params))
+	}
+
+	pub fn daemon_shutdown(&mut self, params: DaemonShutdownParams) -> Result<OkReply> {
+		self.request("daemon.shutdown", Some(params))
 	}
 
 	pub fn notifications(&self) -> &Receiver<NotificationEnvelope> {

@@ -157,9 +157,9 @@ After registration, the client sends requests and notifications; the daemon send
 
 ### Idle shutdown
 
-When the last registered process disconnects, daemon starts an idle timer (default: 1800 seconds, i.e. 30 minutes). If no client connects before expiry, daemon exits.
+When the last registered process disconnects, the daemon starts an idle timer (default: 1800 seconds, i.e. 30 minutes). If no client registers before the timer expires, the daemon exits.
 
-Reconnects within the window cancel the timer.
+Reconnect cancels the timer. While any client is registered, the timer does not run; the daemon has no operation-level activity check, because the registration gate means no operation can reach the daemon without a registered client to issue it. "Any operation resets the timer" is therefore operationally equivalent to "registration cancels the timer" — there is no scenario where the timer is running and an operation could reach the state thread to reset it.
 
 The idle timeout is configurable via `montre serve --idle-timeout <seconds>` and defaults to 1800 (30 minutes). Setting `0` disables idle shutdown.
 
@@ -431,6 +431,8 @@ Notification (no response). Sent by master processes whenever their focus change
 
 Daemon walks coupler table, applies transformations, pushes `notification.coupler_update` to followers.
 
+**Provides validation.** Daemon silently drops the publish (with a debug-level trace log) when the `interest`'s kind is not present in the publishing process's declared `provides`. Declared `provides` is a contract, not decoration: clients that intend to publish a given `InterestKind` must declare it at `session.register`. There is no error response — `publish_interest` is fire-and-forget and has no response channel.
+
 #### `session.roster`
 
 List all currently-connected processes.
@@ -444,6 +446,8 @@ List all currently-connected processes.
 - `provides_any_of`: array of `InterestKind`
 - `consumes_any_of`: array of `InterestKind`
 - `kinds`: array of `ProcessKind`
+
+**Filter semantics.** An empty filter object (or omitting `filter` entirely) returns all processes. Within a single subfield, multiple values are an OR (a process matches if any of its provides/consumes/kind values is in the array). Across subfields, the conditions AND together (a process must match every populated subfield). An empty or missing subfield is not a filter on that axis. Example: `{ "kinds": ["reader"], "provides_any_of": ["sentence", "hit"] }` returns readers that provide either sentence or hit (or both).
 
 **Result**:
 ```json
@@ -498,6 +502,8 @@ Detailed info on one annotation layer.
 ```
 
 `kind` is `"string"` or `"int"` for forward layers.
+
+Nonexistent layer returns `-32602` (invalid params). Layer existence is a named lookup, not a range; clients that don't know a layer name should call `corpus.info` first to discover the available layers.
 
 ### `query`
 
@@ -618,6 +624,14 @@ Discarding a named result's handle is a no-op (named results are persisted).
 
 ### `text`
 
+**Boundary contract (applies across this namespace).** Three categories of operation, distinguished by how they treat out-of-range inputs:
+
+- **Range-based ops** (`text.surface`, `text.surface_with_token_spans`, `text.annotations_range`, and `text.sentences`' `sent_start`/`sent_end` axis): out-of-range endpoints clamp to the valid range. `start > end` (or `sent_start > sent_end`) returns `-32602` regardless — that is a client bug, not a clamp case. An empty post-clamp range returns an empty result (empty `surface`, empty `tokens`, empty `sentences`).
+- **Named-coordinate lookups** (`text.sentence`, `text.document`, and the `doc` field within `text.sentences`): nonexistent target returns `-32602`. A nonexistent document or sentence is not a clamp case; it indicates a bad reference.
+- **Sparse ops** (`text.annotations`): empty `positions` returns an empty `values` array. Out-of-range or layer-missing positions are silently omitted from the result.
+
+The clamping rule for range ops is motivated by KWIC and similar window-around-hit consumers, which compute `hit.span.end + window_tokens` without knowing corpus or document boundaries. Pushing the bound check to the daemon avoids a round-trip per render. Named-coordinate ops do not get the same treatment because no analogous "compute coordinate without knowing boundaries" pattern exists for them.
+
 #### `text.surface`
 
 Return the surface text for a token range. Honors multiword tokens and `SpaceAfter=No`.
@@ -625,6 +639,58 @@ Return the surface text for a token range. Honors multiword tokens and `SpaceAft
 **Params**: `{ "start": 1247, "end": 1289 }`
 
 **Result**: `{ "surface": "Mathilde Loisel était jolie..." }`
+
+`start` and `end` clamp to `token_count` (range op). For per-token byte offsets within the produced surface, see `text.surface_with_token_spans`.
+
+#### `text.surface_with_token_spans`
+
+Batched MWT-aware surface reconstruction that also returns per-token byte offsets within each produced surface string, plus a flag identifying which position in each MWT carries the surface bytes. The hot path for KWIC rendering and any other consumer that needs to highlight specific tokens inside reconstructed text.
+
+**Params**:
+```json
+{ "ranges": [ { "start": 1247, "end": 1252 }, { "start": 2018, "end": 2031 } ] }
+```
+
+`ranges` is an array of `Span`. Each is processed independently with the standard range-op clamp rules. A malformed range (`start > end`) anywhere in the array fails the entire call with `-32602` — clients batch what they trust.
+
+**Result**:
+```json
+{
+  "results": [
+    {
+      "surface": "à le chien",
+      "tokens": [
+        { "position": 1247, "surface_start": 0, "surface_end": 2, "emitted": true },
+        { "position": 1248, "surface_start": 3, "surface_end": 6, "emitted": true },
+        { "position": 1249, "surface_start": 7, "surface_end": 10, "emitted": true }
+      ]
+    },
+    {
+      "surface": "au chien",
+      "tokens": [
+        { "position": 2018, "surface_start": 0, "surface_end": 2, "emitted": true },
+        { "position": 2019, "surface_start": 2, "surface_end": 2, "emitted": false },
+        { "position": 2020, "surface_start": 3, "surface_end": 8, "emitted": true }
+      ]
+    }
+  ]
+}
+```
+
+`results` is in input order, one entry per requested range.
+
+**Per-token entries.** Each `SurfaceToken` has:
+- `position` — global token position
+- `surface_start`, `surface_end` — half-open byte offsets into the same entry's `surface`
+- `emitted` — `true` for the position that carries the surface bytes, `false` for MWT constituent positions that share the bytes with their MWT's emitter
+
+For a non-MWT token, the entry is its own emitter and the byte range is non-empty (or empty only for tokens whose `word` value is the empty string).
+
+**MWT semantics.** When an MWT covers `[mwt.start, mwt.end)` and the requested range fully contains the MWT (`mwt.start >= range.start && mwt.end <= range.end`), the daemon emits the MWT surface form once. The emitter is the position at `mwt.start`; constituent positions `mwt.start + 1 .. mwt.end` each get an entry with `surface_start == surface_end` at the post-emit byte offset and `emitted: false`. The MWT's `no_space_after` flag applies for spacing after the MWT.
+
+**MWTs that cross the range boundary.** If `mwt.start < range.start` or `mwt.end > range.end`, the daemon falls back to per-position emission: each in-range position emits its own `word` value as a singleton emitter. This avoids leaking surface bytes that belong to positions outside the requested range. Clients that want MWT-level rendering should align their window boundaries to MWT or sentence boundaries; a request that cuts a French contraction like `au` mid-MWT will see `à le` reconstructed instead.
+
+**Spacing.** Between emitters, the daemon appends a single space byte unless the preceding emitter's `no_space_after` is set (from MWT's flag or the token-level spacing bitmap). No trailing space is appended at the range end.
 
 #### `text.sentence`
 
@@ -641,7 +707,7 @@ Return surface text plus span and sentence ID for a single sentence.
 }
 ```
 
-`sent` is sentence index within the document.
+`sent` is sentence index within the document. Named-coordinate lookup: nonexistent `doc` or `sent` returns `-32602`.
 
 #### `text.sentences`
 
@@ -649,7 +715,7 @@ Bulk variant for rendering a document range.
 
 **Params**: `{ "doc": 3, "sent_start": 140, "sent_end": 150 }`
 
-`[sent_start, sent_end)` half-open.
+`[sent_start, sent_end)` half-open. `sent_start` and `sent_end` clamp to the document's sentence count (range axis); `sent_start > sent_end` returns `-32602`; nonexistent `doc` returns `-32602` (named axis).
 
 **Result**:
 ```json
@@ -678,6 +744,8 @@ Document metadata.
 }
 ```
 
+Named-coordinate lookup: nonexistent `doc` returns `-32602`.
+
 #### `text.annotations`
 
 Fetch token-level annotation values at specific positions. Use for sparse lookups (e.g., annotations at hit positions). For contiguous ranges, prefer `text.annotations_range`.
@@ -701,6 +769,8 @@ Fetch token-level annotation values at specific positions. Use for sparse lookup
 
 For positions/layers with no value, the entry is omitted. Value types reflect the underlying layer kind: string layers emit JSON strings, int layers (e.g. `head`) emit JSON numbers. Same shape as `text.annotations_range` rows below.
 
+Sparse semantics: empty `positions` returns an empty `values` array. Out-of-range positions and unknown layer names are silently omitted from the result. There is no boundary error for this operation; the only `-32602` here is for malformed params (e.g. wrong types).
+
 #### `text.annotations_range`
 
 Fetch annotation values for every token in a contiguous range, organized by token. The hot path for CoNLL-U inspectors and inline annotation rendering.
@@ -710,7 +780,7 @@ Fetch annotation values for every token in a contiguous range, organized by toke
 { "start": 1247, "end": 1289, "layers": ["upos", "lemma", "head", "feats"] }
 ```
 
-`layers` is optional; omitting it returns all layers.
+`layers` is optional; omitting it returns all layers. `start` and `end` clamp to `token_count` (range op); `start > end` returns `-32602`.
 
 **Result**:
 ```json
@@ -867,6 +937,7 @@ For operations with **no params**, the client method takes no arguments — ther
 | `corpus.documents` | `client.corpus_documents(params)` | `CorpusDocumentsParams` | `CorpusDocumentsReply` |
 | `corpus.layer_info` | `client.corpus_layer_info(params)` | `CorpusLayerInfoParams` | `LayerInfo` |
 | `text.surface` | `client.text_surface(params)` | `TextSurfaceParams` | `TextSurfaceReply` |
+| `text.surface_with_token_spans` | `client.text_surface_with_token_spans(params)` | `TextSurfaceWithTokenSpansParams` | `TextSurfaceWithTokenSpansReply` |
 | `text.sentence` | `client.text_sentence(params)` | `TextSentenceParams` | `TextSentenceReply` |
 | `text.sentences` | `client.text_sentences(params)` | `TextSentencesParams` | `TextSentencesReply` |
 | `text.document` | `client.text_document(params)` | `TextDocumentParams` | `TextDocumentReply` |
@@ -889,7 +960,7 @@ For operations with **no params**, the client method takes no arguments — ther
 | `coupler.list` | `client.coupler_list(params)` | `CouplerListParams` | `CouplerListReply` |
 | `subscription.subscribe` | `client.subscription_subscribe(params)` | `SubscriptionParams` | `OkReply` |
 | `subscription.unsubscribe` | `client.subscription_unsubscribe(params)` | `SubscriptionParams` | `OkReply` |
-| `daemon.shutdown` | (no client method in v1; clients use raw JSON-RPC if needed) | `DaemonShutdownParams` | `OkReply` |
+| `daemon.shutdown` | `client.daemon_shutdown(params)` | `DaemonShutdownParams` | `OkReply` |
 
 ### Notifications
 
@@ -1249,8 +1320,5 @@ User sees the reader UI come up. From their perspective there was no "daemon" �
 
 ## Open items for implementation
 
-1. **Result handle UUID format** — UUID v4 vs counter-with-prefix. Lean UUID v4 for safe cross-process identity.
-2. **Idle timeout reset granularity** — does any operation reset the timer, or only registration changes? Lean any operation.
-3. **Subscription robustness** — what happens if a subscriber is slow / backpressured? v1: bounded queue per connection, drop newest on overflow with a warning. Drop-newest is what `mpsc::try_send` gives without requiring producer-side eviction, and the cost in practice is small (an in-flight burst that overflows the queue leaves the receiver one update stale; sustained motion drains the queue quickly enough that staleness doesn't compound). If interest updates ever feel laggy under sustained cursor motion, the right primitive for interest specifically is a watch-channel (always-latest, capacity 1) — different topics can use different backpressure strategies. Roster and named-result notifications stay drop-newest FIFO regardless.
-4. **Cross-corpus operations** — explicitly out of scope for v1. Each daemon serves one corpus; clients connecting to multiple corpora open multiple connections.
-5. **Request cancellation** — no in-flight cancellation in v1. Long-running queries run to completion. Downstream callers will eventually want this — likely shape: `request.cancel(id)` operation, with cancelled requests returning a dedicated error code. Defer until a real query lags noticeably.
+1. **Cross-corpus operations** — explicitly out of scope for v1. Each daemon serves one corpus; clients connecting to multiple corpora open multiple connections.
+2. **Request cancellation** — no in-flight cancellation in v1. Long-running queries run to completion. Downstream callers will eventually want this — likely shape: `request.cancel(id)` operation, with cancelled requests returning a dedicated error code. Defer until a real query lags noticeably.
