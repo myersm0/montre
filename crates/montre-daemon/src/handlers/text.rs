@@ -4,10 +4,11 @@ use crate::dispatch::{parse_params, serialize_reply, RpcContext};
 use crate::handlers::corpus::{document_component, document_sentence_count};
 use crate::protocol::{
 	AnnotationEntry, AnnotationRow, AnnotationValue, ProtocolError, SentenceEntry, Span,
-	TextAnnotationsParams, TextAnnotationsRangeParams, TextAnnotationsRangeReply,
-	TextAnnotationsReply, TextDocumentParams, TextDocumentReply, TextSentenceParams,
-	TextSentenceReply, TextSentencesParams, TextSentencesReply, TextSurfaceParams,
-	TextSurfaceReply,
+	SurfaceToken, SurfaceWithTokens, TextAnnotationsParams, TextAnnotationsRangeParams,
+	TextAnnotationsRangeReply, TextAnnotationsReply, TextDocumentParams, TextDocumentReply,
+	TextSentenceParams, TextSentenceReply, TextSentencesParams, TextSentencesReply,
+	TextSurfaceParams, TextSurfaceReply, TextSurfaceWithTokenSpansParams,
+	TextSurfaceWithTokenSpansReply,
 };
 
 fn fetch_annotation(corpus: &Corpus, position: u64, layer: &str) -> Option<AnnotationValue> {
@@ -69,6 +70,77 @@ pub(crate) fn handle_text_surface(
 	serialize_reply(TextSurfaceReply {
 		surface: ctx.handle.corpus.surface_text(start, end),
 	})
+}
+
+pub(crate) fn handle_text_surface_with_token_spans(
+	params: Option<serde_json::Value>,
+	ctx: &RpcContext,
+) -> Result<serde_json::Value, ProtocolError> {
+	let parsed: TextSurfaceWithTokenSpansParams =
+		parse_params("text.surface_with_token_spans", params)?;
+
+	let token_count = ctx.handle.corpus.token_count();
+	let mut results = Vec::with_capacity(parsed.ranges.len());
+	for range in &parsed.ranges {
+		if range.start > range.end {
+			return Err(ProtocolError::new(-32602, "start must be <= end"));
+		}
+		let start = range.start.min(token_count);
+		let end = range.end.min(token_count);
+		results.push(build_surface_with_tokens(&ctx.handle.corpus, start, end));
+	}
+
+	serialize_reply(TextSurfaceWithTokenSpansReply { results })
+}
+
+fn build_surface_with_tokens(corpus: &Corpus, start: u64, end: u64) -> SurfaceWithTokens {
+	let mut surface = String::new();
+	let mut tokens = Vec::with_capacity((end - start) as usize);
+	let mut position = start;
+	while position < end {
+		let mwt = corpus.mwt_covering(position);
+		let use_mwt = matches!(&mwt, Some(m) if m.start == position && m.end <= end);
+		let no_space_after;
+		if use_mwt {
+			let mwt = mwt.expect("use_mwt implies Some");
+			let surface_start = surface.len() as u64;
+			surface.push_str(&mwt.form);
+			let surface_end = surface.len() as u64;
+			tokens.push(SurfaceToken {
+				position,
+				surface_start,
+				surface_end,
+				emitted: true,
+			});
+			for non_emit in (position + 1)..mwt.end {
+				tokens.push(SurfaceToken {
+					position: non_emit,
+					surface_start: surface_end,
+					surface_end,
+					emitted: false,
+				});
+			}
+			position = mwt.end;
+			no_space_after = mwt.no_space_after;
+		} else {
+			let surface_start = surface.len() as u64;
+			let word = corpus.forward().get_str(position, "word").unwrap_or("");
+			surface.push_str(word);
+			let surface_end = surface.len() as u64;
+			tokens.push(SurfaceToken {
+				position,
+				surface_start,
+				surface_end,
+				emitted: true,
+			});
+			no_space_after = corpus.has_no_space_after(position);
+			position += 1;
+		}
+		if position < end && !no_space_after {
+			surface.push(' ');
+		}
+	}
+	SurfaceWithTokens { surface, tokens }
 }
 
 pub(crate) fn handle_text_sentence(
@@ -567,6 +639,145 @@ mod tests {
 			let result = dispatch_request("text.annotations", Some(params), ctx).unwrap();
 			let reply: TextAnnotationsReply = serde_json::from_value(result).unwrap();
 			assert!(reply.values.iter().all(|e| e.position == 0));
+		});
+	}
+
+	#[test]
+	fn surface_with_token_spans_empty_ranges_returns_empty_results() {
+		with_registered_context(|ctx| {
+			let params = serde_json::json!({ "ranges": [] });
+			let result =
+				dispatch_request("text.surface_with_token_spans", Some(params), ctx).unwrap();
+			let reply: TextSurfaceWithTokenSpansReply = serde_json::from_value(result).unwrap();
+			assert!(reply.results.is_empty());
+		});
+	}
+
+	#[test]
+	fn surface_with_token_spans_empty_range_returns_empty_entry() {
+		with_registered_context(|ctx| {
+			let params = serde_json::json!({ "ranges": [{ "start": 3, "end": 3 }] });
+			let result =
+				dispatch_request("text.surface_with_token_spans", Some(params), ctx).unwrap();
+			let reply: TextSurfaceWithTokenSpansReply = serde_json::from_value(result).unwrap();
+			assert_eq!(reply.results.len(), 1);
+			assert!(reply.results[0].surface.is_empty());
+			assert!(reply.results[0].tokens.is_empty());
+		});
+	}
+
+	#[test]
+	fn surface_with_token_spans_inverted_range_rejected() {
+		with_registered_context(|ctx| {
+			let params = serde_json::json!({ "ranges": [{ "start": 5, "end": 1 }] });
+			let err =
+				dispatch_request("text.surface_with_token_spans", Some(params), ctx).unwrap_err();
+			assert_eq!(err.code, -32602);
+		});
+	}
+
+	#[test]
+	fn surface_with_token_spans_clamps_end_past_token_count() {
+		with_registered_context(|ctx| {
+			let token_count = ctx.handle.corpus.token_count();
+			let params =
+				serde_json::json!({ "ranges": [{ "start": 0, "end": token_count + 100 }] });
+			let result =
+				dispatch_request("text.surface_with_token_spans", Some(params), ctx).unwrap();
+			let reply: TextSurfaceWithTokenSpansReply = serde_json::from_value(result).unwrap();
+			assert_eq!(reply.results.len(), 1);
+			assert_eq!(reply.results[0].tokens.len() as u64, token_count);
+		});
+	}
+
+	#[test]
+	fn surface_with_token_spans_token_offsets_are_consistent() {
+		with_registered_context(|ctx| {
+			let doc = find_doc_index(&ctx.handle.corpus, "la_maison");
+			let sent_params = serde_json::json!({ "doc": doc, "sent": 0 });
+			let sent_result = dispatch_request("text.sentence", Some(sent_params), ctx).unwrap();
+			let sentence: TextSentenceReply = serde_json::from_value(sent_result).unwrap();
+
+			let params = serde_json::json!({
+				"ranges": [{ "start": sentence.span.start, "end": sentence.span.end }]
+			});
+			let result =
+				dispatch_request("text.surface_with_token_spans", Some(params), ctx).unwrap();
+			let reply: TextSurfaceWithTokenSpansReply = serde_json::from_value(result).unwrap();
+			assert_eq!(reply.results.len(), 1);
+			let entry = &reply.results[0];
+
+			assert_eq!(entry.surface, sentence.surface);
+
+			let token_span = sentence.span.end - sentence.span.start;
+			assert_eq!(entry.tokens.len() as u64, token_span);
+			for window in entry.tokens.windows(2) {
+				assert!(window[0].surface_start <= window[0].surface_end);
+				assert!(window[1].position == window[0].position + 1);
+				assert!(window[0].surface_end <= window[1].surface_start);
+			}
+			let last = entry.tokens.last().expect("at least one token");
+			assert!(last.surface_end as usize <= entry.surface.len());
+			assert!(entry.tokens.iter().filter(|t| t.emitted).count() >= 1);
+		});
+	}
+
+	#[test]
+	fn surface_with_token_spans_multiple_ranges_preserve_order() {
+		with_registered_context(|ctx| {
+			let doc = find_doc_index(&ctx.handle.corpus, "la_maison");
+			let sent_a = dispatch_request(
+				"text.sentence",
+				Some(serde_json::json!({ "doc": doc, "sent": 0 })),
+				ctx,
+			)
+			.unwrap();
+			let sent_b = dispatch_request(
+				"text.sentence",
+				Some(serde_json::json!({ "doc": doc, "sent": 1 })),
+				ctx,
+			)
+			.unwrap();
+			let a: TextSentenceReply = serde_json::from_value(sent_a).unwrap();
+			let b: TextSentenceReply = serde_json::from_value(sent_b).unwrap();
+
+			let params = serde_json::json!({
+				"ranges": [
+					{ "start": a.span.start, "end": a.span.end },
+					{ "start": b.span.start, "end": b.span.end },
+				]
+			});
+			let result =
+				dispatch_request("text.surface_with_token_spans", Some(params), ctx).unwrap();
+			let reply: TextSurfaceWithTokenSpansReply = serde_json::from_value(result).unwrap();
+			assert_eq!(reply.results.len(), 2);
+			assert_eq!(reply.results[0].surface, a.surface);
+			assert_eq!(reply.results[1].surface, b.surface);
+		});
+	}
+
+	#[test]
+	fn surface_with_token_spans_single_token_self_consistent() {
+		with_registered_context(|ctx| {
+			let doc = find_doc_index(&ctx.handle.corpus, "la_maison");
+			let sent_params = serde_json::json!({ "doc": doc, "sent": 0 });
+			let sent_result = dispatch_request("text.sentence", Some(sent_params), ctx).unwrap();
+			let sentence: TextSentenceReply = serde_json::from_value(sent_result).unwrap();
+
+			let pos = sentence.span.start;
+			let params = serde_json::json!({
+				"ranges": [{ "start": pos, "end": pos + 1 }]
+			});
+			let result =
+				dispatch_request("text.surface_with_token_spans", Some(params), ctx).unwrap();
+			let reply: TextSurfaceWithTokenSpansReply = serde_json::from_value(result).unwrap();
+			let entry = &reply.results[0];
+			assert_eq!(entry.tokens.len(), 1);
+			let token = &entry.tokens[0];
+			assert_eq!(token.position, pos);
+			assert_eq!(token.surface_start, 0);
+			assert_eq!(token.surface_end as usize, entry.surface.len());
+			assert!(token.emitted);
 		});
 	}
 }

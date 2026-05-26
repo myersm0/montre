@@ -319,6 +319,7 @@ pub(crate) fn dispatch_request(
 		"corpus.documents" => corpus::handle_corpus_documents(params, ctx),
 		"corpus.layer_info" => corpus::handle_corpus_layer_info(params, ctx),
 		"text.surface" => text::handle_text_surface(params, ctx),
+		"text.surface_with_token_spans" => text::handle_text_surface_with_token_spans(params, ctx),
 		"text.sentence" => text::handle_text_sentence(params, ctx),
 		"text.sentences" => text::handle_text_sentences(params, ctx),
 		"text.document" => text::handle_text_document(params, ctx),

@@ -247,6 +247,40 @@ fn client_publish_interest_drives_coupler_notification() {
 }
 
 #[test]
+fn client_text_surface_with_token_spans_round_trip() {
+	let (_fx, mut client) = client();
+	register(&mut client);
+
+	let docs = client
+		.corpus_documents(CorpusDocumentsParams { component: None })
+		.expect("corpus documents");
+	let doc = docs
+		.documents
+		.iter()
+		.find(|d| d.name.contains("la_maison"))
+		.expect("la_maison doc");
+
+	let sentence = client
+		.text_sentence(TextSentenceParams { doc: doc.index, sent: 0 })
+		.expect("text sentence");
+
+	let reply = client
+		.text_surface_with_token_spans(TextSurfaceWithTokenSpansParams {
+			ranges: vec![sentence.span.clone()],
+		})
+		.expect("surface with token spans");
+	assert_eq!(reply.results.len(), 1);
+	let entry = &reply.results[0];
+	assert_eq!(entry.surface, sentence.surface);
+	let token_span = sentence.span.end - sentence.span.start;
+	assert_eq!(entry.tokens.len() as u64, token_span);
+	for (offset, token) in entry.tokens.iter().enumerate() {
+		assert_eq!(token.position, sentence.span.start + offset as u64);
+		assert!(token.surface_end as usize <= entry.surface.len());
+	}
+}
+
+#[test]
 fn client_daemon_shutdown_returns_ok_and_broadcasts_notification() {
 	let (_fx, mut client) = client();
 	register(&mut client);
