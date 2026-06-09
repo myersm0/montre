@@ -24,6 +24,7 @@ const DAEMON_BINARY_NAME: &str = "montre";
 const MONTRE_BINARY_ENV: &str = "MONTRE_BINARY";
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum DaemonClientError {
 	#[error("transport error: {0}")]
 	Transport(#[from] io::Error),
@@ -50,6 +51,7 @@ impl From<ProtocolError> for DaemonClientError {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum NotificationEnvelope {
 	CouplerUpdate { coupler_id: CouplerId, interest: Interest },
 	RosterChanged { event: String, process: ProcessInfo },

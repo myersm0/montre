@@ -964,7 +964,7 @@ For operations with **no params**, the client method takes no arguments — ther
 
 ### Notifications
 
-Server-pushed notifications surface as variants of `NotificationEnvelope` (in `montre_daemon::client`):
+Server-pushed notifications surface as variants of `NotificationEnvelope` (in `montre_daemon::client`). The enum is `#[non_exhaustive]` — future protocol revisions add notification methods as new variants, so client `match` statements must include a catch-all arm:
 
 | Wire method | Rust variant | Payload fields |
 |---|---|---|
