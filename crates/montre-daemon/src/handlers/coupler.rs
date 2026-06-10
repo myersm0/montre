@@ -14,8 +14,8 @@ pub(crate) fn handle_coupler_create(
 	let parsed: CouplerCreateParams = parse_params("coupler.create", params)?;
 
 	let coupler_id = state_roundtrip(ctx, |reply| Command::CouplerCreate {
-		master: parsed.master_id,
-		follower: parsed.follower_id,
+		master_id: parsed.master_id,
+		follower_id: parsed.follower_id,
 		kind: parsed.kind,
 		reply,
 	})??;

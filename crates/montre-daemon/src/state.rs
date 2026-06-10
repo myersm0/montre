@@ -151,7 +151,7 @@ impl State {
 		let dropped: Vec<CouplerId> = self
 			.couplers
 			.iter()
-			.filter(|(_, a)| a.master == process_id || a.follower == process_id)
+			.filter(|(_, a)| a.master_id == process_id || a.follower_id == process_id)
 			.map(|(id, _)| *id)
 			.collect();
 		for id in dropped {
@@ -213,13 +213,13 @@ impl State {
 		let derivative_targets: Vec<(CouplerId, ProcessId, CouplerKind)> = self
 			.couplers
 			.values()
-			.filter(|a| a.master == process_id)
-			.map(|a| (a.id, a.follower, a.kind.clone()))
+			.filter(|a| a.master_id == process_id)
+			.map(|a| (a.id, a.follower_id, a.kind.clone()))
 			.collect();
 
-		for (coupler_id, follower, kind) in derivative_targets {
+		for (coupler_id, follower_id, kind) in derivative_targets {
 			let transformed = transform_interest(&self.handle, &interest, &kind);
-			let Some(outbound) = self.roster.get(&follower).map(|c| c.outbound.clone()) else {
+			let Some(outbound) = self.roster.get(&follower_id).map(|c| c.outbound.clone()) else {
 				continue;
 			};
 			for derived in transformed {
@@ -231,7 +231,7 @@ impl State {
 						"interest": derived,
 					},
 				});
-				let _ = try_send_outbound(&outbound, payload, follower);
+				let _ = try_send_outbound(&outbound, payload, follower_id);
 			}
 		}
 	}
@@ -445,8 +445,8 @@ impl State {
 
 	fn coupler_create(
 		&mut self,
-		master: ProcessId,
-		follower: ProcessId,
+		master_id: ProcessId,
+		follower_id: ProcessId,
 		kind: CouplerKind,
 	) -> Result<CouplerId, ProtocolError> {
 		if !all_coupler_kinds().any(|k| k.type_name() == kind.type_name()) {
@@ -455,19 +455,19 @@ impl State {
 				format!("coupler kind '{}' not supported by this daemon", kind.type_name()),
 			));
 		}
-		if !self.roster.contains_key(&master) {
+		if !self.roster.contains_key(&master_id) {
 			return Err(ProtocolError::new(
 				error_codes::PROCESS_NOT_FOUND,
-				format!("master process {} not found", master),
+				format!("master process {} not found", master_id),
 			));
 		}
-		if !self.roster.contains_key(&follower) {
+		if !self.roster.contains_key(&follower_id) {
 			return Err(ProtocolError::new(
 				error_codes::PROCESS_NOT_FOUND,
-				format!("follower process {} not found", follower),
+				format!("follower process {} not found", follower_id),
 			));
 		}
-		if self.coupler_creates_cycle(master, follower) {
+		if self.coupler_creates_cycle(master_id, follower_id) {
 			return Err(ProtocolError::new(
 				error_codes::COUPLER_CYCLE,
 				"coupler would create a cycle in the dependency graph",
@@ -475,12 +475,12 @@ impl State {
 		}
 		let compat_ok = coupler_kind_compat(
 			&kind,
-			&self.roster[&master].info.provides,
-			&self.roster[&follower].info.consumes,
+			&self.roster[&master_id].info.provides,
+			&self.roster[&follower_id].info.consumes,
 		);
 		if !compat_ok {
-			let master_provides = self.roster[&master].info.provides.clone();
-			let follower_consumes = self.roster[&follower].info.consumes.clone();
+			let master_provides = self.roster[&master_id].info.provides.clone();
+			let follower_consumes = self.roster[&follower_id].info.consumes.clone();
 			return Err(ProtocolError::new(
 				error_codes::COUPLER_INCOMPATIBLE,
 				format!(
@@ -497,19 +497,19 @@ impl State {
 		let coupler_id = self.allocate_coupler_id();
 		let coupler = Coupler {
 			id: coupler_id,
-			master,
-			follower,
+			master_id,
+			follower_id,
 			kind: kind.clone(),
 		};
 		self.couplers.insert(coupler_id, coupler);
 
 		let initial = self
 			.roster
-			.get(&master)
+			.get(&master_id)
 			.and_then(|c| c.info.current_interest.clone());
 		if let Some(interest) = initial {
 			let transformed = transform_interest(&self.handle, &interest, &kind);
-			if let Some(outbound) = self.roster.get(&follower).map(|c| c.outbound.clone()) {
+			if let Some(outbound) = self.roster.get(&follower_id).map(|c| c.outbound.clone()) {
 				for derived in transformed {
 					let payload = serde_json::json!({
 						"jsonrpc": "2.0",
@@ -519,7 +519,7 @@ impl State {
 							"interest": derived,
 						},
 					});
-					let _ = try_send_outbound(&outbound, payload, follower);
+					let _ = try_send_outbound(&outbound, payload, follower_id);
 				}
 			}
 		}
@@ -542,28 +542,28 @@ impl State {
 			Some(pid) => self
 				.couplers
 				.values()
-				.filter(|a| a.master == pid || a.follower == pid)
+				.filter(|a| a.master_id == pid || a.follower_id == pid)
 				.cloned()
 				.collect(),
 		}
 	}
 
-	fn coupler_creates_cycle(&self, master: ProcessId, follower: ProcessId) -> bool {
-		if master == follower {
+	fn coupler_creates_cycle(&self, master_id: ProcessId, follower_id: ProcessId) -> bool {
+		if master_id == follower_id {
 			return true;
 		}
-		let mut stack = vec![follower];
+		let mut stack = vec![follower_id];
 		let mut visited = HashSet::new();
 		while let Some(current) = stack.pop() {
 			if !visited.insert(current) {
 				continue;
 			}
-			if current == master {
+			if current == master_id {
 				return true;
 			}
 			for coupler in self.couplers.values() {
-				if coupler.master == current {
-					stack.push(coupler.follower);
+				if coupler.master_id == current {
+					stack.push(coupler.follower_id);
 				}
 			}
 		}
@@ -992,8 +992,8 @@ pub(crate) enum Command {
 		reply: SyncSender<()>,
 	},
 	CouplerCreate {
-		master: ProcessId,
-		follower: ProcessId,
+		master_id: ProcessId,
+		follower_id: ProcessId,
 		kind: CouplerKind,
 		reply: SyncSender<Result<CouplerId, ProtocolError>>,
 	},
@@ -1081,8 +1081,8 @@ pub(crate) fn run(mut state: State, commands: Receiver<Command>) {
 				state.discard_handle(handle);
 				let _ = reply.send(());
 			}
-			Command::CouplerCreate { master, follower, kind, reply } => {
-				let _ = reply.send(state.coupler_create(master, follower, kind));
+			Command::CouplerCreate { master_id, follower_id, kind, reply } => {
+				let _ = reply.send(state.coupler_create(master_id, follower_id, kind));
 			}
 			Command::CouplerRemove { coupler_id, reply } => {
 				let _ = reply.send(state.coupler_remove(coupler_id));

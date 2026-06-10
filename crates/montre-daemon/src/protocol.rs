@@ -94,8 +94,8 @@ impl CouplerKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Coupler {
 	pub id: CouplerId,
-	pub master: ProcessId,
-	pub follower: ProcessId,
+	pub master_id: ProcessId,
+	pub follower_id: ProcessId,
 	pub kind: CouplerKind,
 }
 
