@@ -30,7 +30,7 @@ fn stub_corpus_info_response(id: u64) -> serde_json::Value {
 		"result": {
 			"name": "stub",
 			"canonical_path": "/stub",
-			"stable_key": "stub",
+			"corpus_id": "stub",
 			"components": [],
 			"layers": [],
 			"alignments": []

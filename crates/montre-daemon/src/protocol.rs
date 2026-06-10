@@ -223,7 +223,7 @@ pub struct PublishInterestParams {
 pub struct CorpusInfo {
 	pub name: String,
 	pub canonical_path: String,
-	pub stable_key: String,
+	pub corpus_id: String,
 	pub components: Vec<String>,
 	pub layers: Vec<String>,
 	pub alignments: Vec<String>,
