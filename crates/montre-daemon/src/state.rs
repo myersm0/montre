@@ -959,6 +959,8 @@ pub(crate) enum Command {
 		process_id: ProcessId,
 		interest: Interest,
 	},
+	#[cfg(test)]
+	TestPanic,
 	InsertResult {
 		cql: String,
 		hits: Vec<Hit>,
@@ -1056,6 +1058,8 @@ pub(crate) fn run(mut state: State, commands: Receiver<Command>) {
 			Command::PublishInterest { process_id, interest } => {
 				state.publish_interest(process_id, interest);
 			}
+			#[cfg(test)]
+			Command::TestPanic => panic!("test-induced state thread panic"),
 			Command::InsertResult { cql, hits, reply } => {
 				let _ = reply.send(state.insert_result(cql, hits));
 			}

@@ -370,6 +370,7 @@ Organized by namespace. Each operation lists method name, params shape, result s
 
 - Every operation other than `session.register` may return error `1002` (not registered) if called before registration completes. Per-operation error lists below do not repeat this.
 - Every operation may return `-32602` (invalid params) when the params object fails to deserialize or fails operation-specific validation, and `-32603` (internal error) when daemon-internal invariants are violated (missing index layer, lookup inconsistency, etc.). Per-operation error lists below cover application-code paths only.
+- A panic inside a request handler is contained at the connection boundary: the offending request receives `-32603` (message names the method; the panic payload goes to the daemon log), then the daemon drops that one connection. Other connections and daemon state are unaffected. A panic on the state thread is the unrecoverable case and takes the `fatal_error` shutdown path instead — see `notification.shutdown`.
 - `session.publish_interest` is the only client→daemon method that may be sent as a JSON-RPC notification (no `id`). All other methods sent without an `id` are silently dropped. Notifications received before `session.register` completes are also silently dropped.
 - Triggers for `notification.roster_changed` and `notification.named_results_changed` are listed in the "Subscription topics" table; per-operation pages below do not repeat them.
 
@@ -1062,7 +1063,7 @@ Sent to all clients when daemon is shutting down. No subscription required.
 { "reason": "idle_timeout", "in_seconds": 0 }
 ```
 
-`reason` values: `"requested" | "idle_timeout" | "signal" | "fatal_error"`. `requested` corresponds to a `daemon.shutdown` call from a registered client; `idle_timeout` and `signal` originate inside the daemon. `fatal_error` is reserved for an unexpected-error path; v1 daemons never currently emit it. `in_seconds` is a hint about how long the daemon will wait before closing connections: `0` means immediate close (current v1 behavior for all reasons), positive values reserved for a future graceful-shutdown window. Clients should not rely on `in_seconds > 0` for anything load-bearing.
+`reason` values: `"requested" | "idle_timeout" | "signal" | "fatal_error"`. `requested` corresponds to a `daemon.shutdown` call from a registered client; `idle_timeout` and `signal` originate inside the daemon. `fatal_error` is emitted when the daemon's state thread suffers an unrecoverable internal failure (a panic in the state mutator): a monitor broadcasts this notification best-effort to every open connection, then closes them all and the daemon exits with an error. Per-connection handler failures do **not** take this path — see the error model's `-32603` notes. `in_seconds` is a hint about how long the daemon will wait before closing connections: `0` means immediate close (current v1 behavior for all reasons), positive values reserved for a future graceful-shutdown window. Clients should not rely on `in_seconds > 0` for anything load-bearing.
 
 ---
 

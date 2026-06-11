@@ -272,14 +272,32 @@ fn run_reader(
 				let _ = outbound_tx.send(response);
 			}
 			Ok(Inbound::Request { id, method, params }) => {
-				let response = match dispatch_request(&method, params, &mut ctx) {
-					Ok(value) => build_response(id, value),
-					Err(error) => build_error_response(id, error),
-				};
-				let _ = outbound_tx.send(response);
+				match dispatch_request_guarded(&method, params, &mut ctx) {
+					DispatchOutcome::Completed(result) => {
+						let response = match result {
+							Ok(value) => build_response(id, value),
+							Err(error) => build_error_response(id, error),
+						};
+						let _ = outbound_tx.send(response);
+					}
+					DispatchOutcome::Panicked(error) => {
+						let _ = outbound_tx.send(build_error_response(id, error));
+						break;
+					}
+				}
 			}
 			Ok(Inbound::Notification { method, params }) => {
-				dispatch_notification(&method, params, &ctx);
+				let unwind_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+					dispatch_notification(&method, params, &ctx)
+				}));
+				if let Err(payload) = unwind_result {
+					tracing::error!(
+						method = %method,
+						panic = panic_message(payload.as_ref()),
+						"notification handler panicked; dropping connection",
+					);
+					break;
+				}
 			}
 		}
 	}
@@ -298,11 +316,55 @@ fn run_reader(
 	}
 }
 
+pub(crate) enum DispatchOutcome {
+	Completed(Result<serde_json::Value, ProtocolError>),
+	Panicked(ProtocolError),
+}
+
+pub(crate) fn dispatch_request_guarded(
+	method: &str,
+	params: Option<serde_json::Value>,
+	ctx: &mut RpcContext,
+) -> DispatchOutcome {
+	let unwind_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+		dispatch_request(method, params, ctx)
+	}));
+	match unwind_result {
+		Ok(result) => DispatchOutcome::Completed(result),
+		Err(payload) => {
+			tracing::error!(
+				method = method,
+				panic = panic_message(payload.as_ref()),
+				"handler panicked; dropping connection",
+			);
+			DispatchOutcome::Panicked(ProtocolError::new(
+				-32603,
+				format!("handler panicked: {}; see daemon log", method),
+			))
+		}
+	}
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+	if let Some(text) = payload.downcast_ref::<&str>() {
+		text
+	} else if let Some(text) = payload.downcast_ref::<String>() {
+		text
+	} else {
+		"<non-string panic payload>"
+	}
+}
+
 pub(crate) fn dispatch_request(
 	method: &str,
 	params: Option<serde_json::Value>,
 	ctx: &mut RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
+	#[cfg(test)]
+	if method == "internal.panic" {
+		panic!("test-induced handler panic");
+	}
+
 	if ctx.process_id.is_none() && method != "session.register" {
 		return Err(ProtocolError::new(
 			error_codes::NOT_REGISTERED,
@@ -1051,6 +1113,31 @@ mod tests {
 			follower_outbound
 				.recv_timeout(Duration::from_millis(500))
 				.expect("declared interest kind still propagates");
+		});
+	}
+
+	#[test]
+	fn handler_panic_is_caught_and_maps_to_internal_error() {
+		test_support::with_registered_context(|ctx| {
+			match dispatch_request_guarded("internal.panic", None, ctx) {
+				DispatchOutcome::Panicked(error) => {
+					assert_eq!(error.code, -32603);
+					assert!(error.message.contains("internal.panic"));
+				}
+				DispatchOutcome::Completed(_) => panic!("expected Panicked outcome"),
+			}
+		});
+	}
+
+	#[test]
+	fn non_panicking_handler_completes_through_guard() {
+		test_support::with_registered_context(|ctx| {
+			match dispatch_request_guarded("corpus.info", None, ctx) {
+				DispatchOutcome::Completed(result) => {
+					result.expect("corpus.info should succeed");
+				}
+				DispatchOutcome::Panicked(_) => panic!("unexpected panic outcome"),
+			}
 		});
 	}
 }

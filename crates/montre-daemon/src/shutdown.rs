@@ -33,6 +33,13 @@ impl ShutdownCoordinator {
 		guard.push(stream);
 	}
 
+	pub(crate) fn broadcast_frame(&self, payload: &[u8]) {
+		let mut guard = self.streams.lock().expect("shutdown streams lock poisoned");
+		for stream in guard.iter_mut() {
+			let _ = crate::dispatch::write_frame(stream, payload);
+		}
+	}
+
 	pub(crate) fn close_all_streams(&self) {
 		let mut guard = self.streams.lock().expect("shutdown streams lock poisoned");
 		for stream in guard.drain(..) {
