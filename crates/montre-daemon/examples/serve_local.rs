@@ -8,7 +8,7 @@ fn print_usage() {
 	eprintln!("usage: serve_local <corpus-path> [--socket PATH] [--idle-timeout SECS]");
 	eprintln!();
 	eprintln!("    --socket PATH         default: /tmp/montre-daemon.sock");
-	eprintln!("    --idle-timeout SECS   default: daemon default (600s); 0 disables");
+	eprintln!("    --idle-timeout SECS   default: daemon default (1800s); 0 disables");
 	eprintln!();
 	eprintln!("example:");
 	eprintln!("    cargo run --example serve_local -p montre-daemon -- ./my-corpus");
