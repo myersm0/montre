@@ -30,6 +30,7 @@ pub struct ServeOptions {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum DaemonError {
 	#[error("not yet implemented")]
 	NotImplemented,

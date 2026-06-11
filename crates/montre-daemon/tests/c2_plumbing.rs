@@ -102,7 +102,7 @@ fn corpus_info_round_trip_over_socket() {
 	let result = client.corpus_info().expect("corpus info");
 
 	assert_eq!(result.name, "test-parallel");
-	assert!(!result.stable_key.is_empty());
+	assert!(!result.corpus_id.is_empty());
 	assert!(!result.components.is_empty());
 	assert_eq!(result.alignments, vec!["sentence".to_string()]);
 }

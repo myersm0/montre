@@ -151,7 +151,7 @@ impl State {
 		let dropped: Vec<CouplerId> = self
 			.couplers
 			.iter()
-			.filter(|(_, a)| a.master == process_id || a.follower == process_id)
+			.filter(|(_, a)| a.master_id == process_id || a.follower_id == process_id)
 			.map(|(id, _)| *id)
 			.collect();
 		for id in dropped {
@@ -213,13 +213,13 @@ impl State {
 		let derivative_targets: Vec<(CouplerId, ProcessId, CouplerKind)> = self
 			.couplers
 			.values()
-			.filter(|a| a.master == process_id)
-			.map(|a| (a.id, a.follower, a.kind.clone()))
+			.filter(|a| a.master_id == process_id)
+			.map(|a| (a.id, a.follower_id, a.kind.clone()))
 			.collect();
 
-		for (coupler_id, follower, kind) in derivative_targets {
+		for (coupler_id, follower_id, kind) in derivative_targets {
 			let transformed = transform_interest(&self.handle, &interest, &kind);
-			let Some(outbound) = self.roster.get(&follower).map(|c| c.outbound.clone()) else {
+			let Some(outbound) = self.roster.get(&follower_id).map(|c| c.outbound.clone()) else {
 				continue;
 			};
 			for derived in transformed {
@@ -231,12 +231,12 @@ impl State {
 						"interest": derived,
 					},
 				});
-				let _ = try_send_outbound(&outbound, payload, follower);
+				let _ = try_send_outbound(&outbound, payload, follower_id);
 			}
 		}
 	}
 
-	fn insert_result(&mut self, cql: String, hits: Vec<Hit>) -> ResultHandle {
+	fn insert_result(&mut self, cql: String, hits: Vec<Hit>) -> ResultMetadata {
 		let handle = generate_handle();
 		let metadata = ResultMetadata {
 			handle: handle.clone(),
@@ -248,6 +248,7 @@ impl State {
 			name: None,
 			form: ResultForm::Session,
 		};
+		let reply_metadata = metadata.clone();
 		let entry = Arc::new(ResultEntry {
 			cql,
 			hits: Arc::new(hits),
@@ -257,14 +258,14 @@ impl State {
 			.write()
 			.expect("results lock poisoned")
 			.insert(handle.clone(), entry);
-		handle
+		reply_metadata
 	}
 
 	fn save_result(
 		&mut self,
 		handle: ResultHandle,
 		name: String,
-	) -> Result<(), ProtocolError> {
+	) -> Result<ResultMetadata, ProtocolError> {
 		if self.named_results.contains_key(&name) {
 			return Err(ProtocolError::new(
 				error_codes::NAMED_RESULT_ALREADY_EXISTS,
@@ -313,8 +314,8 @@ impl State {
 			.insert(handle, promoted);
 		self.named_results.insert(name.clone(), record);
 
-		self.notify_named_results(NamedResultsEvent::Saved, name, Some(metadata));
-		Ok(())
+		self.notify_named_results(NamedResultsEvent::Saved, name, Some(metadata.clone()));
+		Ok(metadata)
 	}
 
 	fn materialize_result(&mut self, name: String) -> Result<ResultMetadata, ProtocolError> {
@@ -445,8 +446,8 @@ impl State {
 
 	fn coupler_create(
 		&mut self,
-		master: ProcessId,
-		follower: ProcessId,
+		master_id: ProcessId,
+		follower_id: ProcessId,
 		kind: CouplerKind,
 	) -> Result<CouplerId, ProtocolError> {
 		if !all_coupler_kinds().any(|k| k.type_name() == kind.type_name()) {
@@ -455,19 +456,19 @@ impl State {
 				format!("coupler kind '{}' not supported by this daemon", kind.type_name()),
 			));
 		}
-		if !self.roster.contains_key(&master) {
+		if !self.roster.contains_key(&master_id) {
 			return Err(ProtocolError::new(
 				error_codes::PROCESS_NOT_FOUND,
-				format!("master process {} not found", master),
+				format!("master process {} not found", master_id),
 			));
 		}
-		if !self.roster.contains_key(&follower) {
+		if !self.roster.contains_key(&follower_id) {
 			return Err(ProtocolError::new(
 				error_codes::PROCESS_NOT_FOUND,
-				format!("follower process {} not found", follower),
+				format!("follower process {} not found", follower_id),
 			));
 		}
-		if self.coupler_creates_cycle(master, follower) {
+		if self.coupler_creates_cycle(master_id, follower_id) {
 			return Err(ProtocolError::new(
 				error_codes::COUPLER_CYCLE,
 				"coupler would create a cycle in the dependency graph",
@@ -475,12 +476,12 @@ impl State {
 		}
 		let compat_ok = coupler_kind_compat(
 			&kind,
-			&self.roster[&master].info.provides,
-			&self.roster[&follower].info.consumes,
+			&self.roster[&master_id].info.provides,
+			&self.roster[&follower_id].info.consumes,
 		);
 		if !compat_ok {
-			let master_provides = self.roster[&master].info.provides.clone();
-			let follower_consumes = self.roster[&follower].info.consumes.clone();
+			let master_provides = self.roster[&master_id].info.provides.clone();
+			let follower_consumes = self.roster[&follower_id].info.consumes.clone();
 			return Err(ProtocolError::new(
 				error_codes::COUPLER_INCOMPATIBLE,
 				format!(
@@ -497,19 +498,19 @@ impl State {
 		let coupler_id = self.allocate_coupler_id();
 		let coupler = Coupler {
 			id: coupler_id,
-			master,
-			follower,
+			master_id,
+			follower_id,
 			kind: kind.clone(),
 		};
 		self.couplers.insert(coupler_id, coupler);
 
 		let initial = self
 			.roster
-			.get(&master)
+			.get(&master_id)
 			.and_then(|c| c.info.current_interest.clone());
 		if let Some(interest) = initial {
 			let transformed = transform_interest(&self.handle, &interest, &kind);
-			if let Some(outbound) = self.roster.get(&follower).map(|c| c.outbound.clone()) {
+			if let Some(outbound) = self.roster.get(&follower_id).map(|c| c.outbound.clone()) {
 				for derived in transformed {
 					let payload = serde_json::json!({
 						"jsonrpc": "2.0",
@@ -519,7 +520,7 @@ impl State {
 							"interest": derived,
 						},
 					});
-					let _ = try_send_outbound(&outbound, payload, follower);
+					let _ = try_send_outbound(&outbound, payload, follower_id);
 				}
 			}
 		}
@@ -542,28 +543,28 @@ impl State {
 			Some(pid) => self
 				.couplers
 				.values()
-				.filter(|a| a.master == pid || a.follower == pid)
+				.filter(|a| a.master_id == pid || a.follower_id == pid)
 				.cloned()
 				.collect(),
 		}
 	}
 
-	fn coupler_creates_cycle(&self, master: ProcessId, follower: ProcessId) -> bool {
-		if master == follower {
+	fn coupler_creates_cycle(&self, master_id: ProcessId, follower_id: ProcessId) -> bool {
+		if master_id == follower_id {
 			return true;
 		}
-		let mut stack = vec![follower];
+		let mut stack = vec![follower_id];
 		let mut visited = HashSet::new();
 		while let Some(current) = stack.pop() {
 			if !visited.insert(current) {
 				continue;
 			}
-			if current == master {
+			if current == master_id {
 				return true;
 			}
 			for coupler in self.couplers.values() {
-				if coupler.master == current {
-					stack.push(coupler.follower);
+				if coupler.master_id == current {
+					stack.push(coupler.follower_id);
 				}
 			}
 		}
@@ -961,12 +962,12 @@ pub(crate) enum Command {
 	InsertResult {
 		cql: String,
 		hits: Vec<Hit>,
-		reply: SyncSender<ResultHandle>,
+		reply: SyncSender<ResultMetadata>,
 	},
 	SaveResult {
 		handle: ResultHandle,
 		name: String,
-		reply: SyncSender<Result<(), ProtocolError>>,
+		reply: SyncSender<Result<ResultMetadata, ProtocolError>>,
 	},
 	MaterializeResult {
 		name: String,
@@ -992,8 +993,8 @@ pub(crate) enum Command {
 		reply: SyncSender<()>,
 	},
 	CouplerCreate {
-		master: ProcessId,
-		follower: ProcessId,
+		master_id: ProcessId,
+		follower_id: ProcessId,
 		kind: CouplerKind,
 		reply: SyncSender<Result<CouplerId, ProtocolError>>,
 	},
@@ -1081,8 +1082,8 @@ pub(crate) fn run(mut state: State, commands: Receiver<Command>) {
 				state.discard_handle(handle);
 				let _ = reply.send(());
 			}
-			Command::CouplerCreate { master, follower, kind, reply } => {
-				let _ = reply.send(state.coupler_create(master, follower, kind));
+			Command::CouplerCreate { master_id, follower_id, kind, reply } => {
+				let _ = reply.send(state.coupler_create(master_id, follower_id, kind));
 			}
 			Command::CouplerRemove { coupler_id, reply } => {
 				let _ = reply.send(state.coupler_remove(coupler_id));
@@ -1327,7 +1328,7 @@ mod tests {
 	#[test]
 	fn insert_result_returns_prefixed_handle() {
 		let mut state = make_state();
-		let handle = state.insert_result("foo".to_string(), vec![]);
+		let handle = state.insert_result("foo".to_string(), vec![]).handle;
 		assert!(handle.starts_with("r-"), "handle = {}", handle);
 		assert!(handle.len() > "r-".len());
 	}
@@ -1335,16 +1336,16 @@ mod tests {
 	#[test]
 	fn insert_result_distinct_handles() {
 		let mut state = make_state();
-		let h1 = state.insert_result("foo".to_string(), vec![]);
-		let h2 = state.insert_result("foo".to_string(), vec![]);
+		let h1 = state.insert_result("foo".to_string(), vec![]).handle;
+		let h2 = state.insert_result("foo".to_string(), vec![]).handle;
 		assert_ne!(h1, h2);
 	}
 
 	#[test]
 	fn save_result_duplicate_name_rejected() {
 		let mut state = make_state();
-		let h1 = state.insert_result("foo".to_string(), vec![]);
-		let h2 = state.insert_result("foo".to_string(), vec![]);
+		let h1 = state.insert_result("foo".to_string(), vec![]).handle;
+		let h2 = state.insert_result("foo".to_string(), vec![]).handle;
 		state.save_result(h1, "named".to_string()).unwrap();
 		let err = state.save_result(h2, "named".to_string()).unwrap_err();
 		assert_eq!(err.code, error_codes::NAMED_RESULT_ALREADY_EXISTS);
@@ -1369,7 +1370,7 @@ mod tests {
 	#[test]
 	fn materialize_already_materialized_rejected() {
 		let mut state = make_state();
-		let h = state.insert_result("foo".to_string(), vec![]);
+		let h = state.insert_result("foo".to_string(), vec![]).handle;
 		state.save_result(h, "named".to_string()).unwrap();
 		state.materialize_result("named".to_string()).unwrap();
 		let err = state.materialize_result("named".to_string()).unwrap_err();
@@ -1379,7 +1380,7 @@ mod tests {
 	#[test]
 	fn materialize_sets_materialized_at_and_preserves_created_at() {
 		let mut state = make_state();
-		let h = state.insert_result("foo".to_string(), vec![]);
+		let h = state.insert_result("foo".to_string(), vec![]).handle;
 		state.save_result(h.clone(), "named".to_string()).unwrap();
 
 		let created_at_before = state.handle
@@ -1402,7 +1403,7 @@ mod tests {
 	#[test]
 	fn delete_named_removes_handle_and_table_entry() {
 		let mut state = make_state();
-		let h = state.insert_result("foo".to_string(), vec![]);
+		let h = state.insert_result("foo".to_string(), vec![]).handle;
 		state.save_result(h.clone(), "named".to_string()).unwrap();
 		assert!(state.handle.results.read().unwrap().contains_key(&h));
 
@@ -1421,7 +1422,7 @@ mod tests {
 	#[test]
 	fn discard_handle_session_form_removed() {
 		let mut state = make_state();
-		let h = state.insert_result("foo".to_string(), vec![]);
+		let h = state.insert_result("foo".to_string(), vec![]).handle;
 		assert!(state.handle.results.read().unwrap().contains_key(&h));
 
 		state.discard_handle(h.clone());
@@ -1431,7 +1432,7 @@ mod tests {
 	#[test]
 	fn discard_handle_named_is_no_op() {
 		let mut state = make_state();
-		let h = state.insert_result("foo".to_string(), vec![]);
+		let h = state.insert_result("foo".to_string(), vec![]).handle;
 		state.save_result(h.clone(), "named".to_string()).unwrap();
 
 		state.discard_handle(h.clone());
@@ -1766,7 +1767,7 @@ mod tests {
 			sentence_index: first_global as u32,
 			captures: vec![],
 		};
-		let result_handle = state.insert_result("test".to_string(), vec![executor_hit]);
+		let result_handle = state.insert_result("test".to_string(), vec![executor_hit]).handle;
 		let interest = Interest::Hit { result: result_handle, hit_idx: 0 };
 		let out = transform_interest(&state.handle, &interest, &CouplerKind::KwicSelection);
 		assert_eq!(out.len(), 1);
@@ -1790,7 +1791,7 @@ mod tests {
 	#[test]
 	fn transform_kwic_hit_idx_out_of_range_returns_empty() {
 		let mut state = make_state();
-		let result_handle = state.insert_result("test".to_string(), vec![]);
+		let result_handle = state.insert_result("test".to_string(), vec![]).handle;
 		let interest = Interest::Hit { result: result_handle, hit_idx: 99 };
 		let out = transform_interest(&state.handle, &interest, &CouplerKind::KwicSelection);
 		assert!(out.is_empty());
@@ -1841,7 +1842,7 @@ mod tests {
 		let state_dir = temp.path().to_path_buf();
 
 		let mut first = state_sharing_dir(state_dir.clone());
-		let handle = first.insert_result("[pos=\"NOUN\"]".to_string(), vec![]);
+		let handle = first.insert_result("[pos=\"NOUN\"]".to_string(), vec![]).handle;
 		first.save_result(handle.clone(), "saved".to_string()).unwrap();
 		drop(first);
 
@@ -1859,8 +1860,8 @@ mod tests {
 		let state_dir = temp.path().to_path_buf();
 
 		let mut first = state_sharing_dir(state_dir.clone());
-		let kept = first.insert_result("[pos=\"NOUN\"]".to_string(), vec![]);
-		let doomed = first.insert_result("[pos=\"ADJ\"]".to_string(), vec![]);
+		let kept = first.insert_result("[pos=\"NOUN\"]".to_string(), vec![]).handle;
+		let doomed = first.insert_result("[pos=\"ADJ\"]".to_string(), vec![]).handle;
 		first.save_result(kept, "kept".to_string()).unwrap();
 		first.save_result(doomed, "doomed".to_string()).unwrap();
 		first.delete_named("doomed".to_string()).unwrap();

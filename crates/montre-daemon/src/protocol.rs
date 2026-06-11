@@ -94,8 +94,8 @@ impl CouplerKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Coupler {
 	pub id: CouplerId,
-	pub master: ProcessId,
-	pub follower: ProcessId,
+	pub master_id: ProcessId,
+	pub follower_id: ProcessId,
 	pub kind: CouplerKind,
 }
 
@@ -223,7 +223,7 @@ pub struct PublishInterestParams {
 pub struct CorpusInfo {
 	pub name: String,
 	pub canonical_path: String,
-	pub stable_key: String,
+	pub corpus_id: String,
 	pub components: Vec<String>,
 	pub layers: Vec<String>,
 	pub alignments: Vec<String>,
@@ -462,12 +462,6 @@ pub struct QueryExecuteParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryExecuteReply {
-	pub handle: ResultHandle,
-	pub hit_count: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryExecuteCountReply {
 	pub count: u64,
 }
@@ -499,33 +493,13 @@ pub struct QuerySaveParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QuerySaveReply {
-	pub ok: bool,
-	pub form: ResultForm,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryMaterializeParams {
 	pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryMaterializeReply {
-	pub ok: bool,
-	pub hit_count: u64,
-	pub materialized_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryLoadParams {
 	pub name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryLoadReply {
-	pub handle: ResultHandle,
-	pub hit_count: u64,
-	pub form: ResultForm,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

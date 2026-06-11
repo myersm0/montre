@@ -22,7 +22,7 @@ pub(crate) fn handle_corpus_info(ctx: &RpcContext) -> Result<serde_json::Value, 
 	let info = CorpusInfo {
 		name: ctx.handle.corpus.name().to_string(),
 		canonical_path: ctx.handle.canonical_path.display().to_string(),
-		stable_key: ctx.handle.corpus_id.clone(),
+		corpus_id: ctx.handle.corpus_id.clone(),
 		components,
 		layers: ctx.handle.corpus.layers().to_vec(),
 		alignments,
@@ -123,7 +123,7 @@ mod tests {
 			let info: CorpusInfo = serde_json::from_value(result).unwrap();
 
 			assert_eq!(info.name, "test-parallel");
-			assert_eq!(info.stable_key, ctx.handle.corpus_id);
+			assert_eq!(info.corpus_id, ctx.handle.corpus_id);
 			assert_eq!(info.canonical_path, ctx.handle.canonical_path.display().to_string());
 
 			let mut components = info.components.clone();

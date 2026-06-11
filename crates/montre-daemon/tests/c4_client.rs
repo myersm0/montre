@@ -3,7 +3,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use montre_daemon::protocol::*;
-use montre_daemon::client::{DaemonClientError, NotificationEnvelope};
+use montre_daemon::client::{DaemonClientError, NotificationEnvelope, RosterEvent};
 use montre_daemon::{serve, DaemonClient, ServeOptions};
 use tempfile::TempDir;
 
@@ -187,7 +187,7 @@ fn client_receives_roster_notifications() {
 		.expect("roster notification");
 	match note {
 		NotificationEnvelope::RosterChanged { event, process } => {
-			assert_eq!(event, "registered");
+			assert_eq!(event, RosterEvent::Registered);
 			assert_eq!(process.id, second_register.process_id);
 		}
 		other => panic!("unexpected notification {other:?}"),
@@ -296,7 +296,7 @@ fn client_daemon_shutdown_returns_ok_and_broadcasts_notification() {
 		.expect("shutdown notification");
 	match note {
 		NotificationEnvelope::Shutdown { reason, .. } => {
-			assert_eq!(reason, "requested");
+			assert_eq!(reason, montre_daemon::client::ShutdownReason::Requested);
 		}
 		other => panic!("unexpected notification {other:?}"),
 	}

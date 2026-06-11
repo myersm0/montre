@@ -24,6 +24,7 @@ const DAEMON_BINARY_NAME: &str = "montre";
 const MONTRE_BINARY_ENV: &str = "MONTRE_BINARY";
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum DaemonClientError {
 	#[error("transport error: {0}")]
 	Transport(#[from] io::Error),
@@ -49,12 +50,64 @@ impl From<ProtocolError> for DaemonClientError {
 	}
 }
 
+macro_rules! receive_side_enum {
+	($name:ident { $($variant:ident => $text:literal),+ $(,)? }) => {
+		#[derive(Debug, Clone, PartialEq, Eq)]
+		#[non_exhaustive]
+		pub enum $name {
+			$($variant,)+
+			Unknown(String),
+		}
+
+		impl<'de> serde::Deserialize<'de> for $name {
+			fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+			where
+				D: serde::Deserializer<'de>,
+			{
+				let value = String::deserialize(deserializer)?;
+				Ok(match value.as_str() {
+					$($text => Self::$variant,)+
+					_ => Self::Unknown(value),
+				})
+			}
+		}
+
+		impl std::fmt::Display for $name {
+			fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+				match self {
+					$(Self::$variant => formatter.write_str($text),)+
+					Self::Unknown(value) => formatter.write_str(value),
+				}
+			}
+		}
+	};
+}
+
+receive_side_enum!(RosterEvent {
+	Registered => "registered",
+	Unregistered => "unregistered",
+	LabelUpdated => "label_updated",
+});
+
+receive_side_enum!(NamedResultsEvent {
+	Saved => "saved",
+	Deleted => "deleted",
+});
+
+receive_side_enum!(ShutdownReason {
+	IdleTimeout => "idle_timeout",
+	Signal => "signal",
+	FatalError => "fatal_error",
+	Requested => "requested",
+});
+
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum NotificationEnvelope {
 	CouplerUpdate { coupler_id: CouplerId, interest: Interest },
-	RosterChanged { event: String, process: ProcessInfo },
-	NamedResultsChanged { event: String, name: String, metadata: Option<ResultMetadata> },
-	Shutdown { reason: String, in_seconds: u32 },
+	RosterChanged { event: RosterEvent, process: ProcessInfo },
+	NamedResultsChanged { event: NamedResultsEvent, name: String, metadata: Option<ResultMetadata> },
+	Shutdown { reason: ShutdownReason, in_seconds: u32 },
 }
 
 pub struct DaemonClient {
@@ -164,7 +217,7 @@ impl DaemonClient {
 		self.request("corpus.layer_info", Some(params))
 	}
 
-	pub fn query_execute(&mut self, params: QueryExecuteParams) -> Result<QueryExecuteReply> {
+	pub fn query_execute(&mut self, params: QueryExecuteParams) -> Result<ResultMetadata> {
 		self.request("query.execute", Some(params))
 	}
 
@@ -180,15 +233,15 @@ impl DaemonClient {
 		self.request("query.metadata", Some(params))
 	}
 
-	pub fn query_save(&mut self, params: QuerySaveParams) -> Result<QuerySaveReply> {
+	pub fn query_save(&mut self, params: QuerySaveParams) -> Result<ResultMetadata> {
 		self.request("query.save", Some(params))
 	}
 
-	pub fn query_materialize(&mut self, params: QueryMaterializeParams) -> Result<QueryMaterializeReply> {
+	pub fn query_materialize(&mut self, params: QueryMaterializeParams) -> Result<ResultMetadata> {
 		self.request("query.materialize", Some(params))
 	}
 
-	pub fn query_load(&mut self, params: QueryLoadParams) -> Result<QueryLoadReply> {
+	pub fn query_load(&mut self, params: QueryLoadParams) -> Result<ResultMetadata> {
 		self.request("query.load", Some(params))
 	}
 
@@ -543,7 +596,7 @@ fn parse_coupler_update(params: serde_json::Value) -> std::result::Result<Notifi
 fn parse_roster_changed(params: serde_json::Value) -> std::result::Result<NotificationEnvelope, serde_json::Error> {
 	#[derive(serde::Deserialize)]
 	struct Params {
-		event: String,
+		event: RosterEvent,
 		process: ProcessInfo,
 	}
 	let p: Params = serde_json::from_value(params)?;
@@ -553,7 +606,7 @@ fn parse_roster_changed(params: serde_json::Value) -> std::result::Result<Notifi
 fn parse_named_results_changed(params: serde_json::Value) -> std::result::Result<NotificationEnvelope, serde_json::Error> {
 	#[derive(serde::Deserialize)]
 	struct Params {
-		event: String,
+		event: NamedResultsEvent,
 		name: String,
 		#[serde(default)]
 		metadata: Option<ResultMetadata>,
@@ -565,7 +618,7 @@ fn parse_named_results_changed(params: serde_json::Value) -> std::result::Result
 fn parse_shutdown(params: serde_json::Value) -> std::result::Result<NotificationEnvelope, serde_json::Error> {
 	#[derive(serde::Deserialize)]
 	struct Params {
-		reason: String,
+		reason: ShutdownReason,
 		in_seconds: u32,
 	}
 	let p: Params = serde_json::from_value(params)?;
@@ -927,6 +980,17 @@ mod tests {
 
 		confirm_stale_then_unlink(&socket, state_dir).expect("should succeed");
 		assert!(!socket.exists());
+	}
+
+	#[test]
+	fn receive_side_enums_absorb_unknown_wire_values() {
+		let known: RosterEvent = serde_json::from_value(serde_json::json!("registered")).unwrap();
+		assert_eq!(known, RosterEvent::Registered);
+		assert_eq!(known.to_string(), "registered");
+
+		let unknown: RosterEvent = serde_json::from_value(serde_json::json!("relocated")).unwrap();
+		assert_eq!(unknown, RosterEvent::Unknown("relocated".to_string()));
+		assert_eq!(unknown.to_string(), "relocated");
 	}
 }
 

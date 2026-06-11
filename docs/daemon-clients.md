@@ -106,6 +106,8 @@ while let Ok(notif) = notifications.recv() {
 
 The reader is the only code path that receives frames. If it exits — EOF, framing error, protocol error, panic — it marks the client closed and releases all pending response waiters before terminating. Request methods on a closed client return an error rather than blocking forever.
 
+`NotificationEnvelope`, `DaemonClientError`, and `DaemonError` are all `#[non_exhaustive]`: future daemon versions may add variants without a breaking release, so `match` statements on any of them must include a catch-all arm (the `_ => {}` in the example above).
+
 ### Sending notifications
 
 `session.publish_interest` is the lone client-to-daemon notification (fire-and-forget, no reply). `DaemonClient::publish_interest(params)` sends it. Use this whenever the calling process is the master in one or more coupler relationships and its focus has moved.
