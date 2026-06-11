@@ -40,6 +40,8 @@ pub enum DaemonError {
 	AlreadyRunning,
 	#[error("io error: {0}")]
 	Io(#[from] std::io::Error),
+	#[error("daemon state thread panicked; fatal_error shutdown broadcast to clients")]
+	StateThreadPanicked,
 }
 
 pub(crate) struct CorpusHandle {
@@ -111,7 +113,7 @@ pub fn serve(options: ServeOptions) -> Result<(), DaemonError> {
 
 	let (state_tx, state_rx) = channel();
 
-	let state_thread = thread::spawn(move || state::run(state, state_rx));
+	let state_monitor = spawn_monitored_state_thread(state, state_rx, Arc::clone(&coordinator));
 
 	let (signal_handle, signal_thread) = signals::install_signal_thread(state_tx.clone())?;
 
@@ -125,12 +127,62 @@ pub fn serve(options: ServeOptions) -> Result<(), DaemonError> {
 	signal_handle.close();
 	let _ = signal_thread.join();
 
-	let _ = state_thread.join();
+	let state_outcome = state_monitor.join();
 
 	let _ = std::fs::remove_file(&socket_path);
 
 	listener_result?;
-	Ok(())
+	match state_outcome {
+		Ok(StateThreadOutcome::Clean) => Ok(()),
+		_ => Err(DaemonError::StateThreadPanicked),
+	}
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StateThreadOutcome {
+	Clean,
+	Panicked,
+}
+
+pub(crate) fn spawn_monitored_state_thread(
+	state: state::State,
+	commands: std::sync::mpsc::Receiver<state::Command>,
+	coordinator: Arc<shutdown::ShutdownCoordinator>,
+) -> thread::JoinHandle<StateThreadOutcome> {
+	thread::spawn(move || {
+		let state_thread = thread::Builder::new()
+			.name("montre-state".to_string())
+			.spawn(move || state::run(state, commands))
+			.expect("failed to spawn state thread");
+		match state_thread.join() {
+			Ok(()) => StateThreadOutcome::Clean,
+			Err(_) => {
+				broadcast_fatal_shutdown(&coordinator);
+				StateThreadOutcome::Panicked
+			}
+		}
+	})
+}
+
+fn broadcast_fatal_shutdown(coordinator: &shutdown::ShutdownCoordinator) {
+	tracing::error!("state thread panicked; broadcasting fatal_error shutdown");
+	if coordinator.mark_shutting_down() {
+		let payload = serde_json::json!({
+			"jsonrpc": "2.0",
+			"method": "notification.shutdown",
+			"params": { "reason": "fatal_error", "in_seconds": 0 },
+		});
+		match serde_json::to_vec(&payload) {
+			Ok(bytes) => coordinator.broadcast_frame(&bytes),
+			Err(error) => {
+				tracing::error!(error = %error, "failed to serialize fatal shutdown notification")
+			}
+		}
+	}
+	coordinator.close_all_streams();
+	if let Err(error) = coordinator.wake_listener() {
+		tracing::warn!(error = %error, "self-connect to wake listener failed during fatal shutdown");
+	}
 }
 
 fn derive_corpus_id(canonical: &Path) -> String {
@@ -277,5 +329,48 @@ mod tests {
 		let socket = temp.path().join("live.sock");
 		let _listener = UnixListener::bind(&socket).expect("bind live");
 		assert!(socket_path_has_listener(&socket).expect("probe"));
+	}
+
+	use std::os::unix::net::UnixStream;
+
+	fn read_shutdown_frame(stream: &mut UnixStream) -> serde_json::Value {
+		let frame = dispatch::read_frame(stream).expect("fatal shutdown frame");
+		serde_json::from_slice(&frame).expect("frame is JSON")
+	}
+
+	#[test]
+	fn broadcast_fatal_shutdown_writes_frame_marks_and_closes() {
+		let coordinator = shutdown::ShutdownCoordinator::dummy();
+		let (mut client_end, daemon_end) = UnixStream::pair().expect("socketpair");
+		coordinator.register_stream(daemon_end);
+
+		broadcast_fatal_shutdown(&coordinator);
+
+		assert!(coordinator.is_shutting_down());
+		let message = read_shutdown_frame(&mut client_end);
+		assert_eq!(message["method"], "notification.shutdown");
+		assert_eq!(message["params"]["reason"], "fatal_error");
+		assert_eq!(message["params"]["in_seconds"], 0);
+		assert!(dispatch::read_frame(&mut client_end).is_err(), "stream should be closed after broadcast");
+	}
+
+	#[test]
+	fn state_thread_panic_produces_fatal_outcome_and_broadcast() {
+		let coordinator = shutdown::ShutdownCoordinator::dummy();
+		let (mut client_end, daemon_end) = UnixStream::pair().expect("socketpair");
+		coordinator.register_stream(daemon_end);
+
+		let handle = dispatch::test_support::make_handle();
+		let st = state::State::new(1, handle, Arc::clone(&coordinator));
+		let (state_tx, state_rx) = channel();
+		let monitor = spawn_monitored_state_thread(st, state_rx, Arc::clone(&coordinator));
+
+		state_tx.send(state::Command::TestPanic).expect("send test panic");
+		let outcome = monitor.join().expect("monitor thread itself must not panic");
+
+		assert_eq!(outcome, StateThreadOutcome::Panicked);
+		assert!(coordinator.is_shutting_down());
+		let message = read_shutdown_frame(&mut client_end);
+		assert_eq!(message["params"]["reason"], "fatal_error");
 	}
 }

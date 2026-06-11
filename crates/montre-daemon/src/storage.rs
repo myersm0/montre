@@ -83,18 +83,30 @@ fn state_root_from_env() -> io::Result<PathBuf> {
 pub(crate) fn load_and_bump_epoch(state_dir: &Path) -> io::Result<u64> {
 	let path = state_dir.join("epoch");
 	let current = match std::fs::read_to_string(&path) {
-		Ok(text) => text.trim().parse::<u64>().map_err(|error| {
-			io::Error::new(
-				io::ErrorKind::InvalidData,
-				format!("epoch file contains invalid integer: {}", error),
-			)
-		})?,
+		Ok(text) => match text.trim().parse::<u64>() {
+			Ok(value) => value,
+			Err(error) => {
+				tracing::warn!(
+					path = %path.display(),
+					error = %error,
+					"epoch file corrupt; resetting epoch counter"
+				);
+				0
+			}
+		},
 		Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
 		Err(error) => return Err(error),
 	};
-	let next = current.checked_add(1).ok_or_else(|| {
-		io::Error::new(io::ErrorKind::InvalidData, "epoch counter overflow")
-	})?;
+	let next = match current.checked_add(1) {
+		Some(value) => value,
+		None => {
+			tracing::warn!(
+				path = %path.display(),
+				"epoch counter at u64::MAX (tampered or corrupt); resetting epoch counter"
+			);
+			1
+		}
+	};
 	write_atomic(&path, next.to_string().as_bytes())?;
 	Ok(next)
 }
@@ -279,12 +291,20 @@ mod tests {
 	}
 
 	#[test]
-	fn load_and_bump_epoch_rejects_corrupted_file() {
+	fn load_and_bump_epoch_resets_on_corrupted_file() {
 		let temp = TempDir::new().expect("tempdir");
 		std::fs::write(temp.path().join("epoch"), "not-a-number").unwrap();
-		let result = load_and_bump_epoch(temp.path());
-		assert!(result.is_err());
-		assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+		assert_eq!(load_and_bump_epoch(temp.path()).unwrap(), 1);
+		let contents = std::fs::read_to_string(temp.path().join("epoch")).unwrap();
+		assert_eq!(contents, "1");
+	}
+
+	#[test]
+	fn load_and_bump_epoch_resets_on_counter_overflow() {
+		let temp = TempDir::new().expect("tempdir");
+		std::fs::write(temp.path().join("epoch"), u64::MAX.to_string()).unwrap();
+		assert_eq!(load_and_bump_epoch(temp.path()).unwrap(), 1);
+		assert_eq!(load_and_bump_epoch(temp.path()).unwrap(), 2);
 	}
 
 	#[test]

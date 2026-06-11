@@ -941,6 +941,24 @@ JSON array of objects, sorted by `(sentence_index, node_id)`. Fields with `_` va
 - [x] **Documentation audit**: api.md function count corrected (was 64, actual 78). Eight previously undocumented functions added: `montre_corpus_document_index_by_name`, `montre_corpus_inverted_count`, `montre_corpus_component_index_by_name`, `montre_corpus_inverted_counts`, `montre_hit_capture_count`, `montre_hit_capture_name`, `montre_hit_capture_start`, `montre_hit_capture_end`.
 - [x] 2 new FFI functions (78 total; prior count of 64 was an undercount — see api.md for full inventory).
 
+### Session daemon (`montre-daemon`) — v1 surface complete, hardening in progress
+
+Per-corpus session daemon for long-running interactive use: one process per corpus, spawned automatically on first client connection, serving a Unix domain socket with a length-framed JSON-RPC 2.0 protocol (`docs/daemon-protocol.md` is the implementation-blocking spec; `docs/daemon-clients.md` is the client-author guide). A Rust `DaemonClient` in the same crate is the shared entry point for bindings, terminal tools ([montre-tui](https://github.com/myersm0/montre-tui)), and integration tests. Work is tracked item-by-item in the montre-daemon cleanup agenda (P0–P5 tiers plus J/K test backlogs); this entry summarizes.
+
+- [x] **Protocol v1**: version negotiation at `session.register`, capability advertisement, complete operation reference across `session` / `corpus` / `text` / `query` / `alignment` / `coupler` / `subscription` / `daemon` namespaces, notification reference, error model.
+- [x] **Roster and couplers**: process registration with provides/consumes interest declarations; couplers (master drives follower through daemon-applied interest transformation) with kind-compatibility validation and DAG cycle detection; roster-change notifications.
+- [x] **Named results**: session results promotable to named (query-backed by default, re-executed on access; `materialize` snapshots hits), persisted as JSONL in the per-corpus state dir, surviving daemon restarts; change notifications to subscribers.
+- [x] **Reply-shape rule**: single-handle `query.*` operations return full `ResultMetadata`; `list_named` is deliberately sparse (per-row cost); `discard`/`delete_named` return `OkReply`.
+- [x] **Identity and spawn**: corpus identity = BLAKE3-16-hex of canonical path (UUID planned for v2), epoch counter for client cache invalidation with atomic writes and warn-and-reset corruption recovery, `spawn.lock` serializing spawn races, binary resolution chain (explicit → `MONTRE_BINARY` → `PATH` → sibling) with spawn-stderr capture.
+- [x] **Lifecycle**: idle shutdown (registration-gated timer), `daemon.shutdown`, signal handling, and panic containment — a handler panic returns `-32603` and drops only that connection; a state-thread panic broadcasts `notification.shutdown { fatal_error }` best-effort and `serve()` returns an error.
+- [x] **Client**: background reader thread feeding typed `NotificationEnvelope` values (receive-side event enums with `Unknown(String)` forward-compat fallback), fail-fast semantics when the daemon closes, `#[non_exhaustive]` public enums.
+- [x] **One-time pre-release wire cleanup** (June 2026): field renames, reply normalization, typed notification payloads — shipped under `protocol_version = 1` with no bump, before any external consumers existed.
+- [x] 232 unit + 24 integration tests in the crate.
+- [ ] Remaining hardening: P5 internals (shutdown drain configurability, fsync-on-rename audit), J/K regression and baseline-coverage backlogs (including the `Unknown`-variant forward-compat matrix).
+- [ ] Reserved for protocol v2: observations, workspaces, UUID-stamped corpus identity, `observations_changed` / `workspaces_changed` topics.
+
+**Engine-orthogonal.** The daemon consumes `montre-index` and `montre-query` through their public read/execute APIs only; it introduces no index format changes, and the index version (5, per Phase 4b) is unaffected by any daemon work. Daemon state lives entirely outside the corpus directory, under `~/.local/share/montre/state/<corpus_id>/`.
+
 ### Phase 4: Statistics & bindings
 
 - [x] `count` command (CLI)

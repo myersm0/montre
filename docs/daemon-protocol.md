@@ -370,6 +370,7 @@ Organized by namespace. Each operation lists method name, params shape, result s
 
 - Every operation other than `session.register` may return error `1002` (not registered) if called before registration completes. Per-operation error lists below do not repeat this.
 - Every operation may return `-32602` (invalid params) when the params object fails to deserialize or fails operation-specific validation, and `-32603` (internal error) when daemon-internal invariants are violated (missing index layer, lookup inconsistency, etc.). Per-operation error lists below cover application-code paths only.
+- A panic inside a request handler is contained at the connection boundary: the offending request receives `-32603` (message names the method; the panic payload goes to the daemon log), then the daemon drops that one connection. Other connections and daemon state are unaffected. A panic on the state thread is the unrecoverable case and takes the `fatal_error` shutdown path instead — see `notification.shutdown`.
 - `session.publish_interest` is the only client→daemon method that may be sent as a JSON-RPC notification (no `id`). All other methods sent without an `id` are silently dropped. Notifications received before `session.register` completes are also silently dropped.
 - Triggers for `notification.roster_changed` and `notification.named_results_changed` are listed in the "Subscription topics" table; per-operation pages below do not repeat them.
 
@@ -1062,7 +1063,7 @@ Sent to all clients when daemon is shutting down. No subscription required.
 { "reason": "idle_timeout", "in_seconds": 0 }
 ```
 
-`reason` values: `"requested" | "idle_timeout" | "signal" | "fatal_error"`. `requested` corresponds to a `daemon.shutdown` call from a registered client; `idle_timeout` and `signal` originate inside the daemon. `fatal_error` is reserved for an unexpected-error path; v1 daemons never currently emit it. `in_seconds` is a hint about how long the daemon will wait before closing connections: `0` means immediate close (current v1 behavior for all reasons), positive values reserved for a future graceful-shutdown window. Clients should not rely on `in_seconds > 0` for anything load-bearing.
+`reason` values: `"requested" | "idle_timeout" | "signal" | "fatal_error"`. `requested` corresponds to a `daemon.shutdown` call from a registered client; `idle_timeout` and `signal` originate inside the daemon. `fatal_error` is emitted when the daemon's state thread suffers an unrecoverable internal failure (a panic in the state mutator): a monitor broadcasts this notification best-effort to every open connection, then closes them all and the daemon exits with an error. Per-connection handler failures do **not** take this path — see the error model's `-32603` notes. `in_seconds` is a hint about how long the daemon will wait before closing connections: `0` means immediate close (current v1 behavior for all reasons), positive values reserved for a future graceful-shutdown window. Clients should not rely on `in_seconds > 0` for anything load-bearing.
 
 ---
 
@@ -1206,7 +1207,7 @@ state/
 
 JSONL (newline-delimited JSON, one record per line). Append-only. Crash-tolerant (partial last line is discarded on read). Compaction is a future concern.
 
-**`daemon_epoch` persistence**: the epoch counter advertised in `session.register` lives at `~/.local/share/montre/state/<hash>/epoch` as a single integer in a one-line file. Daemon reads on startup, increments, writes back. Without persistence, every cold start would invalidate every cached client ID, defeating the cache-invalidation contract. The file is created on first daemon launch with epoch `1`.
+**`daemon_epoch` persistence**: the epoch counter advertised in `session.register` lives at `~/.local/share/montre/state/<hash>/epoch` as a single integer in a one-line file. Daemon reads on startup, increments, writes back (atomically, via temp + rename). Without persistence, every cold start would invalidate every cached client ID, defeating the cache-invalidation contract. The file is created on first daemon launch with epoch `1`. A corrupt or overflowed epoch file resets the counter to `1` with a warning rather than failing startup — an informational counter must never prevent serving. The reset admits one pathological case: a client whose cached epoch happens to equal the post-reset value would wrongly keep its cached IDs; this is accepted as the cost of never bricking startup, and the IDs in question fail safely anyway (stale handles return `1200`).
 
 **Named results store queries by default, not hit lists.** A saved result records the CQL plus metadata; hits are re-derived on access via `query.hits`. Re-execution costs are negligible at current corpus sizes (milliseconds), the on-disk record is tiny (a CQL string), and a query-backed result survives corpus rebuilds gracefully — it may produce different hits after rebuild, but it doesn't break.
 
