@@ -462,12 +462,6 @@ pub struct QueryExecuteParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryExecuteReply {
-	pub handle: ResultHandle,
-	pub hit_count: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryExecuteCountReply {
 	pub count: u64,
 }
@@ -499,33 +493,13 @@ pub struct QuerySaveParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QuerySaveReply {
-	pub ok: bool,
-	pub form: ResultForm,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryMaterializeParams {
 	pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryMaterializeReply {
-	pub ok: bool,
-	pub hit_count: u64,
-	pub materialized_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryLoadParams {
 	pub name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryLoadReply {
-	pub handle: ResultHandle,
-	pub hit_count: u64,
-	pub form: ResultForm,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

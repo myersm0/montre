@@ -166,7 +166,7 @@ impl DaemonClient {
 		self.request("corpus.layer_info", Some(params))
 	}
 
-	pub fn query_execute(&mut self, params: QueryExecuteParams) -> Result<QueryExecuteReply> {
+	pub fn query_execute(&mut self, params: QueryExecuteParams) -> Result<ResultMetadata> {
 		self.request("query.execute", Some(params))
 	}
 
@@ -182,15 +182,15 @@ impl DaemonClient {
 		self.request("query.metadata", Some(params))
 	}
 
-	pub fn query_save(&mut self, params: QuerySaveParams) -> Result<QuerySaveReply> {
+	pub fn query_save(&mut self, params: QuerySaveParams) -> Result<ResultMetadata> {
 		self.request("query.save", Some(params))
 	}
 
-	pub fn query_materialize(&mut self, params: QueryMaterializeParams) -> Result<QueryMaterializeReply> {
+	pub fn query_materialize(&mut self, params: QueryMaterializeParams) -> Result<ResultMetadata> {
 		self.request("query.materialize", Some(params))
 	}
 
-	pub fn query_load(&mut self, params: QueryLoadParams) -> Result<QueryLoadReply> {
+	pub fn query_load(&mut self, params: QueryLoadParams) -> Result<ResultMetadata> {
 		self.request("query.load", Some(params))
 	}
 

@@ -236,7 +236,7 @@ impl State {
 		}
 	}
 
-	fn insert_result(&mut self, cql: String, hits: Vec<Hit>) -> ResultHandle {
+	fn insert_result(&mut self, cql: String, hits: Vec<Hit>) -> ResultMetadata {
 		let handle = generate_handle();
 		let metadata = ResultMetadata {
 			handle: handle.clone(),
@@ -248,6 +248,7 @@ impl State {
 			name: None,
 			form: ResultForm::Session,
 		};
+		let reply_metadata = metadata.clone();
 		let entry = Arc::new(ResultEntry {
 			cql,
 			hits: Arc::new(hits),
@@ -257,14 +258,14 @@ impl State {
 			.write()
 			.expect("results lock poisoned")
 			.insert(handle.clone(), entry);
-		handle
+		reply_metadata
 	}
 
 	fn save_result(
 		&mut self,
 		handle: ResultHandle,
 		name: String,
-	) -> Result<(), ProtocolError> {
+	) -> Result<ResultMetadata, ProtocolError> {
 		if self.named_results.contains_key(&name) {
 			return Err(ProtocolError::new(
 				error_codes::NAMED_RESULT_ALREADY_EXISTS,
@@ -313,8 +314,8 @@ impl State {
 			.insert(handle, promoted);
 		self.named_results.insert(name.clone(), record);
 
-		self.notify_named_results(NamedResultsEvent::Saved, name, Some(metadata));
-		Ok(())
+		self.notify_named_results(NamedResultsEvent::Saved, name, Some(metadata.clone()));
+		Ok(metadata)
 	}
 
 	fn materialize_result(&mut self, name: String) -> Result<ResultMetadata, ProtocolError> {
@@ -961,12 +962,12 @@ pub(crate) enum Command {
 	InsertResult {
 		cql: String,
 		hits: Vec<Hit>,
-		reply: SyncSender<ResultHandle>,
+		reply: SyncSender<ResultMetadata>,
 	},
 	SaveResult {
 		handle: ResultHandle,
 		name: String,
-		reply: SyncSender<Result<(), ProtocolError>>,
+		reply: SyncSender<Result<ResultMetadata, ProtocolError>>,
 	},
 	MaterializeResult {
 		name: String,
@@ -1327,7 +1328,7 @@ mod tests {
 	#[test]
 	fn insert_result_returns_prefixed_handle() {
 		let mut state = make_state();
-		let handle = state.insert_result("foo".to_string(), vec![]);
+		let handle = state.insert_result("foo".to_string(), vec![]).handle;
 		assert!(handle.starts_with("r-"), "handle = {}", handle);
 		assert!(handle.len() > "r-".len());
 	}
@@ -1335,16 +1336,16 @@ mod tests {
 	#[test]
 	fn insert_result_distinct_handles() {
 		let mut state = make_state();
-		let h1 = state.insert_result("foo".to_string(), vec![]);
-		let h2 = state.insert_result("foo".to_string(), vec![]);
+		let h1 = state.insert_result("foo".to_string(), vec![]).handle;
+		let h2 = state.insert_result("foo".to_string(), vec![]).handle;
 		assert_ne!(h1, h2);
 	}
 
 	#[test]
 	fn save_result_duplicate_name_rejected() {
 		let mut state = make_state();
-		let h1 = state.insert_result("foo".to_string(), vec![]);
-		let h2 = state.insert_result("foo".to_string(), vec![]);
+		let h1 = state.insert_result("foo".to_string(), vec![]).handle;
+		let h2 = state.insert_result("foo".to_string(), vec![]).handle;
 		state.save_result(h1, "named".to_string()).unwrap();
 		let err = state.save_result(h2, "named".to_string()).unwrap_err();
 		assert_eq!(err.code, error_codes::NAMED_RESULT_ALREADY_EXISTS);
@@ -1369,7 +1370,7 @@ mod tests {
 	#[test]
 	fn materialize_already_materialized_rejected() {
 		let mut state = make_state();
-		let h = state.insert_result("foo".to_string(), vec![]);
+		let h = state.insert_result("foo".to_string(), vec![]).handle;
 		state.save_result(h, "named".to_string()).unwrap();
 		state.materialize_result("named".to_string()).unwrap();
 		let err = state.materialize_result("named".to_string()).unwrap_err();
@@ -1379,7 +1380,7 @@ mod tests {
 	#[test]
 	fn materialize_sets_materialized_at_and_preserves_created_at() {
 		let mut state = make_state();
-		let h = state.insert_result("foo".to_string(), vec![]);
+		let h = state.insert_result("foo".to_string(), vec![]).handle;
 		state.save_result(h.clone(), "named".to_string()).unwrap();
 
 		let created_at_before = state.handle
@@ -1402,7 +1403,7 @@ mod tests {
 	#[test]
 	fn delete_named_removes_handle_and_table_entry() {
 		let mut state = make_state();
-		let h = state.insert_result("foo".to_string(), vec![]);
+		let h = state.insert_result("foo".to_string(), vec![]).handle;
 		state.save_result(h.clone(), "named".to_string()).unwrap();
 		assert!(state.handle.results.read().unwrap().contains_key(&h));
 
@@ -1421,7 +1422,7 @@ mod tests {
 	#[test]
 	fn discard_handle_session_form_removed() {
 		let mut state = make_state();
-		let h = state.insert_result("foo".to_string(), vec![]);
+		let h = state.insert_result("foo".to_string(), vec![]).handle;
 		assert!(state.handle.results.read().unwrap().contains_key(&h));
 
 		state.discard_handle(h.clone());
@@ -1431,7 +1432,7 @@ mod tests {
 	#[test]
 	fn discard_handle_named_is_no_op() {
 		let mut state = make_state();
-		let h = state.insert_result("foo".to_string(), vec![]);
+		let h = state.insert_result("foo".to_string(), vec![]).handle;
 		state.save_result(h.clone(), "named".to_string()).unwrap();
 
 		state.discard_handle(h.clone());
@@ -1766,7 +1767,7 @@ mod tests {
 			sentence_index: first_global as u32,
 			captures: vec![],
 		};
-		let result_handle = state.insert_result("test".to_string(), vec![executor_hit]);
+		let result_handle = state.insert_result("test".to_string(), vec![executor_hit]).handle;
 		let interest = Interest::Hit { result: result_handle, hit_idx: 0 };
 		let out = transform_interest(&state.handle, &interest, &CouplerKind::KwicSelection);
 		assert_eq!(out.len(), 1);
@@ -1790,7 +1791,7 @@ mod tests {
 	#[test]
 	fn transform_kwic_hit_idx_out_of_range_returns_empty() {
 		let mut state = make_state();
-		let result_handle = state.insert_result("test".to_string(), vec![]);
+		let result_handle = state.insert_result("test".to_string(), vec![]).handle;
 		let interest = Interest::Hit { result: result_handle, hit_idx: 99 };
 		let out = transform_interest(&state.handle, &interest, &CouplerKind::KwicSelection);
 		assert!(out.is_empty());
@@ -1841,7 +1842,7 @@ mod tests {
 		let state_dir = temp.path().to_path_buf();
 
 		let mut first = state_sharing_dir(state_dir.clone());
-		let handle = first.insert_result("[pos=\"NOUN\"]".to_string(), vec![]);
+		let handle = first.insert_result("[pos=\"NOUN\"]".to_string(), vec![]).handle;
 		first.save_result(handle.clone(), "saved".to_string()).unwrap();
 		drop(first);
 
@@ -1859,8 +1860,8 @@ mod tests {
 		let state_dir = temp.path().to_path_buf();
 
 		let mut first = state_sharing_dir(state_dir.clone());
-		let kept = first.insert_result("[pos=\"NOUN\"]".to_string(), vec![]);
-		let doomed = first.insert_result("[pos=\"ADJ\"]".to_string(), vec![]);
+		let kept = first.insert_result("[pos=\"NOUN\"]".to_string(), vec![]).handle;
+		let doomed = first.insert_result("[pos=\"ADJ\"]".to_string(), vec![]).handle;
 		first.save_result(kept, "kept".to_string()).unwrap();
 		first.save_result(doomed, "doomed".to_string()).unwrap();
 		first.delete_named("doomed".to_string()).unwrap();

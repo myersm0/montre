@@ -8,10 +8,10 @@ use crate::dispatch::{
 use crate::protocol::error_codes;
 use crate::protocol::{
 	Hit, NamedResultEntry, OkReply, ProtocolError, QueryDeleteNamedParams, QueryDiscardParams,
-	QueryExecuteCountReply, QueryExecuteParams, QueryExecuteReply, QueryHitsParams,
-	QueryHitsReply, QueryListNamedReply, QueryLoadParams, QueryLoadReply,
-	QueryMaterializeParams, QueryMaterializeReply, QueryMetadataParams, QuerySaveParams,
-	QuerySaveReply, ResultForm, ResultMetadata,
+	QueryExecuteCountReply, QueryExecuteParams, QueryHitsParams,
+	QueryHitsReply, QueryListNamedReply, QueryLoadParams,
+	QueryMaterializeParams, QueryMetadataParams, QuerySaveParams,
+	ResultForm, ResultMetadata,
 };
 use crate::state::{Command, LoadOutcome, ResultEntry};
 
@@ -51,15 +51,14 @@ pub(crate) fn handle_query_execute(
 		montre_query::executor::execute(&plan, &ctx.handle.corpus).map_err(map_query_error)?;
 	results.populate_context(&ctx.handle.corpus);
 	let hits = results.into_hits();
-	let hit_count = hits.len() as u64;
 
-	let handle = state_roundtrip(ctx, |reply| Command::InsertResult {
+	let metadata = state_roundtrip(ctx, |reply| Command::InsertResult {
 		cql: parsed.cql,
 		hits,
 		reply,
 	})?;
 
-	serialize_reply(QueryExecuteReply { handle, hit_count })
+	serialize_reply(metadata)
 }
 
 pub(crate) fn handle_query_execute_count(
@@ -140,16 +139,13 @@ pub(crate) fn handle_query_save(
 ) -> Result<serde_json::Value, ProtocolError> {
 	let parsed: QuerySaveParams = parse_params("query.save", params)?;
 
-	state_roundtrip(ctx, |reply| Command::SaveResult {
+	let metadata = state_roundtrip(ctx, |reply| Command::SaveResult {
 		handle: parsed.handle,
 		name: parsed.name,
 		reply,
 	})??;
 
-	serialize_reply(QuerySaveReply {
-		ok: true,
-		form: ResultForm::QueryBacked,
-	})
+	serialize_reply(metadata)
 }
 
 pub(crate) fn handle_query_materialize(
@@ -163,14 +159,7 @@ pub(crate) fn handle_query_materialize(
 		reply,
 	})??;
 
-	let materialized_at = metadata
-		.materialized_at
-		.expect("state guarantees materialized_at after MaterializeResult");
-	serialize_reply(QueryMaterializeReply {
-		ok: true,
-		hit_count: metadata.hit_count,
-		materialized_at,
-	})
+	serialize_reply(metadata)
 }
 
 pub(crate) fn handle_query_load(
@@ -185,11 +174,7 @@ pub(crate) fn handle_query_load(
 	})??;
 
 	match outcome {
-		LoadOutcome::Realized(metadata) => serialize_reply(QueryLoadReply {
-			handle: metadata.handle,
-			hit_count: metadata.hit_count,
-			form: metadata.form,
-		}),
+		LoadOutcome::Realized(metadata) => serialize_reply(metadata),
 		LoadOutcome::Pending { handle, cql, created_at } => {
 			let ast = montre_query::parse(&cql).map_err(stored_query_invalid)?;
 			let plan = montre_query::planner::plan(&ast).map_err(stored_query_invalid)?;
@@ -209,6 +194,7 @@ pub(crate) fn handle_query_load(
 				name: Some(parsed.name),
 				form: ResultForm::QueryBacked,
 			};
+			let reply_metadata = metadata.clone();
 			let entry = Arc::new(ResultEntry {
 				cql,
 				hits: Arc::new(hits),
@@ -220,11 +206,7 @@ pub(crate) fn handle_query_load(
 				reply,
 			})?;
 
-			serialize_reply(QueryLoadReply {
-				handle,
-				hit_count,
-				form: ResultForm::QueryBacked,
-			})
+			serialize_reply(reply_metadata)
 		}
 	}
 }
@@ -293,7 +275,7 @@ mod tests {
 	fn execute_and_get_handle(ctx: &mut crate::dispatch::RpcContext) -> String {
 		let params = serde_json::json!({ "cql": "[pos=\"NOUN\"]" });
 		let result = dispatch_request("query.execute", Some(params), ctx).unwrap();
-		let reply: QueryExecuteReply = serde_json::from_value(result).unwrap();
+		let reply: ResultMetadata = serde_json::from_value(result).unwrap();
 		reply.handle
 	}
 
@@ -321,7 +303,7 @@ mod tests {
 		with_registered_context(|ctx| {
 			let params = serde_json::json!({ "cql": "[pos=\"NOUN\"]" });
 			let result = dispatch_request("query.execute", Some(params), ctx).unwrap();
-			let reply: QueryExecuteReply = serde_json::from_value(result).unwrap();
+			let reply: ResultMetadata = serde_json::from_value(result).unwrap();
 			assert!(reply.handle.starts_with("r-"));
 			assert!(reply.hit_count > 0);
 		});
@@ -342,7 +324,7 @@ mod tests {
 			let execute_params = serde_json::json!({ "cql": "[pos=\"NOUN\"]" });
 			let execute_result =
 				dispatch_request("query.execute", Some(execute_params), ctx).unwrap();
-			let execute_reply: QueryExecuteReply =
+			let execute_reply: ResultMetadata =
 				serde_json::from_value(execute_result).unwrap();
 
 			let hits_params = serde_json::json!({
@@ -371,7 +353,7 @@ mod tests {
 			let execute_params = serde_json::json!({ "cql": "[pos=\"NOUN\"]" });
 			let execute_result =
 				dispatch_request("query.execute", Some(execute_params), ctx).unwrap();
-			let execute_reply: QueryExecuteReply =
+			let execute_reply: ResultMetadata =
 				serde_json::from_value(execute_result).unwrap();
 			assert!(execute_reply.hit_count >= 2);
 
@@ -423,7 +405,7 @@ mod tests {
 			let execute_params = serde_json::json!({ "cql": "[pos=\"NOUN\"]" });
 			let execute_result =
 				dispatch_request("query.execute", Some(execute_params), ctx).unwrap();
-			let execute_reply: QueryExecuteReply =
+			let execute_reply: ResultMetadata =
 				serde_json::from_value(execute_result).unwrap();
 
 			let params = serde_json::json!({ "handle": execute_reply.handle });
@@ -453,8 +435,8 @@ mod tests {
 			let handle = execute_and_get_handle(ctx);
 			let params = serde_json::json!({ "handle": handle, "name": "saved-nouns" });
 			let result = dispatch_request("query.save", Some(params), ctx).unwrap();
-			let reply: QuerySaveReply = serde_json::from_value(result).unwrap();
-			assert!(reply.ok);
+			let reply: ResultMetadata = serde_json::from_value(result).unwrap();
+			assert_eq!(reply.name.as_deref(), Some("saved-nouns"));
 			assert!(matches!(reply.form, ResultForm::QueryBacked));
 		});
 	}
@@ -491,9 +473,9 @@ mod tests {
 
 			let params = serde_json::json!({ "name": "to-mat" });
 			let result = dispatch_request("query.materialize", Some(params), ctx).unwrap();
-			let reply: QueryMaterializeReply = serde_json::from_value(result).unwrap();
-			assert!(reply.ok);
-			assert!(!reply.materialized_at.is_empty());
+			let reply: ResultMetadata = serde_json::from_value(result).unwrap();
+			assert!(reply.materialized_at.is_some());
+			assert!(matches!(reply.form, ResultForm::Materialized));
 		});
 	}
 
@@ -528,7 +510,7 @@ mod tests {
 
 			let params = serde_json::json!({ "name": "loadable" });
 			let result = dispatch_request("query.load", Some(params), ctx).unwrap();
-			let reply: QueryLoadReply = serde_json::from_value(result).unwrap();
+			let reply: ResultMetadata = serde_json::from_value(result).unwrap();
 			assert_eq!(reply.handle, handle);
 			assert!(matches!(reply.form, ResultForm::QueryBacked));
 		});
