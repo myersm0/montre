@@ -10,6 +10,8 @@ Read alongside `montre-tui-design.md` for the why; this doc covers the what and 
 
 This is the v1 protocol specification. It is implementation-blocking: no daemon code, no client code touches the wire until this doc is settled.
 
+June 2026: a one-time pre-release breaking pass landed under `protocol_version = 1` without a version bump — field renames (`Coupler.master_id`/`follower_id`, `CorpusInfo.corpus_id`), reply-shape normalization (single-handle `query.*` operations return `ResultMetadata`), and typed notification payloads on the Rust client side. No daemon had shipped to external users, so the pass was free; nothing of the kind will happen under v1 again.
+
 Covers: wire format, framing, connection lifecycle, version negotiation, type definitions, complete operation reference, notification reference, subscription topics, error model, implementation notes.
 
 Does not cover: daemon implementation details (storage backend, internal data structures), client-side caching strategies, observation / workspace operations (specified in v2 when those features land — slots reserved here).
@@ -59,7 +61,7 @@ JSON-RPC 2.0 strict. Three message types:
 {
   "jsonrpc": "2.0",
   "id": 17,
-  "result": { "handle": "r-9c2f...", "hit_count": 244184 }
+  "result": { "handle": "r-9c2f...", "hit_count": 244184, "form": "session", ... }
 }
 ```
 
@@ -111,9 +113,9 @@ Socket path is derived from the canonical corpus path:
 
 Where `<hash>` is the first 16 hex characters of BLAKE3 of `std::fs::canonicalize(corpus_path)`. Symlink-resolved, byte-stable, collision-resistant for any plausible number of corpora.
 
-**Stable corpus identity is committed v2 direction.** Once persistence (named results, observations, workspaces) accumulates user value, path-hash identity becomes insufficient: moving the corpus directory invalidates everything keyed against it. The engine will graduate to a UUID written into `corpus.json` at build time, and `stable_key` will become that UUID. Path-hash will remain as a fallback for older corpora and for ad-hoc cases. v1 ships with path-hash; v2 ships with UUID.
+**Stable corpus identity is committed v2 direction.** Once persistence (named results, observations, workspaces) accumulates user value, path-hash identity becomes insufficient: moving the corpus directory invalidates everything keyed against it. The engine will graduate to a UUID written into `corpus.json` at build time, and `corpus_id` will become that UUID. Path-hash will remain as a fallback for older corpora and for ad-hoc cases. v1 ships with path-hash; v2 ships with UUID.
 
-The `corpus_id` field appearing throughout the protocol (in `ResultMetadata`, in storage paths, in socket paths) is opaque to clients and evolves alongside `stable_key`: it carries the path hash in v1 and the UUID in v2. Clients should never parse it or assume a format — they treat it as an identity token and compare for equality.
+The `corpus_id` field appearing throughout the protocol (in `CorpusInfo`, in `ResultMetadata`, in storage paths, in socket paths) is opaque to clients: it carries the path hash in v1 and the UUID in v2. Clients should never parse it or assume a format — they treat it as an identity token and compare for equality.
 
 ### Auto-spawn
 
@@ -173,7 +175,7 @@ Wire types referenced throughout the operation reference. JSON forms shown.
 
 The Rust types backing the wire format live in `montre_daemon::protocol` (params, replies, shared types) and `montre_daemon::client` (notifications, errors). Mapping rules:
 
-- **Params and replies.** Each operation `namespace.method` has matching Rust structs `NamespaceMethodParams` and `NamespaceMethodReply` in `montre_daemon::protocol`. JSON field names match the Rust field names directly; integer types use the widths listed under "Primitives" above. A complete operation → Params/Reply table is in "Rust API reference" at the end of this document.
+- **Params and replies.** Each operation `namespace.method` has a matching Rust struct `NamespaceMethodParams` in `montre_daemon::protocol`, and replies use either a matching `NamespaceMethodReply` struct or a shared protocol type (`ResultMetadata` for the single-handle `query.*` operations, `OkReply` for confirmations). JSON field names match the Rust field names directly; integer types use the widths listed under "Primitives" above. A complete operation → Params/Reply table is in "Rust API reference" at the end of this document.
 - **Tagged enums.** JSON shapes with a `"type"` discriminator (`Interest`, `CouplerKind`) map to Rust enums with `#[serde(tag = "type")]`. Variant names and field names in the Rust type match the JSON exactly: e.g. `{ "type": "sentence", "doc": 3, "sent": 142 }` corresponds to `Interest::Sentence { doc: 3, sent: 142 }`.
 - **Enum string values.** Enums serialized as plain strings (`ProcessKind`, `ShutdownReason`, `ResultForm`, `LayerKind`, `Topic`, `InterestKind`, `CouplerKind` tag values) all use `snake_case` on the wire. The Rust identifiers are `UpperCamelCase`: `ProcessKind::External` ↔ `"external"`, `CouplerKind::KwicSelection` ↔ `"kwic_selection"`, etc.
 - **Notifications.** Server-pushed messages with method names `notification.snake_case_name` map to variants `NotificationEnvelope::UpperCamelName` in `montre_daemon::client` — for example `notification.coupler_update` → `NotificationEnvelope::CouplerUpdate`.
@@ -202,8 +204,6 @@ Identifier values (`ProcessId`, `CouplerId`, `ResultHandle`, ...) appear as JSON
 - **`<concept>_id`** everywhere else — in flat replies returning an identifier (`session.register` → `process_id`, `coupler.create` → `coupler_id`), in notification payloads (`notification.coupler_update.coupler_id`), and as a parameter referring to an existing entity (`coupler.remove` params → `coupler_id`).
 
 The Rust types in `montre_daemon::protocol` reflect this via per-field serde naming where needed; clients deserializing into the typed structs see the same shape as the wire.
-
-Exception: `Coupler.master` and `Coupler.follower` are bare `ProcessId` references with no `_id` suffix, while the `coupler.create` params side uses `master_id` / `follower_id`. This historical divergence is noted at the `Coupler` definition; new types should follow the rule above.
 
 ### `Span`
 
@@ -286,13 +286,11 @@ Each coupler kind defines (a) which master `provides` `InterestKind`s it accepts
 ```json
 {
   "id": 7,
-  "master": 4,
-  "follower": 9,
+  "master_id": 4,
+  "follower_id": 9,
   "kind": { "type": "alignment", "name": "labse" }
 }
 ```
-
-Note: `Coupler` uses `master` / `follower`; `coupler.create` params use `master_id` / `follower_id`. The names diverged historically. Clients should write one form and read the other.
 
 ### `Hit`
 
@@ -329,7 +327,7 @@ Note: `Coupler` uses `master` / `follower`; `coupler.create` params use `master_
 
 `materialized_at` is `null` until `query.materialize` is invoked; thereafter an RFC 3339 timestamp.
 
-`corpus_id` is the same opaque value as `CorpusInfo.stable_key` — the names diverged historically and clients should treat both as the same identity token.
+`corpus_id` is the same opaque identity token reported in `CorpusInfo` — see "Discovery" under Connection lifecycle.
 
 `form` is one of:
 - `"session"` — unnamed, daemon-lifetime only
@@ -355,7 +353,7 @@ Note: `Coupler` uses `master` / `follower`; `coupler.create` params use `master_
 {
   "name": "isosceles",
   "canonical_path": "/Users/.../isosceles",
-  "stable_key": "9c2f8e3a4b1d7f06",
+  "corpus_id": "9c2f8e3a4b1d7f06",
   "components": ["maupassant-fr", "maupassant-en"],
   "layers": ["upos", "xpos", "lemma", "feats", ...],
   "alignments": ["labse"]
@@ -501,22 +499,21 @@ Detailed info on one annotation layer.
 { "name": "upos", "kind": "string", "value_count": 17 }
 ```
 
-`kind` is `"string"` or `"int"` for forward layers.
+`kind` is `"string"` or `"int"` for forward layers. v1 daemons emit no other values; the Rust `LayerKind::Unknown` variant is a client-side deserialization fallback so that kind values added in future protocol revisions don't break older clients. (The daemon's internal conversion also routes a should-never-happen engine mismatch to `Unknown` — a bug net, not part of the wire contract.)
 
 Nonexistent layer returns `-32602` (invalid params). Layer existence is a named lookup, not a range; clients that don't know a layer name should call `corpus.info` first to discover the available layers.
 
 ### `query`
 
+Reply shapes across the `query.*` family follow one rule: **single-handle operations return the full `ResultMetadata` for the result they just created or modified** — `execute`, `save`, `load`, `materialize`, and `metadata` all reply with the canonical snapshot of what now exists at that handle, so clients never need a follow-up `query.metadata` call. `list_named` is the lone collection operation and is deliberately sparse (list endpoints pay per-row). `discard` and `delete_named` return `OkReply` — there is no result left to describe.
+
 #### `query.execute`
 
-Run a query, return a handle plus hit count. Hits retrievable via `query.hits`.
+Run a query, returning the `ResultMetadata` of the new (unnamed, session-form) result. Hits retrievable via `query.hits`.
 
 **Params**: `{ "cql": "[pos=\"ADJ\"] [pos=\"NOUN\"]" }`
 
-**Result**:
-```json
-{ "handle": "r-3a7f...", "hit_count": 30672 }
-```
+**Result**: `ResultMetadata`
 
 **Errors**: `1100` (parse error), `1101` (plan error), `1102` (execution error).
 
@@ -562,7 +559,7 @@ Promote an unnamed result to a named, persistent one. By default the named resul
 
 **Params**: `{ "handle": "r-3a7f...", "name": "adj-noun-pairs" }`
 
-**Result**: `{ "ok": true, "form": "query_backed" }`
+**Result**: `ResultMetadata` — `name` now populated, `form` now `"query_backed"`.
 
 **Errors**: `1200` (handle invalid), `1201` (name already exists).
 
@@ -572,7 +569,7 @@ Promote a named result from query-backed to materialized form, snapshotting the 
 
 **Params**: `{ "name": "adj-noun-pairs" }`
 
-**Result**: `{ "ok": true, "hit_count": 30672, "materialized_at": "..." }`
+**Result**: `ResultMetadata` — `materialized_at` now set, `form` now `"materialized"`.
 
 **Errors**: `1202` (name not found), `1205` (already materialized).
 
@@ -582,11 +579,13 @@ Look up a named result. Returns the handle (which may be the same or freshly iss
 
 **Params**: `{ "name": "adj-noun-pairs" }`
 
-**Result**: `{ "handle": "r-3a7f...", "hit_count": 30672, "form": "query_backed" }`
+**Result**: `ResultMetadata`
 
 **Errors**: `1202` (name not found), `1204` (stored query no longer valid against current corpus — only possible for query-backed results after a rebuild).
 
 #### `query.list_named`
+
+The one collection operation in the family. Rows are deliberately sparse — `{ name, hit_count, created_at }` rather than full `ResultMetadata` — because list endpoints pay per-row; `query.load` fetches the full record for any name.
 
 **Params**: `{}`
 
@@ -882,11 +881,15 @@ Couplers automatically generate `notification.coupler_update` for followers; no 
 
 **Errors**: `1500` (caller's process not found in roster — typically can't happen unless the registration was torn down concurrently), `1600` (unknown topic).
 
+`SubscriptionParams.topic` is deliberately a `String` on the Rust side rather than the `Topic` enum: the daemon parses it at the handler boundary, so an unrecognized topic surfaces as `1600` with the offending name in the message rather than dying in params deserialization as a generic `-32602`. The distinction matters across versions — a newer client subscribing to a topic an older daemon doesn't support gets a diagnosable "unknown topic" rather than "invalid params". `Topic` remains the daemon-internal type.
+
 #### `subscription.unsubscribe`
 
 **Params**: `{ "topic": "roster_changed" }`
 
 **Result**: `{ "ok": true }`
+
+**Errors**: `1600` (unknown topic).
 
 #### Subscription topics
 
@@ -945,13 +948,13 @@ For operations with **no params**, the client method takes no arguments — ther
 | `text.annotations_range` | `client.text_annotations_range(params)` | `TextAnnotationsRangeParams` | `TextAnnotationsRangeReply` |
 | `alignment.list` | `client.alignment_list()` | (none) | `AlignmentListReply` |
 | `alignment.project` | `client.alignment_project(params)` | `AlignmentProjectParams` | `AlignmentProjectReply` |
-| `query.execute` | `client.query_execute(params)` | `QueryExecuteParams` | `QueryExecuteReply` |
+| `query.execute` | `client.query_execute(params)` | `QueryExecuteParams` | `ResultMetadata` |
 | `query.execute_count` | `client.query_execute_count(params)` | `QueryExecuteParams` (reused) | `QueryExecuteCountReply` |
 | `query.hits` | `client.query_hits(params)` | `QueryHitsParams` | `QueryHitsReply` |
 | `query.metadata` | `client.query_metadata(params)` | `QueryMetadataParams` | `ResultMetadata` |
-| `query.save` | `client.query_save(params)` | `QuerySaveParams` | `QuerySaveReply` |
-| `query.materialize` | `client.query_materialize(params)` | `QueryMaterializeParams` | `QueryMaterializeReply` |
-| `query.load` | `client.query_load(params)` | `QueryLoadParams` | `QueryLoadReply` |
+| `query.save` | `client.query_save(params)` | `QuerySaveParams` | `ResultMetadata` |
+| `query.materialize` | `client.query_materialize(params)` | `QueryMaterializeParams` | `ResultMetadata` |
+| `query.load` | `client.query_load(params)` | `QueryLoadParams` | `ResultMetadata` |
 | `query.list_named` | `client.query_list_named()` | (none) | `QueryListNamedReply` |
 | `query.delete_named` | `client.query_delete_named(params)` | `QueryDeleteNamedParams` | `OkReply` |
 | `query.discard` | `client.query_discard(params)` | `QueryDiscardParams` | `OkReply` |
@@ -969,11 +972,13 @@ Server-pushed notifications surface as variants of `NotificationEnvelope` (in `m
 | Wire method | Rust variant | Payload fields |
 |---|---|---|
 | `notification.coupler_update` | `NotificationEnvelope::CouplerUpdate` | `coupler_id: CouplerId`, `interest: Interest` |
-| `notification.roster_changed` | `NotificationEnvelope::RosterChanged` | `event: String`, `process: ProcessInfo` |
-| `notification.named_results_changed` | `NotificationEnvelope::NamedResultsChanged` | `event: String`, `name: String`, `metadata: Option<ResultMetadata>` |
-| `notification.shutdown` | `NotificationEnvelope::Shutdown` | `reason: String`, `in_seconds: u32` |
+| `notification.roster_changed` | `NotificationEnvelope::RosterChanged` | `event: RosterEvent`, `process: ProcessInfo` |
+| `notification.named_results_changed` | `NotificationEnvelope::NamedResultsChanged` | `event: NamedResultsEvent`, `name: String`, `metadata: Option<ResultMetadata>` |
+| `notification.shutdown` | `NotificationEnvelope::Shutdown` | `reason: ShutdownReason`, `in_seconds: u32` |
 
-The `event` fields on `RosterChanged` and `NamedResultsChanged`, and the `reason` field on `Shutdown`, are typed as `String` on the client side even though the daemon emits values from a closed set (the wire-format values listed in the corresponding `*Reason`/`Topic`/etc. enums elsewhere in this document). Clients that want to pattern-match should compare against the documented string values directly.
+`RosterEvent`, `NamedResultsEvent`, and `ShutdownReason` (all in `montre_daemon::client`) are receive-side enums mirroring the wire values documented in the Notification reference, each with an `Unknown(String)` variant that absorbs any value the client doesn't recognize — a newer daemon can add event values without breaking older clients' deserialization. Matches on these enums must therefore handle `Unknown` (they are also `#[non_exhaustive]`). Each implements `Display`, printing the wire value (including for `Unknown`), so log lines stay informative.
+
+`client::ShutdownReason` is deliberately distinct from `protocol::ShutdownReason` (the `daemon.shutdown` params type): the params side stays closed so a client cannot inject arbitrary reason strings into other clients' shutdown notifications, while the receive side stays open so a shutdown notification can never fail to parse.
 
 ### Shared types
 
@@ -986,16 +991,16 @@ Types referenced from multiple params/replies. Rust types live in `montre_daemon
 | `ProcessKind` | string | `"reader" / "kwic" / "conllu" / "docs" / "vocab" / "results" / "external"` (Rust: `ProcessKind::Reader / Kwic / Conllu / Docs / Vocab / Results / External`) |
 | `ProcessInfo` | object | full process descriptor |
 | `CouplerKind` | `{ "type": <kind>, ... }` | tagged enum, see "CouplerKind" above |
-| `Coupler` | object | `{ id, master, follower, kind }` |
+| `Coupler` | object | `{ id, master_id, follower_id, kind }` |
 | `Hit` | object | `{ span, document_index, sentence_index, captures }` |
 | `Span` | object | `{ start, end }` |
 | `ResultMetadata` | object | full named-result descriptor |
 | `ResultForm` | string | `"session" / "query_backed" / "materialized"` (Rust: `ResultForm::Session / QueryBacked / Materialized`) |
 | `LayerInfo` | object | `{ name, kind, value_count }` |
-| `LayerKind` | string | `"string" / "int"` (also `"unknown"` for forward-compatibility) (Rust: `LayerKind::String / Int / Unknown`) |
+| `LayerKind` | string | `"string" / "int"` (Rust: `LayerKind::String / Int / Unknown`). The daemon never emits `"unknown"` under correct operation; the `Unknown` variant exists so clients deserialize kinds introduced after the client was built. |
 | `AlignmentInfo` | object | full alignment descriptor |
 | `CorpusInfo` | object | full corpus descriptor |
-| `ShutdownReason` | string | `"requested" / "idle_timeout" / "signal" / "fatal_error"` (Rust: `ShutdownReason::Requested / IdleTimeout / Signal / FatalError`). Daemon-side emit type; client-side `NotificationEnvelope::Shutdown.reason` is typed as `String`. |
+| `ShutdownReason` | string | `"requested" / "idle_timeout" / "signal" / "fatal_error"` (Rust: `ShutdownReason::Requested / IdleTimeout / Signal / FatalError`). The `protocol::ShutdownReason` params type is closed; the receive side (`NotificationEnvelope::Shutdown.reason`) is the open `client::ShutdownReason` — see "Notifications" under Rust mapping. |
 | `Topic` | string | `"roster_changed" / "named_results_changed"` (Rust: `Topic::RosterChanged / NamedResultsChanged`) |
 | `OkReply` | object | `{ "ok": true }` — used for operations that confirm success with no other payload. Always emits `ok: true`; if you receive a successful response at all, the field will be `true`. |
 
@@ -1164,7 +1169,7 @@ The client side of the protocol — auto-spawn dance, length-prefix framing, JSO
 `DaemonClient`'s public surface exposes:
 
 - `connect_or_spawn(corpus_path)` / `connect(socket_path)` for setup.
-- One typed method per protocol operation. Each method takes the operation's `*Params` struct (from `montre_daemon::protocol`) and returns the operation's `*Reply` struct. For example: `client.query_execute(QueryExecuteParams { cql: "...".into() })` returns `Result<QueryExecuteReply>`.
+- One typed method per protocol operation. Each method takes the operation's `*Params` struct (from `montre_daemon::protocol`) and returns the operation's reply type per the table below. For example: `client.query_execute(QueryExecuteParams { cql: "...".into() })` returns `Result<ResultMetadata>`.
 - `notifications()` returns a `&std::sync::mpsc::Receiver<NotificationEnvelope>` for server-pushed notifications (coupler updates, roster changes, named-results changes, shutdown).
 - `publish_interest(params)` is fire-and-forget; no reply.
 - `close(self)` for an explicit unregister-and-shutdown sequence.
@@ -1189,7 +1194,7 @@ This matters: a complex quantifier query taking 70ms must not serialize every ot
 
 ### Storage
 
-Named results, query history, and (later) observations / workspaces are persisted in `~/.local/share/montre/state/<corpus_stable_key>/`:
+Named results, query history, and (later) observations / workspaces are persisted in `~/.local/share/montre/state/<corpus_id>/`:
 
 ```
 state/
@@ -1266,7 +1271,7 @@ Client `→` daemon:
 
 Daemon `→` client:
 ```json
-{ "jsonrpc": "2.0", "id": 2, "result": { "handle": "r-3a7f...", "hit_count": 244184 } }
+{ "jsonrpc": "2.0", "id": 2, "result": { "handle": "r-3a7f...", "hit_count": 244184, "form": "session", ... } }
 ```
 
 Client `→` daemon:
