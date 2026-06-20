@@ -371,9 +371,9 @@ impl DaemonClient {
 		}
 
 		let write_result = self.write_request(id, method, params);
-		if let Err(e) = write_result {
+		if let Err(error) = write_result {
 			lock_pending(&self.pending).remove(&id);
-			return Err(e);
+			return Err(self.normalize_send_error(error));
 		}
 
 		let response = match timeout {
@@ -393,6 +393,14 @@ impl DaemonClient {
 			ResponseMessage::Result(value) => serde_json::from_value(value)
 				.map_err(|e| DaemonClientError::Envelope(format!("invalid result for {}: {}", method, e))),
 			ResponseMessage::Error(error) => Err(error.into()),
+		}
+	}
+
+	fn normalize_send_error(&self, error: DaemonClientError) -> DaemonClientError {
+		if self.reader_closed.load(Ordering::SeqCst) || is_connection_closed(&error) {
+			DaemonClientError::ReaderClosed
+		} else {
+			error
 		}
 	}
 
@@ -533,6 +541,19 @@ fn lock_pending(pending: &PendingMap) -> MutexGuard<'_, HashMap<u64, SyncSender<
 			error.into_inner()
 		}
 	}
+}
+
+fn is_connection_closed(error: &DaemonClientError) -> bool {
+	matches!(
+		error,
+		DaemonClientError::Transport(io) if matches!(
+			io.kind(),
+			io::ErrorKind::BrokenPipe
+				| io::ErrorKind::ConnectionReset
+				| io::ErrorKind::ConnectionAborted
+				| io::ErrorKind::NotConnected
+		)
+	)
 }
 
 fn dispatch_response(value: serde_json::Value, pending: &PendingMap) {
@@ -993,4 +1014,3 @@ mod tests {
 		assert_eq!(unknown.to_string(), "relocated");
 	}
 }
-
