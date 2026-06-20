@@ -138,7 +138,7 @@ impl State {
 			capabilities: Capabilities {
 				observations: false,
 				workspaces: false,
-				coupler_kinds: all_coupler_kinds().map(|k| k.type_name().to_string()).collect(),
+				coupler_kinds: coupler_kind_names().iter().map(|k| k.to_string()).collect(),
 			},
 		})
 	}
@@ -450,7 +450,7 @@ impl State {
 		follower_id: ProcessId,
 		kind: CouplerKind,
 	) -> Result<CouplerId, ProtocolError> {
-		if !all_coupler_kinds().any(|k| k.type_name() == kind.type_name()) {
+		if !coupler_kind_names().contains(&kind.type_name()) {
 			return Err(ProtocolError::new(
 				error_codes::COUPLER_KIND_UNSUPPORTED,
 				format!("coupler kind '{}' not supported by this daemon", kind.type_name()),
@@ -753,29 +753,27 @@ fn coupler_kind_signature(
 	}
 }
 
-fn all_coupler_kinds() -> impl Iterator<Item = CouplerKind> {
-	[
-		CouplerKind::SentenceMirror,
-		CouplerKind::Alignment { name: String::new() },
-		CouplerKind::KwicSelection,
-		CouplerKind::DocPickerSelection,
-		CouplerKind::NamedResultsSelection,
-		CouplerKind::ConlluView,
-	]
-	.into_iter()
-}
-
-// Drift guard for all_coupler_kinds: forces a compile error if CouplerKind grows.
-#[allow(dead_code)]
-fn assert_coupler_kinds_covered(kind: &CouplerKind) {
-	match kind {
-		CouplerKind::SentenceMirror => {}
-		CouplerKind::Alignment { .. } => {}
-		CouplerKind::KwicSelection => {}
-		CouplerKind::DocPickerSelection => {}
-		CouplerKind::NamedResultsSelection => {}
-		CouplerKind::ConlluView => {}
+fn coupler_kind_names() -> &'static [&'static str] {
+	#[allow(dead_code)]
+	fn drift_guard(kind: &CouplerKind) {
+		// adding a variant fails this match; keep the name list below in sync
+		match kind {
+			CouplerKind::SentenceMirror
+			| CouplerKind::Alignment { .. }
+			| CouplerKind::KwicSelection
+			| CouplerKind::DocPickerSelection
+			| CouplerKind::NamedResultsSelection
+			| CouplerKind::ConlluView => {}
+		}
 	}
+	&[
+		"sentence_mirror",
+		"alignment",
+		"kwic_selection",
+		"doc_picker_selection",
+		"named_results_selection",
+		"conllu_view",
+	]
 }
 
 fn transform_interest(
@@ -1189,8 +1187,7 @@ mod tests {
 		let reply = state
 			.register(make_register_params(ProcessKind::External), dummy_outbound())
 			.unwrap();
-		for kind in all_coupler_kinds() {
-			let name = kind.type_name();
+		for &name in coupler_kind_names() {
 			assert!(
 				reply.capabilities.coupler_kinds.iter().any(|k| k == name),
 				"expected capability '{}' present",
