@@ -679,7 +679,7 @@ Batched MWT-aware surface reconstruction that also returns per-token byte offset
 }
 ```
 
-`results` is in input order, one entry per requested range.
+`results` is in input order, one entry per requested range. Each entry is a `SurfaceWithTokens` (`surface: String`, `tokens: Vec<SurfaceToken>`); the reply itself is `TextSurfaceWithTokenSpansReply { results: Vec<SurfaceWithTokens> }`.
 
 **Per-token entries.** Each `SurfaceToken` has:
 - `position` — global token position
@@ -687,6 +687,8 @@ Batched MWT-aware surface reconstruction that also returns per-token byte offset
 - `emitted` — `true` for the position that carries the surface bytes, `false` for MWT constituent positions that share the bytes with their MWT's emitter
 
 For a non-MWT token, the entry is its own emitter and the byte range is non-empty (or empty only for tokens whose `word` value is the empty string).
+
+**Wire types.** `position`, `surface_start`, and `surface_end` are all `u64`; `emitted` is `bool`. Because the offsets are `u64` rather than `usize`, slicing the entry's `surface` requires a cast — `surface.get(token.surface_start as usize .. token.surface_end as usize)`. They are byte offsets into that same entry's `surface` and always land on UTF-8 boundaries (token edges), so per-token `[..]` indexing is safe; reach for `get(..)` only if a client combines offsets across tokens.
 
 **MWT semantics.** When an MWT covers `[mwt.start, mwt.end)` and the requested range fully contains the MWT (`mwt.start >= range.start && mwt.end <= range.end`), the daemon emits the MWT surface form once. The emitter is the position at `mwt.start`; constituent positions `mwt.start + 1 .. mwt.end` each get an entry with `surface_start == surface_end` at the post-emit byte offset and `emitted: false`. The MWT's `no_space_after` flag applies for spacing after the MWT.
 
