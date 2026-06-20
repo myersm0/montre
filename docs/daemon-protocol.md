@@ -395,7 +395,7 @@ Initial handshake. Must be the first message on a new connection.
 ```json
 {
   "process_id": 4,
-  "server_version": "0.6.0",
+  "server_version": "0.7.0",
   "protocol_version": 1,
   "daemon_epoch": 17,
   "capabilities": {
@@ -503,6 +503,8 @@ Detailed info on one annotation layer.
 `kind` is `"string"` or `"int"` for forward layers. v1 daemons emit no other values; the Rust `LayerKind::Unknown` variant is a client-side deserialization fallback so that kind values added in future protocol revisions don't break older clients. (The daemon's internal conversion also routes a should-never-happen engine mismatch to `Unknown` — a bug net, not part of the wire contract.)
 
 Nonexistent layer returns `-32602` (invalid params). Layer existence is a named lookup, not a range; clients that don't know a layer name should call `corpus.info` first to discover the available layers.
+
+Wire layer names are canonical. Any operation taking a `layer` parameter (`corpus.layer_info`, `text.annotations`, `text.annotations_range`) expects the layer's canonical name (`upos`, `xpos`, `lemma`, `feats`, ...). CQL aliases such as `pos` → `upos` are a convenience of the query language, resolved inside `query.execute`'s CQL parser; they are not resolved at the protocol layer. `corpus.layer_info { "layer": "pos" }` returns `-32602`, even though `[pos="NOUN"]` is valid CQL.
 
 ### `query`
 

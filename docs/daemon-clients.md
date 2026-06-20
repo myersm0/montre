@@ -164,7 +164,7 @@ Pure-stdlib Python REPL. Connects to a running daemon, auto-registers, and accep
 
 ```
 $ python3 tools/dclient.py --socket /tmp/montre-daemon.sock
-registered as process_id=1, server_version=0.6.0, daemon_epoch=17
+registered as process_id=1, server_version=0.7.0, daemon_epoch=17
 daemon> corpus.info
 {
   "result": { "name": "isosceles", ... }

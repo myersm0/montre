@@ -58,6 +58,8 @@ If the reader exits for any reason — EOF, framing error, protocol error, or pa
 
 This is enforced with a drop guard in the reader thread rather than relying on normal loop exit.
 
+The request path also normalizes the reader-vs-writer race. When the daemon closes a connection mid-request, the failure surfaces as `ReaderClosed` whether the reader observes EOF first or the writer's send hits a connection-closed error (`BrokenPipe`, `ConnectionReset`, `ConnectionAborted`, `NotConnected`) first. Downstream consumers (TUI reconnect logic, integration tests) see one error variant for the one condition rather than branching on which thread won.
+
 ## File layout
 
 ```

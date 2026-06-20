@@ -887,7 +887,7 @@ Lookup is O(1): read two adjacent u32 offsets, slice the pool.
 - [x] **Surface text reconstruction**: `Corpus::surface_text(start, end)` consults MWT side table and spacing bitmap. MWT forms replace constituent words; `no_space_after` suppresses inter-token spaces. CLI KWIC display and FFI `span_text`/`hitlist_texts` updated to use surface text for the `"word"` layer.
 - [x] Index version bumped to 5.
 - [x] Default layer set expanded: word, lemma, upos, xpos, feats, head, deprel, deps (was: word, lemma, upos, xpos, feats, head, deprel).
-- [x] 7 new FFI functions: `montre_corpus_mwt_form`, `montre_corpus_mwt_at`, `montre_corpus_surface_text`, `montre_corpus_has_no_space_after`, `montre_corpus_empty_node_count`, `montre_corpus_empty_node_count_in_sentence`, `montre_corpus_empty_node_field` (64 total, was 57).
+- [x] 7 new FFI functions: `montre_corpus_mwt_form`, `montre_corpus_mwt_at`, `montre_corpus_surface_text`, `montre_corpus_has_no_space_after`, `montre_corpus_empty_node_count`, `montre_corpus_empty_node_count_in_sentence`, `montre_corpus_empty_node_field`.
 - [x] 180+ tests (was 170+), including MWT surface text reconstruction, MWT+SpaceAfter combined, deps forward-only verification, empty node preservation and non-indexing, end-to-end build-query-display pipeline.
 
 **MWT storage format (`MMWT`)**
@@ -941,9 +941,9 @@ JSON array of objects, sorted by `(sentence_index, node_id)`. Fields with `_` va
 - [x] **Documentation audit**: api.md function count corrected (was 64, actual 78). Eight previously undocumented functions added: `montre_corpus_document_index_by_name`, `montre_corpus_inverted_count`, `montre_corpus_component_index_by_name`, `montre_corpus_inverted_counts`, `montre_hit_capture_count`, `montre_hit_capture_name`, `montre_hit_capture_start`, `montre_hit_capture_end`.
 - [x] 2 new FFI functions (78 total; prior count of 64 was an undercount — see api.md for full inventory).
 
-### Session daemon (`montre-daemon`) — v1 surface complete, hardening in progress
+### Session daemon (`montre-daemon`) — v1 surface and hardening complete
 
-Per-corpus session daemon for long-running interactive use: one process per corpus, spawned automatically on first client connection, serving a Unix domain socket with a length-framed JSON-RPC 2.0 protocol (`docs/daemon-protocol.md` is the implementation-blocking spec; `docs/daemon-clients.md` is the client-author guide). A Rust `DaemonClient` in the same crate is the shared entry point for bindings, terminal tools ([montre-tui](https://github.com/myersm0/montre-tui)), and integration tests. Work is tracked item-by-item in the montre-daemon cleanup agenda (P0–P5 tiers plus J/K test backlogs); this entry summarizes.
+Per-corpus session daemon for long-running interactive use: one process per corpus, spawned automatically on first client connection, serving a Unix domain socket with a length-framed JSON-RPC 2.0 protocol (`docs/daemon-protocol.md` is the implementation-blocking spec; `docs/daemon-clients.md` is the client-author guide). A Rust `DaemonClient` in the same crate is the shared entry point for bindings, terminal tools ([montre-tui](https://github.com/myersm0/montre-tui)), and integration tests. Work is tracked item-by-item in the montre-daemon cleanup agenda (P0–P5 tiers plus J/K test backlogs); this entry summarizes. Note that only one the last item remains.
 
 - [x] **Protocol v1**: version negotiation at `session.register`, capability advertisement, complete operation reference across `session` / `corpus` / `text` / `query` / `alignment` / `coupler` / `subscription` / `daemon` namespaces, notification reference, error model.
 - [x] **Roster and couplers**: process registration with provides/consumes interest declarations; couplers (master drives follower through daemon-applied interest transformation) with kind-compatibility validation and DAG cycle detection; roster-change notifications.
@@ -954,7 +954,7 @@ Per-corpus session daemon for long-running interactive use: one process per corp
 - [x] **Client**: background reader thread feeding typed `NotificationEnvelope` values (receive-side event enums with `Unknown(String)` forward-compat fallback), fail-fast semantics when the daemon closes, `#[non_exhaustive]` public enums.
 - [x] **One-time pre-release wire cleanup** (June 2026): field renames, reply normalization, typed notification payloads — shipped under `protocol_version = 1` with no bump, before any external consumers existed.
 - [x] 232 unit + 24 integration tests in the crate.
-- [ ] Remaining hardening: P5 internals (shutdown drain configurability, fsync-on-rename audit), J/K regression and baseline-coverage backlogs (including the `Unknown`-variant forward-compat matrix).
+- [x] Remaining hardening: P5 internals (shutdown drain configurability, fsync-on-rename audit), J/K regression and baseline-coverage backlogs (including the `Unknown`-variant forward-compat matrix).
 - [ ] Reserved for protocol v2: observations, workspaces, UUID-stamped corpus identity, `observations_changed` / `workspaces_changed` topics.
 
 **Engine-orthogonal.** The daemon consumes `montre-index` and `montre-query` through their public read/execute APIs only; it introduces no index format changes, and the index version (5, per Phase 4b) is unaffected by any daemon work. Daemon state lives entirely outside the corpus directory, under `~/.local/share/montre/state/<corpus_id>/`.

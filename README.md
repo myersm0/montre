@@ -264,7 +264,7 @@ A paper describing Montre is in preparation. In the meantime, if you use Montre 
   title        = {Montre: A Modern Corpus Query Engine for Aligned Corpora},
   year         = {2026},
   url          = {https://github.com/myersm0/montre},
-  version      = {0.6.0}
+  version      = {0.7.0}
 }
 ```
 
