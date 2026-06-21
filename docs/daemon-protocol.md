@@ -226,6 +226,8 @@ Tagged union by `type` field:
 { "type": "document",  "doc": 3 }
 ```
 
+**Coordinates.** For `position` and `span`, the `position`/`start`/`end` values are global token positions (corpus-wide, the same space as the base `Span` type and as a hit's `span`). The `doc` field on these variants is the containing document — a redundant, validated label, not a coordinate base: the daemon checks it against the global coordinate (`document_for_position(start) == doc`) and drops the interest on mismatch, but never adds a document base offset. By contrast, `sentence`'s `sent` is document-local: the 0-based sentence index within `doc` (`global_sentence_index - first_sentence_of(doc)`). Consumers of a coupled `span` therefore index globally and need no per-document offset table.
+
 ### `InterestKind`
 
 String enum: `"position" | "span" | "sentence" | "hit" | "results" | "document"`.
