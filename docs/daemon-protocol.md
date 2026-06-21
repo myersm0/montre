@@ -213,6 +213,15 @@ The Rust types in `montre_daemon::protocol` reflect this via per-field serde nam
 
 Half-open `[start, end)` over global token positions.
 
+### Coordinate system
+
+There is one token coordinate space: corpus-wide global token positions (`TokenPosition`, `u64`, zero-based). Every `Span` and every token boundary any operation returns is expressed in it — `Hit.span` and `Hit.captures`, the `span` returned by `text.sentence`, `text.document`, and `text.sentences[]`, the `source` and `targets` of `alignment.project`, the `{ start, end }` inputs to range ops (clamped against the corpus `token_count`), and the `position`/`span` of an `Interest`. No operation returns document-local token positions. A `doc` or `document_index` field that accompanies a span is a label identifying the containing document, never an offset base; clients index globally and need no per-document offset table.
+
+Two things that resemble token positions but are not in this space:
+
+- **Surface byte offsets.** `SurfaceToken.surface_start` / `surface_end` (from `text.surface_with_token_spans`) are byte offsets into that result entry's reconstructed `surface` string, not token positions. The accompanying `position` field on the same token *is* a global token position.
+- **Sentence and document references are ordinals, not positions.** `document_index` and the corpus-wide `sentence_index` are zero-based ordinals; the `sent` field (in `Interest::Sentence`, `text.sentence` params, and `text.sentences[]`) is the document-local sentence index. This is the disambiguation for the `SentenceIndex` note above: on the wire, `sent` is always document-local and `sentence_index` is always corpus-wide.
+
 ### `Interest`
 
 Tagged union by `type` field:
