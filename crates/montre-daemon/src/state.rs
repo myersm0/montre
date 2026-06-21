@@ -746,7 +746,7 @@ fn coupler_kind_signature(
 	match kind {
 		CouplerKind::SentenceMirror => (&[Position, Span, Sentence], &[Sentence]),
 		CouplerKind::Alignment { .. } => (&[Sentence, Span], &[Span]),
-		CouplerKind::KwicSelection => (&[Hit], &[Sentence]),
+		CouplerKind::KwicSelection => (&[Hit], &[Span]),
 		CouplerKind::DocPickerSelection => (&[Document], &[Document]),
 		CouplerKind::NamedResultsSelection => (&[Results], &[Results]),
 		CouplerKind::ConlluView => (&[Sentence], &[Sentence]),
@@ -822,15 +822,11 @@ fn transform_interest(
 				let table = handle.results.read().expect("results lock poisoned");
 				let Some(entry) = table.get(result) else { return Vec::new(); };
 				let Some(hit) = entry.hits.get(*hit_idx as usize) else { return Vec::new(); };
-				let doc = hit.document_index;
-				let Some(first) = handle.corpus.first_sentence_of_document(doc as usize) else {
-					return Vec::new();
-				};
-				let global = hit.sentence_index as usize;
-				if global < first {
-					return Vec::new();
-				}
-				vec![Interest::Sentence { doc, sent: (global - first) as u32 }]
+				vec![Interest::Span {
+					doc: hit.document_index,
+					start: hit.span.start,
+					end: hit.span.end,
+				}]
 			}
 			_ => Vec::new(),
 		},
@@ -1576,12 +1572,12 @@ mod tests {
 		assert!(coupler_kind_compat(
 			&CouplerKind::KwicSelection,
 			&[InterestKind::Hit],
-			&[InterestKind::Sentence],
+			&[InterestKind::Span],
 		));
 		assert!(!coupler_kind_compat(
 			&CouplerKind::KwicSelection,
 			&[InterestKind::Sentence],
-			&[InterestKind::Sentence],
+			&[InterestKind::Span],
 		));
 	}
 
@@ -1757,15 +1753,13 @@ mod tests {
 	}
 
 	#[test]
-	fn transform_kwic_extracts_containing_sentence_from_hit() {
+	fn transform_kwic_projects_hit_to_span() {
 		let mut state = make_state();
 		let doc = find_doc(&state.handle.corpus, "la_maison");
-		let first_global =
-			state.handle.corpus.first_sentence_of_document(doc as usize).expect("first sent");
 		let executor_hit = Hit {
-			span: Span { start: 0, end: 1 },
+			span: Span { start: 3, end: 7 },
 			document_index: doc,
-			sentence_index: first_global as u32,
+			sentence_index: 0,
 			captures: vec![],
 		};
 		let result_handle = state.insert_result("test".to_string(), vec![executor_hit]).handle;
@@ -1773,11 +1767,12 @@ mod tests {
 		let out = transform_interest(&state.handle, &interest, &CouplerKind::KwicSelection);
 		assert_eq!(out.len(), 1);
 		match &out[0] {
-			Interest::Sentence { doc: d, sent: s } => {
+			Interest::Span { doc: d, start, end } => {
 				assert_eq!(*d, doc);
-				assert_eq!(*s, 0);
+				assert_eq!(*start, 3);
+				assert_eq!(*end, 7);
 			}
-			other => panic!("expected Sentence, got {:?}", other),
+			other => panic!("expected Span, got {:?}", other),
 		}
 	}
 
