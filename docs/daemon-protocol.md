@@ -274,7 +274,7 @@ Each coupler kind defines (a) which master `provides` `InterestKind`s it accepts
 |---|---|---|---|
 | `SentenceMirror` | `Position` \| `Span` \| `Sentence` | `Sentence` | Position/Span are widened to their containing sentence. |
 | `Alignment { name }` | `Sentence` \| `Span` | `Span` | 1→many: one notification per target. |
-| `KwicSelection` | `Hit` | `Sentence` | Containing sentence of the hit. |
+| `KwicSelection` | `Hit` | `Span` | The hit's exact `[start, end)` span, projected from the resolved hit. |
 | `DocPickerSelection` | `Document` | `Document` | Inert in v1 (see below). |
 | `NamedResultsSelection` | `Results` | `Results` | Inert in v1 (see below). |
 | `ConlluView` | `Sentence` | `Sentence` | Inert in v1 (see below). |
@@ -395,7 +395,7 @@ Initial handshake. Must be the first message on a new connection.
 ```json
 {
   "process_id": 4,
-  "server_version": "0.7.0",
+  "server_version": "0.8.0",
   "protocol_version": 1,
   "daemon_epoch": 17,
   "capabilities": {
@@ -1264,7 +1264,7 @@ Client `→` daemon:
 Daemon `→` client:
 ```json
 { "jsonrpc": "2.0", "id": 1,
-  "result": { "process_id": 1, "server_version": "0.6.0", "protocol_version": 1,
+  "result": { "process_id": 1, "server_version": "0.8.0", "protocol_version": 1,
               "capabilities": { ... } } }
 ```
 
@@ -1305,13 +1305,13 @@ Daemon responds with `coupler_id`. KWIC user navigates to a different hit; KWIC 
   "params": { "interest": { "type": "hit", "result": "r-3a7f...", "hit_idx": 23 } } }
 ```
 
-Daemon transforms `Hit -> Sentence` (resolves the hit's containing sentence) and pushes to the reader:
+Daemon transforms `Hit -> Span` (projects the hit to its exact `[start, end)` span) and pushes to the reader:
 ```json
 { "jsonrpc": "2.0", "method": "notification.coupler_update",
-  "params": { "coupler_id": 7, "interest": { "type": "sentence", "doc": 3, "sent": 142 } } }
+  "params": { "coupler_id": 7, "interest": { "type": "span", "doc": 3, "start": 1247, "end": 1252 } } }
 ```
 
-Reader scrolls to the new sentence and highlights it.
+Reader scrolls to the span and highlights those tokens.
 
 ### Auto-spawn cold start
 

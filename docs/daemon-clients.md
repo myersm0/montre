@@ -164,7 +164,7 @@ Pure-stdlib Python REPL. Connects to a running daemon, auto-registers, and accep
 
 ```
 $ python3 tools/dclient.py --socket /tmp/montre-daemon.sock
-registered as process_id=1, server_version=0.7.0, daemon_epoch=17
+registered as process_id=1, server_version=0.8.0, daemon_epoch=17
 daemon> corpus.info
 {
   "result": { "name": "isosceles", ... }
@@ -255,13 +255,13 @@ If a stored CQL no longer parses or executes against a rebuilt corpus, `query.lo
 The protocol's coupler mechanism lets one process (the master) drive another (the follower) without either party knowing the other's address. The daemon owns the relationship: when the master publishes an interest, the daemon transforms it according to the coupler's `kind` and pushes the result to the follower.
 
 ```rust
-// Follower: register with consumes=[Sentence], wait for coupler_update notifications
+// Follower: register with consumes=[Span], wait for coupler_update notifications
 let follower_reply = follower.register(RegisterParams {
 	protocol_version: 1,
 	kind: ProcessKind::External,
 	label: Some("reader".into()),
 	provides: vec![],
-	consumes: vec![InterestKind::Sentence],
+	consumes: vec![InterestKind::Span],
 })?;
 
 // Master: register with provides=[Hit], create a coupler between us
@@ -286,15 +286,15 @@ master.publish_interest(PublishInterestParams {
 		hit_idx: 23,
 	},
 })?;
-// → daemon transforms (KwicSelection: Hit → containing Sentence)
-// → follower receives notification.coupler_update with Interest::Sentence
+// → daemon transforms (KwicSelection: Hit → Span)
+// → follower receives notification.coupler_update with Interest::Span
 ```
 
 Each `CouplerKind` defines what the master can publish (`provides`) and what the follower receives after the daemon's transformation (`consumes`). The full matrix is in `daemon-protocol.md` under "Transformation matrix". The most common kinds:
 
 - `SentenceMirror` — widens a `Position` or `Span` to its containing sentence; useful for "keep this pane on the same sentence as that one"
 - `Alignment { name }` — projects via a named alignment; the daemon emits one notification per target sentence (1→N fan-out)
-- `KwicSelection` — resolves a `Hit` to its containing sentence; drives a reader from a KWIC pane
+- `KwicSelection` — projects a `Hit` to its exact span; drives a reader from a KWIC pane
 
 `coupler.create` validates that the master's `provides` and the follower's `consumes` are compatible with the kind's transformation row and returns error `1400` otherwise. Process IDs that disappear (registration ends) silently drop their couplers.
 
