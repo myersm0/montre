@@ -11,7 +11,7 @@ jobs:
   build-linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl,x86_64-unknown-linux-gnu
@@ -30,7 +30,7 @@ jobs:
           cp target/x86_64-unknown-linux-musl/release/montre montre-linux-x86_64/
           cp target/x86_64-unknown-linux-gnu/release/libmontre_ffi.so montre-linux-x86_64/
           tar czf montre-linux-x86_64.tar.gz montre-linux-x86_64
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: montre-linux-x86_64
           path: montre-linux-x86_64.tar.gz
@@ -45,7 +45,7 @@ jobs:
             artifact: montre-macos-aarch64
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -55,7 +55,7 @@ jobs:
           cp target/${{ matrix.target }}/release/montre ${{ matrix.artifact }}/
           cp target/${{ matrix.target }}/release/libmontre_ffi.dylib ${{ matrix.artifact }}/
           tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.tar.gz
@@ -64,10 +64,10 @@ jobs:
     needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: "*.tar.gz"
           generate_release_notes: true
