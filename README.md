@@ -72,7 +72,11 @@ Montre uses a CQL-based language, extended with labels, constraints, and alignme
 [word="chat" & pos="NOUN"]
 [lemma=/^un.*/]
 [pos!="PUNCT"]
+```
 
+A quoted value is always a literal string, never a regular expression: `[lemma="mais.*"]` looks for the lemma `mais.*`. This differs from CWB, Manatee and BlackLab, where quoted values are patterns. Regular expressions go between slashes and match anywhere in the value; anchor them with `^` and `$`.
+
+```cql
 # Sequences
 [pos="DET"] [pos="ADJ"]* [pos="NOUN"]
 
@@ -80,7 +84,7 @@ Montre uses a CQL-based language, extended with labels, constraints, and alignme
 [pos="ADJ"]+
 [pos="ADJ"]*
 [pos="ADJ"]?
-[pos="ADJ"]{2,4}
+[pos="ADJ"]{2,4}    # explicit bounds up to 100; * and + stop at 100
 
 # Alternation
 ([pos="ADJ"] | [pos="ADV"])+ [pos="NOUN"]
@@ -91,6 +95,10 @@ Montre uses a CQL-based language, extended with labels, constraints, and alignme
 [pos="DET"] [pos="NOUN"] within s
 [lemma="chat"] within doc
 ```
+
+A match never extends past the document it starts in. Sequences do cross sentence boundaries unless `within s` is given.
+
+A layer, span, component, or document name that the corpus does not have is an error, not an empty result.
 
 ### UPOS and XPOS
 

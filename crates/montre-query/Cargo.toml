@@ -11,6 +11,7 @@ montre-index = { workspace = true }
 regex = { workspace = true }
 rayon = { workspace = true }
 roaring = { workspace = true }
+smallvec = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

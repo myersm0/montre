@@ -35,6 +35,13 @@ fn map_query_error(err: QueryError) -> ProtocolError {
 			error_codes::PLAN_ERROR,
 			format!("unknown label: {}", name),
 		),
+		err @ (QueryError::UnindexedLayer(_)
+		| QueryError::UnknownSpanLayer(_)
+		| QueryError::UnknownComponent(_)
+		| QueryError::UnknownDocument(_)
+		| QueryError::QuantifierTooLarge { .. }) => {
+			ProtocolError::new(error_codes::PLAN_ERROR, err.to_string())
+		}
 		QueryError::Execution(msg) => ProtocolError::new(error_codes::EXECUTION_ERROR, msg),
 	}
 }

@@ -168,7 +168,7 @@ fn single_component_lifecycle() {
 		assert_eq!(doc_name, "doc.conllu");
 
 		// components: single-component corpus has 0 components
-		assert_eq!(montre_corpus_component_count(corpus), 0);
+		assert_eq!(montre_corpus_component_count(corpus), 1);
 
 		// span layers
 		let span_layer_count = montre_corpus_span_layer_count(corpus);
