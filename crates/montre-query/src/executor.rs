@@ -7,9 +7,10 @@ use rayon::prelude::*;
 use roaring::RoaringBitmap;
 
 use crate::ast::{CmpOp, GlobalConstraint, LabelAttr};
+use crate::budget::{Budget, Limits};
 use crate::planner::{PlanNode, QueryPlan, SequenceStep};
 use crate::sequence::{
-	Bindings, LabelId, Match, Matcher, Pending, Run, Sequence, Slot, Slots, Step,
+	Bindings, LabelId, Match, Matcher, Run, Sequence, Slot, Slots, Step,
 	MAX_QUANTIFIER, UNBOUND, runs_from_bitmap,
 };
 use crate::validate::validate;
@@ -108,8 +109,12 @@ impl<'a> IntoIterator for &'a Results {
 /// Hits come back sorted by (start, end), one per distinct span. A match never
 /// extends past the document it starts in.
 pub fn execute(plan: &QueryPlan, corpus: &Corpus) -> Result<Results> {
+	execute_with(plan, corpus, &Limits::default())
+}
+
+pub fn execute_with(plan: &QueryPlan, corpus: &Corpus, limits: &Limits) -> Result<Results> {
 	validate(&plan.root, corpus)?;
-	let context = Context::new(&plan.root, corpus);
+	let context = Context::new(&plan.root, corpus, limits);
 	let hits = if plan.root.is_token_level() {
 		context
 			.token_bitmap(&plan.root)?
@@ -127,20 +132,29 @@ pub fn execute(plan: &QueryPlan, corpus: &Corpus) -> Result<Results> {
 }
 
 pub fn execute_count(plan: &QueryPlan, corpus: &Corpus) -> Result<usize> {
+	execute_count_with(plan, corpus, &Limits::default())
+}
+
+pub fn execute_count_with(plan: &QueryPlan, corpus: &Corpus, limits: &Limits) -> Result<usize> {
 	validate(&plan.root, corpus)?;
-	Context::new(&plan.root, corpus).count(&plan.root)
+	Context::new(&plan.root, corpus, limits).count(&plan.root)
 }
 
 struct Context<'a> {
 	corpus: &'a Corpus,
 	labels: Vec<String>,
+	budget: Budget,
 }
 
 impl<'a> Context<'a> {
-	fn new(root: &PlanNode, corpus: &'a Corpus) -> Self {
+	fn new(root: &PlanNode, corpus: &'a Corpus, limits: &Limits) -> Self {
 		let mut labels = Vec::new();
 		root.collect_labels(&mut labels);
-		Self { corpus, labels }
+		Self {
+			corpus,
+			labels,
+			budget: Budget::new(*limits),
+		}
 	}
 
 	fn hit(&self, found: Match) -> Hit {
@@ -176,12 +190,12 @@ impl<'a> Context<'a> {
 			PlanNode::SequenceScan { steps } => {
 				let sequence = self.prepare(steps, Bindings::Canonical, &[])?;
 				let ranges = self.ranges();
-				let count = if runs_in_parallel(steps, &ranges) {
-					ranges.par_iter().map(|range| sequence.count_in(*range)).sum()
+				let count_in = |range: &Span| sequence.count_in(*range, &self.budget);
+				if runs_in_parallel(steps, &ranges) {
+					ranges.par_iter().map(count_in).sum()
 				} else {
-					ranges.iter().map(|range| sequence.count_in(*range)).sum()
-				};
-				Ok(count)
+					ranges.iter().map(count_in).sum()
+				}
 			}
 			_ => Ok(self.matches(node, Bindings::Canonical, &[])?.len()),
 		}
@@ -347,15 +361,10 @@ impl<'a> Context<'a> {
 		bindings: Bindings,
 		checks: &[Check],
 	) -> Result<Sequence> {
-		// a group must offer every assignment a constraint may have to choose between
-		let group_bindings = if checks.is_empty() {
-			bindings
-		} else {
-			Bindings::All
-		};
 		let prepared = steps
 			.iter()
 			.map(|step| {
+				let declares = self.declared_by(step);
 				let matcher = if matches!(step.node, PlanNode::ScanAll) {
 					Matcher::Runs(vec![Run {
 						start: 0,
@@ -364,40 +373,69 @@ impl<'a> Context<'a> {
 				} else if step.node.is_token_level() {
 					Matcher::Runs(runs_from_bitmap(self.token_bitmap(&step.node)?.as_ref()))
 				} else {
-					Matcher::Spans(self.matches(&step.node, group_bindings, &[])?)
+					Matcher::Spans(self.group_matches(step, bindings, checks)?)
 				};
 				Ok(Step {
 					matcher,
 					min: if step.node.is_nullable() { 0 } else { step.min },
 					max: step.max.unwrap_or(MAX_QUANTIFIER).min(MAX_QUANTIFIER),
 					label: step.label.as_deref().and_then(|name| self.label_id(name)),
+					declares,
 				})
 			})
 			.collect::<Result<Vec<Step>>>()?;
-		let pending: Vec<Pending> = checks
+		let constraints: Vec<Vec<LabelId>> = checks
 			.iter()
-			.map(|check| self.pending(check, steps))
+			.map(|check| check.labels().collect())
 			.collect();
-		Ok(Sequence::new(prepared, self.labels.len(), &pending, bindings))
+		Ok(Sequence::new(prepared, self.labels.len(), &constraints, bindings))
 	}
 
-	// a constraint is decidable after the last step that declares one of its labels
-	fn pending(&self, check: &Check, steps: &[SequenceStep]) -> Pending {
-		let declaring_step = |slot: LabelId| {
-			steps.iter().position(|step| {
-				let mut declared: Vec<String> = step.label.iter().cloned().collect();
-				step.node.collect_labels(&mut declared);
-				declared.contains(&self.labels[slot])
-			})
+	fn declared_by(&self, step: &SequenceStep) -> Vec<LabelId> {
+		let mut names: Vec<String> = step.label.iter().cloned().collect();
+		step.node.collect_labels(&mut names);
+		names.iter().filter_map(|name| self.label_id(name)).collect()
+	}
+
+	// The sub-matches of a group step. A constraint whose labels all lie inside
+	// an unrepeated group is applied while the group is matched; one that also
+	// reads a label outside it needs every assignment the group can offer.
+	fn group_matches(
+		&self,
+		step: &SequenceStep,
+		bindings: Bindings,
+		checks: &[Check],
+	) -> Result<Vec<Match>> {
+		// the step's own label spans the whole group and is bound outside it
+		let mut names = Vec::new();
+		step.node.collect_labels(&mut names);
+		let inside: Vec<LabelId> = names.iter().filter_map(|name| self.label_id(name)).collect();
+		let unrepeated = step.min == 1 && step.max == Some(1);
+		let settled_inside = |check: &Check| {
+			unrepeated
+				&& applies_checks(&step.node)
+				&& check.labels().all(|label| inside.contains(&label))
 		};
-		let last_step = steps.len().saturating_sub(1);
-		let slots: Vec<LabelId> = check.labels().collect();
-		let after_step = slots
+		let reads_inside = |check: &Check| check.labels().any(|label| inside.contains(&label));
+		let inner_checks: Vec<Check> = checks
 			.iter()
-			.map(|&slot| declaring_step(slot).unwrap_or(last_step))
-			.max()
-			.unwrap_or(last_step);
-		Pending { after_step, slots }
+			.filter(|check| settled_inside(check))
+			.cloned()
+			.collect();
+		let contested = checks
+			.iter()
+			.any(|check| reads_inside(check) && !settled_inside(check));
+		let group_bindings = match contested {
+			true => Bindings::All,
+			false => bindings,
+		};
+		let matches = self.matches(&step.node, group_bindings, &inner_checks)?;
+		// enumerated assignments were charged as the group produced them
+		if group_bindings == Bindings::Canonical {
+			let cost_per_match = 1 + self.labels.len() as u64 / 4;
+			self.budget.hold(matches.len() as u64 * cost_per_match)?;
+		}
+		Ok(matches)
 	}
 
 	fn sequence_matches(
@@ -411,15 +449,15 @@ impl<'a> Context<'a> {
 		let holds = |check: usize, slots: &[Slot]| self.holds(&checks[check], slots);
 		let matches_in = |range: &Span| {
 			if self.labels.is_empty() {
-				sequence.matches_in::<()>(*range, &holds)
+				sequence.matches_in::<()>(*range, &holds, &self.budget)
 			} else {
-				sequence.matches_in::<Slots>(*range, &holds)
+				sequence.matches_in::<Slots>(*range, &holds, &self.budget)
 			}
 		};
 		let per_range: Vec<Vec<Match>> = if runs_in_parallel(steps, &ranges) {
-			ranges.par_iter().map(matches_in).collect()
+			ranges.par_iter().map(matches_in).collect::<Result<_>>()?
 		} else {
-			ranges.iter().map(matches_in).collect()
+			ranges.iter().map(matches_in).collect::<Result<_>>()?
 		};
 		Ok(per_range.into_iter().flatten().collect())
 	}
@@ -528,6 +566,7 @@ impl<'a> Context<'a> {
 	}
 }
 
+#[derive(Clone)]
 enum Check {
 	Compare {
 		left: (Option<LabelId>, String),

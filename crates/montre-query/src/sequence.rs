@@ -4,10 +4,17 @@ use montre_core::Span;
 use roaring::RoaringBitmap;
 use smallvec::SmallVec;
 
+use crate::budget::Budget;
+use crate::Result;
+
 pub(crate) const MAX_QUANTIFIER: u32 = 100;
 
-// start positions extended together; bounds the working set of ambiguous patterns
+// start positions extended together; keeps the working set of an ambiguous
+// pattern proportional to the batch instead of the document
 const SEED_BATCH: usize = 256;
+
+// partial matches created between two looks at the budget
+const CHARGE_STRIDE: usize = 4096;
 
 /// Index of a label among the labels of the query, in query order.
 pub(crate) type LabelId = usize;
@@ -151,6 +158,8 @@ pub(crate) struct Step {
 	pub min: u32,
 	pub max: u32,
 	pub label: Option<LabelId>,
+	/// every label bound by this step: its own and those inside its group
+	pub declares: Vec<LabelId>,
 }
 
 impl Step {
@@ -232,13 +241,6 @@ fn matches_starting_at(table: &[Match], position: u64) -> impl Iterator<Item = &
 		.take_while(move |candidate| candidate.start == position)
 }
 
-/// A constraint, known to the caller by its index, that reads `slots` and can
-/// be decided once the step at `after_step` has run.
-pub(crate) struct Pending {
-	pub after_step: usize,
-	pub slots: Vec<LabelId>,
-}
-
 /// Decides the constraint at an index for a capture assignment.
 pub(crate) type Holds<'a> = &'a (dyn Fn(usize, &[Slot]) -> bool + Sync);
 
@@ -246,6 +248,11 @@ pub(crate) struct Sequence {
 	steps: Vec<Step>,
 	seed_steps: usize,
 	slot_count: usize,
+	match_cost: u64,
+	output_is_intermediate: bool,
+	// per step: slots it declares that a constraint reads; left unbound by the
+	// step, they stay unbound and the constraint cannot hold
+	required: Vec<Vec<LabelId>>,
 	// per step: the constraints decidable once it has run
 	decidable: Vec<Vec<usize>>,
 	// per step: the slots something later still reads
@@ -253,10 +260,12 @@ pub(crate) struct Sequence {
 }
 
 impl Sequence {
+	/// `constraints` lists, for each constraint the caller will be asked to
+	/// decide, the slots it reads.
 	pub(crate) fn new(
 		steps: Vec<Step>,
 		slot_count: usize,
-		pending: &[Pending],
+		constraints: &[Vec<LabelId>],
 		bindings: Bindings,
 	) -> Self {
 		// a match can only begin where one of the steps up to and including the
@@ -265,10 +274,32 @@ impl Sequence {
 			.iter()
 			.position(|step| step.min > 0)
 			.map_or(steps.len(), |index| index + 1);
+		let last_step = steps.len().saturating_sub(1);
+		let declaring_step = |slot: &LabelId| {
+			steps
+				.iter()
+				.position(|step| step.declares.contains(slot))
+				.unwrap_or(last_step)
+		};
+		// a constraint is decidable after the last step that declares one of its slots
+		let decided_after: Vec<usize> = constraints
+			.iter()
+			.map(|slots| slots.iter().map(declaring_step).max().unwrap_or(last_step))
+			.collect();
+		let required = steps
+			.iter()
+			.map(|step| {
+				step.declares
+					.iter()
+					.copied()
+					.filter(|slot| constraints.iter().any(|slots| slots.contains(slot)))
+					.collect()
+			})
+			.collect();
 		let decidable = (0..steps.len())
 			.map(|step| {
-				(0..pending.len())
-					.filter(|&check| pending[check].after_step == step)
+				(0..constraints.len())
+					.filter(|&constraint| decided_after[constraint] == step)
 					.collect()
 			})
 			.collect();
@@ -276,10 +307,11 @@ impl Sequence {
 			.map(|step| match bindings {
 				Bindings::All => (0..slot_count).collect(),
 				Bindings::Canonical => {
-					let mut awaited: Vec<LabelId> = pending
+					let mut awaited: Vec<LabelId> = constraints
 						.iter()
-						.filter(|check| check.after_step > step)
-						.flat_map(|check| check.slots.iter().copied())
+						.zip(&decided_after)
+						.filter(|(_, &after)| after > step)
+						.flat_map(|(slots, _)| slots.iter().copied())
 						.collect();
 					awaited.sort_unstable();
 					awaited.dedup();
@@ -291,25 +323,41 @@ impl Sequence {
 			steps,
 			seed_steps,
 			slot_count,
+			match_cost: 1 + slot_count as u64 / 4,
+			output_is_intermediate: bindings == Bindings::All,
+			required,
 			decidable,
 			live,
 		}
 	}
 
 	/// Non-empty matches lying inside `range`, sorted by (start, end, captures).
-	pub(crate) fn matches_in<T: Track>(&self, range: Span, holds: Holds) -> Vec<Match> {
+	pub(crate) fn matches_in<T: Track>(
+		&self,
+		range: Span,
+		holds: Holds,
+		budget: &Budget,
+	) -> Result<Vec<Match>> {
 		let mut matches = Vec::new();
 		for seeds in self.seeds(range).chunks(SEED_BATCH) {
-			self.extend_seeds::<T>(seeds, range.end, holds, &mut matches);
+			self.extend_seeds::<T>(seeds, range.end, holds, budget, &mut matches)?;
 		}
-		matches
+		Ok(matches)
 	}
 
-	pub(crate) fn count_in(&self, range: Span) -> usize {
-		self.matches_in::<()>(range, &|_, _| true).len()
+	pub(crate) fn count_in(&self, range: Span, budget: &Budget) -> Result<usize> {
+		Ok(self.matches_in::<()>(range, &|_, _| true, budget)?.len())
 	}
 
-	fn extend_seeds<T: Track>(&self, seeds: &[u64], limit: u64, holds: Holds, out: &mut Vec<Match>) {
+	fn extend_seeds<T: Track>(
+		&self,
+		seeds: &[u64],
+		limit: u64,
+		holds: Holds,
+		budget: &Budget,
+		out: &mut Vec<Match>,
+	) -> Result<()> {
+		let cost = |matches: usize| matches as u64 * self.match_cost;
 		let mut active: Vec<Partial<T>> = seeds
 			.iter()
 			.map(|&position| Partial {
@@ -318,12 +366,14 @@ impl Sequence {
 				track: T::unbound(self.slot_count),
 			})
 			.collect();
+		budget.hold(cost(active.len()))?;
 
 		for (index, step) in self.steps.iter().enumerate() {
 			if active.is_empty() {
-				return;
+				return Ok(());
 			}
 			let mut next: Vec<Partial<T>> = Vec::with_capacity(active.len());
+			let mut charged = 0;
 			let mut continuations: Vec<(u64, &[Slot])> = Vec::new();
 			for partial in &active {
 				if step.min == 0 {
@@ -340,10 +390,26 @@ impl Sequence {
 						track,
 					});
 				}
+				if next.len() - charged >= CHARGE_STRIDE {
+					budget.hold(cost(next.len() - charged))?;
+					budget.expand((next.len() - charged) as u64)?;
+					charged = next.len();
+				}
 			}
+			budget.hold(cost(next.len() - charged))?;
+			budget.expand((next.len() - charged) as u64)?;
+			let created = next.len();
 
-			for &check in &self.decidable[index] {
-				next.retain(|partial| holds(check, partial.track.slots()));
+			let required = &self.required[index];
+			if !required.is_empty() {
+				next.retain(|partial| {
+					required
+						.iter()
+						.all(|&slot| partial.track.slots()[slot] != UNBOUND)
+				});
+			}
+			for &constraint in &self.decidable[index] {
+				next.retain(|partial| holds(constraint, partial.track.slots()));
 			}
 
 			// of the partial matches nothing later can tell apart, keep the smallest
@@ -362,9 +428,11 @@ impl Sequence {
 					later.compare_distinguishing(earlier, live).is_eq()
 				});
 			}
+			budget.release(cost(created - next.len() + active.len()));
 			active = next;
 		}
 
+		let surviving = active.len();
 		let first_new = out.len();
 		out.extend(
 			active
@@ -376,7 +444,14 @@ impl Sequence {
 					captures: partial.track.into_captures(),
 				}),
 		);
+		// matches that feed a group or a constraint stay charged to the query
+		let kept = match self.output_is_intermediate {
+			true => out.len() - first_new,
+			false => 0,
+		};
+		budget.release(cost(surviving - kept));
 		out[first_new..].sort_unstable();
+		Ok(())
 	}
 
 	fn seeds(&self, range: Span) -> Vec<u64> {
@@ -393,6 +468,8 @@ impl Sequence {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::budget::Limits;
+	use crate::QueryError;
 
 	fn runs(positions: &[u32]) -> Vec<Run> {
 		runs_from_bitmap(&positions.iter().copied().collect())
@@ -404,12 +481,14 @@ mod tests {
 			min,
 			max,
 			label: None,
+			declares: Vec::new(),
 		}
 	}
 
 	fn labeled(positions: &[u32], min: u32, max: u32, label: LabelId) -> Step {
 		Step {
 			label: Some(label),
+			declares: vec![label],
 			..token_step(positions, min, max)
 		}
 	}
@@ -418,12 +497,23 @@ mod tests {
 		Sequence::new(steps, 0, &[], Bindings::Canonical)
 	}
 
+	fn unlimited() -> Budget {
+		Budget::new(Limits::unlimited())
+	}
+
 	fn spans(sequence: &Sequence, end: u64) -> Vec<(u64, u64)> {
 		sequence
-			.matches_in::<()>(Span::new(0, end), &|_, _| true)
+			.matches_in::<()>(Span::new(0, end), &|_, _| true, &unlimited())
+			.unwrap()
 			.into_iter()
 			.map(|found| (found.start, found.end))
 			.collect()
+	}
+
+	fn assignments(sequence: &Sequence, end: u64, holds: Holds) -> Vec<Match> {
+		sequence
+			.matches_in::<Slots>(Span::new(0, end), holds, &unlimited())
+			.unwrap()
 	}
 
 	#[test]
@@ -478,6 +568,7 @@ mod tests {
 			min: 1,
 			max: MAX_QUANTIFIER,
 			label: None,
+			declares: Vec::new(),
 		};
 		let sequence = unlabeled(vec![group, token_step(&[2, 4], 1, 1)]);
 		assert_eq!(spans(&sequence, 10), vec![(0, 3), (0, 5), (2, 5)]);
@@ -496,15 +587,16 @@ mod tests {
 	fn all_bindings_keeps_every_capture_assignment() {
 		let gap = || token_step(&[0, 1, 2, 3], 0, 2);
 		let steps = || vec![gap(), labeled(&[1, 2], 1, 1, 0), gap()];
-		let range = Span::new(0, 4);
 		let over_whole_range = |found: &&Match| found.start == 0 && found.end == 4;
 
-		let all = Sequence::new(steps(), 1, &[], Bindings::All)
-			.matches_in::<Slots>(range, &|_, _| true);
+		let all = assignments(&Sequence::new(steps(), 1, &[], Bindings::All), 4, &|_, _| true);
 		assert_eq!(all.iter().filter(over_whole_range).count(), 2);
 
-		let canonical = Sequence::new(steps(), 1, &[], Bindings::Canonical)
-			.matches_in::<Slots>(range, &|_, _| true);
+		let canonical = assignments(
+			&Sequence::new(steps(), 1, &[], Bindings::Canonical),
+			4,
+			&|_, _| true,
+		);
 		let kept: Vec<&Match> = canonical.iter().filter(over_whole_range).collect();
 		assert_eq!(kept.len(), 1);
 		assert_eq!(kept[0].captures, vec![(1, 2)]);
@@ -519,28 +611,87 @@ mod tests {
 			token_step(&everywhere, 0, 1),
 			labeled(&everywhere, 1, 1, 1),
 		];
-		let found = Sequence::new(steps, 2, &[], Bindings::Canonical)
-			.matches_in::<Slots>(Span::new(0, 2), &|_, _| true);
+		let found = assignments(&Sequence::new(steps, 2, &[], Bindings::Canonical), 2, &|_, _| true);
 		let whole: Vec<&Match> = found.iter().filter(|found| found.end - found.start == 2).collect();
 		assert_eq!(whole.len(), 1);
 		assert_eq!(whole[0].captures, vec![(0, 1), (1, 2)]);
 	}
 
-	#[test]
-	fn a_pending_constraint_keeps_the_assignments_it_must_choose_between() {
-		// gap a:[] gap b:[], accepting only a at position 2 together with b at position 4
+	// gap a:[] gap b:[] over five tokens, with one constraint reading both labels
+	fn floating_pair(bindings: Bindings) -> Sequence {
 		let everywhere = [0, 1, 2, 3, 4];
 		let gap = || token_step(&everywhere, 0, 3);
 		let steps = vec![gap(), labeled(&everywhere, 1, 1, 0), gap(), labeled(&everywhere, 1, 1, 1)];
-		let pending = [Pending {
-			after_step: 3,
-			slots: vec![0, 1],
-		}];
+		Sequence::new(steps, 2, &[vec![0, 1]], bindings)
+	}
+
+	#[test]
+	fn a_pending_constraint_keeps_the_assignments_it_must_choose_between() {
+		// accept only a at position 2 together with b at position 4
 		let holds = |_: usize, slots: &[Slot]| slots[0] == (2, 3) && slots[1] == (4, 5);
-		let found = Sequence::new(steps, 2, &pending, Bindings::Canonical)
-			.matches_in::<Slots>(Span::new(0, 5), &holds);
+		let found = assignments(&floating_pair(Bindings::Canonical), 5, &holds);
 		let reported: Vec<(u64, u64)> = found.iter().map(|found| (found.start, found.end)).collect();
 		assert_eq!(reported, vec![(0, 5), (1, 5), (2, 5)]);
 		assert!(found.iter().all(|found| found.captures == vec![(2, 3), (4, 5)]));
+	}
+
+	#[test]
+	fn a_skipped_label_that_a_constraint_reads_ends_the_partial_match() {
+		// a:[]? b:[] with a constraint over both: only the path that binds a survives
+		let everywhere = [0, 1, 2];
+		let steps = vec![labeled(&everywhere, 0, 1, 0), labeled(&everywhere, 1, 1, 1)];
+		let sequence = Sequence::new(steps, 2, &[vec![0, 1]], Bindings::Canonical);
+		let found = assignments(&sequence, 3, &|_, _| true);
+		let reported: Vec<(u64, u64)> = found.iter().map(|found| (found.start, found.end)).collect();
+		assert_eq!(reported, vec![(0, 2), (1, 3)]);
+	}
+
+	#[test]
+	fn budget_is_returned_once_results_are_final() {
+		let budget = unlimited();
+		floating_pair(Bindings::Canonical)
+			.matches_in::<Slots>(Span::new(0, 5), &|_, _| true, &budget)
+			.unwrap();
+		assert_eq!(budget.held(), 0);
+	}
+
+	#[test]
+	fn enumerated_assignments_stay_charged() {
+		let budget = unlimited();
+		let found = floating_pair(Bindings::All)
+			.matches_in::<Slots>(Span::new(0, 5), &|_, _| true, &budget)
+			.unwrap();
+		assert_eq!(budget.held(), found.len() as u64);
+	}
+
+	#[test]
+	fn exceeding_the_budget_is_an_error() {
+		let budget = Budget::new(Limits {
+			max_intermediate_matches: 8,
+			max_expansions: u64::MAX,
+		});
+		let outcome = floating_pair(Bindings::Canonical).matches_in::<Slots>(
+			Span::new(0, 5),
+			&|_, _| true,
+			&budget,
+		);
+		assert!(matches!(
+			outcome,
+			Err(QueryError::LimitExceeded { resource: "intermediate matches", limit: 8 })
+		));
+
+		let budget = Budget::new(Limits {
+			max_intermediate_matches: u64::MAX,
+			max_expansions: 10,
+		});
+		let outcome = floating_pair(Bindings::Canonical).matches_in::<Slots>(
+			Span::new(0, 5),
+			&|_, _| true,
+			&budget,
+		);
+		assert!(matches!(
+			outcome,
+			Err(QueryError::LimitExceeded { resource: "expansions", limit: 10 })
+		));
 	}
 }

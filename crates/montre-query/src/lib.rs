@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod parser;
 pub mod planner;
+mod budget;
 pub mod executor;
 mod sequence;
 mod validate;
@@ -8,6 +9,7 @@ mod validate;
 use thiserror::Error;
 
 pub use ast::Query;
+pub use budget::Limits;
 pub use executor::Results;
 
 #[derive(Error, Debug)]
@@ -38,6 +40,9 @@ pub enum QueryError {
 
 	#[error("Quantifier bound {bound} exceeds the supported maximum of {limit}")]
 	QuantifierTooLarge { bound: u32, limit: u32 },
+
+	#[error("Query needs more than the limit of {limit} {resource}; narrow the pattern or raise the limit")]
+	LimitExceeded { resource: &'static str, limit: u64 },
 
 	#[error("Execution error: {0}")]
 	Execution(String),

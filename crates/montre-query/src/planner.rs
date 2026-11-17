@@ -196,9 +196,13 @@ fn plan_node(query: &Query) -> Result<PlanNode> {
 			Ok(PlanNode::SequenceScan { steps })
 		}
 
-		Query::Repetition { .. } => Ok(PlanNode::SequenceScan {
-			steps: vec![plan_step(query)?],
-		}),
+		Query::Repetition { .. } => {
+			let step = plan_step(query)?;
+			if step.is_plain_group() {
+				return Ok(step.node);
+			}
+			Ok(PlanNode::SequenceScan { steps: vec![step] })
+		}
 
 		Query::Or(alternatives) => {
 			let nodes: Result<Vec<PlanNode>> = alternatives.iter().map(plan_node).collect();

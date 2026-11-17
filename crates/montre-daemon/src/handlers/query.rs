@@ -43,6 +43,9 @@ fn map_query_error(err: QueryError) -> ProtocolError {
 			ProtocolError::new(error_codes::PLAN_ERROR, err.to_string())
 		}
 		QueryError::Execution(msg) => ProtocolError::new(error_codes::EXECUTION_ERROR, msg),
+		err @ QueryError::LimitExceeded { .. } => {
+			ProtocolError::new(error_codes::EXECUTION_ERROR, err.to_string())
+		}
 	}
 }
 

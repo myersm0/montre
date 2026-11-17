@@ -1608,3 +1608,151 @@ fn quantifier_bound_above_the_cap_is_an_error() {
 	let corpus = build_corpus(NOUN_RUN);
 	assert_eq!(query_count(&corpus, r#"[pos="NOUN"]{1,100}"#), 7);
 }
+
+// ===========================================================================
+// Regressions: resource limits and constraint placement
+// ===========================================================================
+
+use montre_query::{Limits, QueryError};
+
+// 600 tokens that all share one lemma, so every lemma constraint is satisfiable
+fn uniform_corpus() -> Corpus {
+	let rows: String = (1..=600)
+		.map(|index| format!("{index}\tx\tx\tNOUN\t_\t_\t0\tdep\t_\t_\n"))
+		.collect();
+	build_corpus(&(rows + "\n"))
+}
+
+fn spans_within(
+	corpus: &Corpus,
+	query_str: &str,
+	max_intermediate_matches: u64,
+) -> Result<Vec<(u64, u64)>, QueryError> {
+	let limits = Limits {
+		max_intermediate_matches,
+		..Limits::unlimited()
+	};
+	let parsed = montre_query::parse(query_str).unwrap();
+	let plan = montre_query::planner::plan(&parsed).unwrap();
+	let results = montre_query::executor::execute_with(&plan, corpus, &limits)?;
+	Ok(results.hits().iter().map(|hit| (hit.span.start, hit.span.end)).collect())
+}
+
+const AMBIGUOUS: &str = r#"[]{0,20} a:[] []{0,20} b:[]"#;
+const SAME_LEMMA: &str = ":: a.lemma = b.lemma";
+
+// Applied as the pattern runs, the constraint leaves at most two active sets
+// of 256 x 441 partial matches alive; every capture assignment of the pattern
+// kept at once is 600 x 441 on top of that.
+const TIGHT: u64 = 300_000;
+
+#[test]
+fn constraint_inside_a_labeled_group_is_applied_while_the_group_runs() {
+	let corpus = uniform_corpus();
+	let plain = spans_within(&corpus, &format!("{AMBIGUOUS} {SAME_LEMMA}"), TIGHT).unwrap();
+	let grouped = spans_within(&corpus, &format!("g:({AMBIGUOUS}) {SAME_LEMMA}"), TIGHT).unwrap();
+	let once = spans_within(&corpus, &format!("({AMBIGUOUS}){{1}} {SAME_LEMMA}"), TIGHT).unwrap();
+	assert_eq!(plain.len(), (2..=42).map(|length| 600 - length + 1).sum::<usize>());
+	assert_eq!(grouped, plain);
+	assert_eq!(once, plain);
+}
+
+#[test]
+fn enumeration_beyond_the_limit_is_an_error_not_a_partial_result() {
+	let corpus = uniform_corpus();
+	// a repeated group cannot apply the constraint per repetition
+	let repeated = format!("({AMBIGUOUS}){{1,2}} {SAME_LEMMA}");
+	assert!(matches!(
+		spans_within(&corpus, &repeated, TIGHT),
+		Err(QueryError::LimitExceeded { resource: "intermediate matches", limit: TIGHT })
+	));
+	// nor can an alternation of sequences
+	let alternation = format!("({AMBIGUOUS} | c:[] d:[]) {SAME_LEMMA}");
+	assert!(matches!(
+		spans_within(&corpus, &alternation, TIGHT),
+		Err(QueryError::LimitExceeded { .. })
+	));
+	// with room to enumerate, the repeated form answers
+	assert!(!spans_within(&corpus, &repeated, u64::MAX).unwrap().is_empty());
+}
+
+#[test]
+fn work_limit_is_an_error() {
+	let corpus = uniform_corpus();
+	let limits = Limits {
+		max_expansions: 1_000,
+		..Limits::unlimited()
+	};
+	let parsed = montre_query::parse(AMBIGUOUS).unwrap();
+	let plan = montre_query::planner::plan(&parsed).unwrap();
+	assert!(matches!(
+		montre_query::executor::execute_with(&plan, &corpus, &limits),
+		Err(QueryError::LimitExceeded { resource: "expansions", limit: 1_000 })
+	));
+	assert!(matches!(
+		montre_query::executor::execute_count_with(&plan, &corpus, &limits),
+		Err(QueryError::LimitExceeded { resource: "expansions", limit: 1_000 })
+	));
+}
+
+#[test]
+fn skipped_optional_labels_do_not_multiply_assignments() {
+	let corpus = uniform_corpus();
+	let labels = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "m", "n", "o", "q", "r"];
+	let optional: Vec<String> = labels.iter().map(|label| format!("{label}:[]?")).collect();
+	let constraints: Vec<String> = labels
+		.iter()
+		.map(|label| format!("{label}.lemma = z.lemma"))
+		.collect();
+	let query = format!("{} z:[] :: {}", optional.join(" "), constraints.join(" & "));
+	// only the assignment that binds all sixteen can satisfy the constraints
+	let spans = spans_within(&corpus, &query, 50_000).unwrap();
+	assert_eq!(spans.len(), 600 - 16);
+	assert!(spans.iter().all(|(start, end)| end - start == 17));
+}
+
+#[test]
+fn skipped_optional_label_ends_the_match_only_once_it_cannot_be_bound() {
+	let corpus = uniform_corpus();
+	// a is skipped or bound once: only the bound path can satisfy the constraint
+	let spans = query_spans(&corpus, r#"a:[]? []{0,10} b:[] :: a.lemma = b.lemma"#);
+	assert_eq!(spans.len(), (2..=12).map(|length| 600 - length + 1).sum::<usize>());
+	// a skipped in the first repetition may still be bound in the second
+	let captures = query_captures(&corpus, r#"(a:[]?){2} b:[] :: a.lemma = b.lemma"#);
+	assert_eq!(captures.len(), 599 + 598);
+	assert_eq!(
+		captures[0],
+		((0, 2), vec![("a".to_string(), (0, 1)), ("b".to_string(), (1, 2))])
+	);
+	assert_eq!(
+		captures[1],
+		((0, 3), vec![("a".to_string(), (1, 2)), ("b".to_string(), (2, 3))])
+	);
+}
+
+#[test]
+fn constraint_across_a_group_boundary_waits_for_the_outside_label() {
+	let corpus = build_corpus(NOUN_RUN);
+	// a is inside the group and b outside: the group must not settle on its
+	// smallest a before b is known
+	let query = r#"g:([]{0,2} a:[pos="NOUN"] []{0,2}) b:[pos="NOUN"] :: a.lemma = b.lemma"#;
+	let captures = query_captures(&corpus, query);
+	assert!(!captures.is_empty());
+	for ((start, end), bindings) in &captures {
+		assert_eq!(
+			bindings,
+			&vec![
+				("g".to_string(), (*start, 7)),
+				("a".to_string(), (5, 6)),
+				("b".to_string(), (7, 8)),
+			]
+		);
+		assert_eq!(*end, 8);
+	}
+	let ungrouped = query_spans(
+		&corpus,
+		r#"[]{0,2} a:[pos="NOUN"] []{0,2} b:[pos="NOUN"] :: a.lemma = b.lemma"#,
+	);
+	let grouped: Vec<(u64, u64)> = captures.iter().map(|(span, _)| *span).collect();
+	assert_eq!(grouped, ungrouped);
+}

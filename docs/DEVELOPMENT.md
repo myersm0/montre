@@ -981,8 +981,18 @@ A rework of sequence execution and name validation, checked by a differential te
 - A match can only begin where one of the steps up to and including the first mandatory one begins; those positions seed the active set. Each step then extends every partial match, or passes it through unchanged when the step is optional.
 - The active set is a flat vector of (end, start, captures), sorted and deduplicated after every step. Nothing depends on hash iteration order.
 - Captures are one slot per label of the query, held inline for up to four labels. They are tracked only when the query declares labels; the unlabeled path carries a zero-sized payload through the same code.
-- A global constraint directly above a sequence (span, component and document filters may sit between) is checked inside the sequence, as soon as the last step that declares one of its labels has run. Until then the slots it reads keep partial matches apart; once no pending constraint reads a slot, partial matches differing only there collapse to the smallest. A constraint above any other shape (an alternation of sequences, say) is applied to the full set of assignments afterwards.
-- Start positions are extended in batches of 256, so the working set of an ambiguous pattern is bounded by the batch and not by the document. Cost for a labeled element floating between two gaps of width w remains O(w²) per start position: `[]{0,20} a:[] []{0,20} b:[] :: a.lemma = b.lemma` takes about 9 s and 300 MB on 200,000 tokens. Anchoring either label to an end of the pattern removes the quadratic factor.
+- A global constraint directly above a sequence (span, component and document filters may sit between) is checked inside the sequence, as soon as the last step that declares one of its labels has run. Until then the slots it reads keep partial matches apart; once no pending constraint reads a slot, partial matches differing only there collapse to the smallest.
+- A partial match is dropped as soon as a step finishes without binding a label that a constraint reads. The label is declared by that step alone, so it cannot be bound later. The rule is applied per top-level step: in `(a:[]?){2} b:[] :: a.lemma = b.lemma` the repeated group is one step, and `a` skipped in its first repetition can still be bound in its second.
+- A constraint whose labels all lie inside one unrepeated group (`g:( ... ) :: a.lemma = b.lemma`) is checked while that group is matched. A constraint that reads labels on both sides of a group boundary, or labels inside a repeated group or an alternation of sequences, is not: the group then supplies every capture assignment it has, and the constraint chooses among them afterwards. A top-level `( ... ){1}` is the same plan as its contents.
+- Start positions are extended in batches of 256. This reduces the peak working set of an ambiguous pattern; it does not bound it, because one start position can still have very many capture assignments. Cost for a labeled element floating between two gaps of width w is O(w²) per start position: `[]{0,20} a:[] []{0,20} b:[] :: a.lemma = b.lemma` takes about 10 s and 320 MB on 200,000 tokens. Anchoring either label to an end of the pattern removes the quadratic factor.
+
+**Limits**
+
+- `montre_query::Limits` holds two ceilings, and `execute_with` / `execute_count_with` take one. `execute` and `execute_count` use `Limits::default()`, so the CLI, the FFI and the daemon are all covered without changes.
+- `max_intermediate_matches` (default 10 million, roughly 1 GB) counts the intermediate matches a query holds at once, across every thread and nested group: the partial matches being extended, the prepared matches of groups, and capture assignments enumerated for a constraint. A match counts once for up to three labels in the query and more beyond that. The count is taken while a step runs, every 4,096 partial matches, not after it. The hits of the result are not counted.
+- `max_expansions` (default unlimited) counts the partial matches a query creates in total. It is a ceiling on work for callers that need one, such as a shared daemon.
+- Exceeding either returns `QueryError::LimitExceeded`. A query never returns part of its result.
+- These are counts, not bytes: allocator overhead, vector capacity and sort scratch space are on top, and so is the result itself, which every caller still receives in full.
 - Documents are the unit of parallelism as before, but a document's work is now proportional to its own matches: preparation is O(postings) once, and each extension is one binary search over the step's runs. The previous per-document scan made quantified queries O(documents × postings).
 
 **Index metadata**
@@ -992,7 +1002,7 @@ A rework of sequence execution and name validation, checked by a differential te
 **Tests**
 
 - `crates/montre-query/tests/differential.rs` generates small random corpora and random queries (quantifiers, nested groups, alternation, labels, `within s`, global constraints) and compares spans, counts, the exact reported capture assignment, and run-to-run stability against the reference matcher. Run more cases with `PROPTEST_CASES=4000 cargo test -p montre-query --test differential`.
-- Regression tests for each corrected behaviour are at the end of `executor_integration.rs`.
+- Regression tests for each corrected behaviour are at the end of `executor_integration.rs`, including the ambiguous patterns that must either answer within a tight limit or fail with `LimitExceeded`. The differential test's corpora are at most 36 tokens, so resource behaviour is covered by those targeted tests and not by the random ones.
 
 **Still to regenerate**
 
