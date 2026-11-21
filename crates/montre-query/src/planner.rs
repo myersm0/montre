@@ -169,8 +169,22 @@ fn plan_step(query: &Query) -> Result<SequenceStep> {
 		});
 	}
 	let (label, inner) = extract_label(quantified);
+	let node = plan_node(inner)?;
+	// a label around one quantified element, as in a:([]{1,5}), is that element labeled
+	if min == 1 && max == Some(1) {
+		if let PlanNode::SequenceScan { steps } = &node {
+			if let [only] = steps.as_slice() {
+				if only.label.is_none() {
+					return Ok(SequenceStep {
+						label,
+						..only.clone()
+					});
+				}
+			}
+		}
+	}
 	Ok(SequenceStep {
-		node: plan_node(inner)?,
+		node,
 		min,
 		max,
 		label,
@@ -217,17 +231,9 @@ fn plan_node(query: &Query) -> Result<PlanNode> {
 			})
 		}
 
-		Query::Capture { name, inner } => {
-			let inner_plan = plan_node(inner)?;
-			Ok(PlanNode::SequenceScan {
-				steps: vec![SequenceStep {
-					node: inner_plan,
-					min: 1,
-					max: Some(1),
-					label: Some(name.clone()),
-				}],
-			})
-		}
+		Query::Capture { .. } => Ok(PlanNode::SequenceScan {
+			steps: vec![plan_step(query)?],
+		}),
 
 		Query::WithinComponent { inner, components } => {
 			let inner_plan = plan_node(inner)?;

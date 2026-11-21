@@ -1672,8 +1672,11 @@ fn enumeration_beyond_the_limit_is_an_error_not_a_partial_result() {
 		spans_within(&corpus, &alternation, TIGHT),
 		Err(QueryError::LimitExceeded { .. })
 	));
-	// with room to enumerate, the repeated form answers
-	assert!(!spans_within(&corpus, &repeated, u64::MAX).unwrap().is_empty());
+	// with room to enumerate, a repeated group answers: narrower gaps keep this quick
+	let narrow = r#"([]{0,3} a:[] []{0,3} b:[]){1,2} :: a.lemma = b.lemma"#;
+	let spans = spans_within(&corpus, narrow, u64::MAX).unwrap();
+	// one or two repetitions of 2 to 8 tokens each
+	assert_eq!(spans.len(), (2..=16).map(|length| 600 - length + 1).sum::<usize>());
 }
 
 #[test]
@@ -1755,4 +1758,66 @@ fn constraint_across_a_group_boundary_waits_for_the_outside_label() {
 	);
 	let grouped: Vec<(u64, u64)> = captures.iter().map(|(span, _)| *span).collect();
 	assert_eq!(grouped, ungrouped);
+}
+
+#[test]
+fn count_stays_within_a_limit_smaller_than_its_result() {
+	let corpus = uniform_corpus();
+	let limits = Limits {
+		max_intermediate_matches: 40_000,
+		..Limits::unlimited()
+	};
+	let parsed = montre_query::parse(r#"[]{1,100}"#).unwrap();
+	let plan = montre_query::planner::plan(&parsed).unwrap();
+	let expected: usize = (1..=100).map(|length| 600 - length + 1).sum();
+	assert!(expected > 40_000);
+	assert_eq!(
+		montre_query::executor::execute_count_with(&plan, &corpus, &limits).unwrap(),
+		expected
+	);
+}
+
+#[test]
+fn group_table_larger_than_the_limit_is_refused() {
+	let corpus = uniform_corpus();
+	let limits = Limits {
+		max_intermediate_matches: 40_000,
+		..Limits::unlimited()
+	};
+	// a labeled group of two elements is held as a table of its sub-matches
+	let parsed = montre_query::parse(r#"a:([]{1,100} [])"#).unwrap();
+	let plan = montre_query::planner::plan(&parsed).unwrap();
+	let expected: usize = (2..=101).map(|length| 600 - length + 1).sum();
+	assert!(expected > 40_000);
+	assert!(matches!(
+		montre_query::executor::execute_with(&plan, &corpus, &limits),
+		Err(QueryError::LimitExceeded { resource: "intermediate matches", limit: 40_000 })
+	));
+	assert!(matches!(
+		montre_query::executor::execute_count_with(&plan, &corpus, &limits),
+		Err(QueryError::LimitExceeded { resource: "intermediate matches", limit: 40_000 })
+	));
+	let unlimited = Limits::unlimited();
+	let hits = montre_query::executor::execute_with(&plan, &corpus, &unlimited).unwrap();
+	assert_eq!(hits.len(), expected);
+}
+
+#[test]
+fn label_around_one_quantified_element_needs_no_table() {
+	let corpus = uniform_corpus();
+	let limits = Limits {
+		max_intermediate_matches: 40_000,
+		..Limits::unlimited()
+	};
+	let parsed = montre_query::parse(r#"a:([]{1,100})"#).unwrap();
+	let plan = montre_query::planner::plan(&parsed).unwrap();
+	let expected: usize = (1..=100).map(|length| 600 - length + 1).sum();
+	assert_eq!(
+		montre_query::executor::execute_count_with(&plan, &corpus, &limits).unwrap(),
+		expected
+	);
+	let hits = montre_query::executor::execute_with(&plan, &corpus, &limits).unwrap();
+	assert_eq!(hits.len(), expected);
+	let first = &hits.hits()[0];
+	assert_eq!(first.captures, vec![("a".to_string(), first.span)]);
 }

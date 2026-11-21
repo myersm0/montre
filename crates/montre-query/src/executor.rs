@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use roaring::RoaringBitmap;
 
 use crate::ast::{CmpOp, GlobalConstraint, LabelAttr};
-use crate::budget::{Budget, Limits};
+use crate::budget::{Budget, Ledger, Limits, Output};
 use crate::planner::{PlanNode, QueryPlan, SequenceStep};
 use crate::sequence::{
 	Bindings, LabelId, Match, Matcher, Run, Sequence, Slot, Slots, Step,
@@ -123,7 +123,7 @@ pub fn execute_with(plan: &QueryPlan, corpus: &Corpus, limits: &Limits) -> Resul
 			.collect()
 	} else {
 		context
-			.matches(&plan.root, Bindings::Canonical, &[])?
+			.matches(&plan.root, Bindings::Canonical, &[], Output::Final)?
 			.into_iter()
 			.map(|found| context.hit(found))
 			.collect()
@@ -188,27 +188,35 @@ impl<'a> Context<'a> {
 			},
 			_ if node.is_token_level() => Ok(self.token_bitmap(node)?.len() as usize),
 			PlanNode::SequenceScan { steps } => {
-				let sequence = self.prepare(steps, Bindings::Canonical, &[])?;
+				let prepared = self.prepare(steps, Bindings::Canonical, &[])?;
 				let ranges = self.ranges();
-				let count_in = |range: &Span| sequence.count_in(*range, &self.budget);
+				let count_in = |range: &Span| prepared.sequence.count_in(*range, &self.budget);
 				if runs_in_parallel(steps, &ranges) {
 					ranges.par_iter().map(count_in).sum()
 				} else {
 					ranges.iter().map(count_in).sum()
 				}
 			}
-			_ => Ok(self.matches(node, Bindings::Canonical, &[])?.len()),
+			_ => Ok(self.matches(node, Bindings::Canonical, &[], Output::Final)?.len()),
 		}
 	}
 
 	/// Matches sorted by (start, end, captures). `checks` are constraints the
 	/// node applies while it runs; only a node for which `applies_checks` holds
-	/// is handed any.
-	fn matches(&self, node: &PlanNode, bindings: Bindings, checks: &[Check]) -> Result<Vec<Match>> {
+	/// is handed any. Matches bound for a buffer are charged to its ledger as
+	/// they are produced.
+	fn matches(
+		&self,
+		node: &PlanNode,
+		bindings: Bindings,
+		checks: &[Check],
+		output: Output,
+	) -> Result<Vec<Match>> {
 		if node.is_token_level() {
 			let slot_count = self.labels.len();
-			return Ok(self
-				.token_bitmap(node)?
+			let bitmap = self.token_bitmap(node)?;
+			output.hold(self.cost(bitmap.len() as usize))?;
+			return Ok(bitmap
 				.iter()
 				.map(u64::from)
 				.map(|position| Match::unlabeled(position, position + 1, slot_count))
@@ -219,16 +227,18 @@ impl<'a> Context<'a> {
 			PlanNode::Union(nodes) => {
 				let mut matches = Vec::new();
 				for node in nodes {
-					matches.extend(self.matches(node, bindings, &[])?);
+					matches.extend(self.matches(node, bindings, &[], output)?);
 				}
 				matches.sort_unstable();
 				Ok(deduplicated(matches, bindings))
 			}
 
-			PlanNode::SequenceScan { steps } => self.sequence_matches(steps, bindings, checks),
+			PlanNode::SequenceScan { steps } => {
+				self.sequence_matches(steps, bindings, checks, output)
+			}
 
 			PlanNode::FilterBySpan { inner, span_layer } => {
-				let mut matches = self.matches(inner, bindings, checks)?;
+				let mut matches = self.matches(inner, bindings, checks, output)?;
 				let spans = self.corpus.spans().spans(span_layer).unwrap_or(&[]);
 				matches.retain(|found| lies_within_one(spans, found).is_some());
 				Ok(matches)
@@ -240,11 +250,13 @@ impl<'a> Context<'a> {
 					.filter_map(|name| self.corpus.component(name))
 					.map(|component| component.document_range)
 					.collect();
-				self.filtered_by_document(inner, bindings, checks, |document| {
+				let mut matches = self.matches(inner, bindings, checks, output)?;
+				self.retain_in_documents(&mut matches, |document| {
 					ranges
 						.iter()
 						.any(|&(first, end)| document >= first && document < end)
-				})
+				});
+				Ok(matches)
 			}
 
 			PlanNode::FilterByDocument { inner, documents } => {
@@ -253,21 +265,31 @@ impl<'a> Context<'a> {
 					.document_indices_by_name(documents)
 					.into_iter()
 					.collect();
-				self.filtered_by_document(inner, bindings, checks, |document| {
-					wanted.contains(&document)
-				})
+				let mut matches = self.matches(inner, bindings, checks, output)?;
+				self.retain_in_documents(&mut matches, |document| wanted.contains(&document));
+				Ok(matches)
 			}
 
-			PlanNode::ProjectAlignment { inner, alignment } => self.projected(inner, alignment),
+			PlanNode::ProjectAlignment { inner, alignment } => {
+				let projected = self.projected(inner, alignment)?;
+				output.hold(self.cost(projected.len()))?;
+				Ok(projected)
+			}
 
 			PlanNode::GlobalConstraintFilter { inner, constraints } => {
 				let own = self.compile(constraints);
 				if applies_checks(inner) {
-					return self.matches(inner, bindings, &own);
+					return self.matches(inner, bindings, &own, output);
 				}
-				let mut matches = self.matches(inner, Bindings::All, &[])?;
+				// every assignment is enumerated, charged to a ledger of its own,
+				// and only the survivors are passed on
+				let enumerated = Ledger::new(&self.budget);
+				let mut matches =
+					self.matches(inner, Bindings::All, &[], Output::Buffered(&enumerated))?;
 				matches.retain(|found| own.iter().all(|check| self.holds(check, &found.captures)));
-				Ok(deduplicated(matches, bindings))
+				let matches = deduplicated(matches, bindings);
+				output.hold(self.cost(matches.len()))?;
+				Ok(matches)
 			}
 
 			_ => Err(QueryError::Execution(
@@ -276,17 +298,13 @@ impl<'a> Context<'a> {
 		}
 	}
 
-	fn filtered_by_document(
-		&self,
-		inner: &PlanNode,
-		bindings: Bindings,
-		checks: &[Check],
-		keep: impl Fn(usize) -> bool,
-	) -> Result<Vec<Match>> {
-		let mut matches = self.matches(inner, bindings, checks)?;
+	fn retain_in_documents(&self, matches: &mut Vec<Match>, keep: impl Fn(usize) -> bool) {
 		let documents = self.corpus.spans().spans("document").unwrap_or(&[]);
 		matches.retain(|found| lies_within_one(documents, found).is_some_and(&keep));
-		Ok(matches)
+	}
+
+	fn cost(&self, matches: usize) -> u64 {
+		matches as u64 * (1 + self.labels.len() as u64 / 4)
 	}
 
 	fn token_bitmap(&self, node: &PlanNode) -> Result<Cow<'a, RoaringBitmap>> {
@@ -360,35 +378,39 @@ impl<'a> Context<'a> {
 		steps: &[SequenceStep],
 		bindings: Bindings,
 		checks: &[Check],
-	) -> Result<Sequence> {
-		let prepared = steps
-			.iter()
-			.map(|step| {
-				let declares = self.declared_by(step);
-				let matcher = if matches!(step.node, PlanNode::ScanAll) {
-					Matcher::Runs(vec![Run {
-						start: 0,
-						end: self.corpus.token_count(),
-					}])
-				} else if step.node.is_token_level() {
-					Matcher::Runs(runs_from_bitmap(self.token_bitmap(&step.node)?.as_ref()))
-				} else {
-					Matcher::Spans(self.group_matches(step, bindings, checks)?)
-				};
-				Ok(Step {
-					matcher,
-					min: if step.node.is_nullable() { 0 } else { step.min },
-					max: step.max.unwrap_or(MAX_QUANTIFIER).min(MAX_QUANTIFIER),
-					label: step.label.as_deref().and_then(|name| self.label_id(name)),
-					declares,
-				})
-			})
-			.collect::<Result<Vec<Step>>>()?;
+	) -> Result<Prepared<'_>> {
+		let mut ledgers = Vec::new();
+		let mut prepared = Vec::with_capacity(steps.len());
+		for step in steps {
+			let matcher = if matches!(step.node, PlanNode::ScanAll) {
+				Matcher::Runs(vec![Run {
+					start: 0,
+					end: self.corpus.token_count(),
+				}])
+			} else if step.node.is_token_level() {
+				Matcher::Runs(runs_from_bitmap(self.token_bitmap(&step.node)?.as_ref()))
+			} else {
+				let ledger = Ledger::new(&self.budget);
+				let table = self.group_matches(step, bindings, checks, &ledger)?;
+				ledgers.push(ledger);
+				Matcher::Spans(table)
+			};
+			prepared.push(Step {
+				matcher,
+				min: if step.node.is_nullable() { 0 } else { step.min },
+				max: step.max.unwrap_or(MAX_QUANTIFIER).min(MAX_QUANTIFIER),
+				label: step.label.as_deref().and_then(|name| self.label_id(name)),
+				declares: self.declared_by(step),
+			});
+		}
 		let constraints: Vec<Vec<LabelId>> = checks
 			.iter()
 			.map(|check| check.labels().collect())
 			.collect();
-		Ok(Sequence::new(prepared, self.labels.len(), &constraints, bindings))
+		Ok(Prepared {
+			sequence: Sequence::new(prepared, self.labels.len(), &constraints, bindings),
+			_ledgers: ledgers,
+		})
 	}
 
 	fn declared_by(&self, step: &SequenceStep) -> Vec<LabelId> {
@@ -405,6 +427,7 @@ impl<'a> Context<'a> {
 		step: &SequenceStep,
 		bindings: Bindings,
 		checks: &[Check],
+		ledger: &Ledger,
 	) -> Result<Vec<Match>> {
 		// the step's own label spans the whole group and is bound outside it
 		let mut names = Vec::new();
@@ -429,13 +452,7 @@ impl<'a> Context<'a> {
 			true => Bindings::All,
 			false => bindings,
 		};
-		let matches = self.matches(&step.node, group_bindings, &inner_checks)?;
-		// enumerated assignments were charged as the group produced them
-		if group_bindings == Bindings::Canonical {
-			let cost_per_match = 1 + self.labels.len() as u64 / 4;
-			self.budget.hold(matches.len() as u64 * cost_per_match)?;
-		}
-		Ok(matches)
+		self.matches(&step.node, group_bindings, &inner_checks, Output::Buffered(ledger))
 	}
 
 	fn sequence_matches(
@@ -443,15 +460,17 @@ impl<'a> Context<'a> {
 		steps: &[SequenceStep],
 		bindings: Bindings,
 		checks: &[Check],
+		output: Output,
 	) -> Result<Vec<Match>> {
-		let sequence = self.prepare(steps, bindings, checks)?;
+		let prepared = self.prepare(steps, bindings, checks)?;
+		let sequence = &prepared.sequence;
 		let ranges = self.ranges();
 		let holds = |check: usize, slots: &[Slot]| self.holds(&checks[check], slots);
 		let matches_in = |range: &Span| {
 			if self.labels.is_empty() {
-				sequence.matches_in::<()>(*range, &holds, &self.budget)
+				sequence.matches_in::<()>(*range, &holds, &self.budget, output)
 			} else {
-				sequence.matches_in::<Slots>(*range, &holds, &self.budget)
+				sequence.matches_in::<Slots>(*range, &holds, &self.budget, output)
 			}
 		};
 		let per_range: Vec<Vec<Match>> = if runs_in_parallel(steps, &ranges) {
@@ -490,7 +509,8 @@ impl<'a> Context<'a> {
 		let mut seen_targets = HashSet::new();
 		let mut projected = Vec::new();
 
-		for found in self.matches(inner, Bindings::Canonical, &[])? {
+		let source = Ledger::new(&self.budget);
+		for found in self.matches(inner, Bindings::Canonical, &[], Output::Buffered(&source))? {
 			let span = Span::new(found.start, found.end);
 			let Some(source) = find_doc_and_sent(span, documents, source_units, source_component)
 			else {
@@ -564,6 +584,12 @@ impl<'a> Context<'a> {
 			},
 		}
 	}
+}
+
+// a sequence ready to run, with the charges for its group tables
+struct Prepared<'b> {
+	sequence: Sequence,
+	_ledgers: Vec<Ledger<'b>>,
 }
 
 #[derive(Clone)]

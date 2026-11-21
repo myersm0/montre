@@ -4,7 +4,7 @@ use montre_core::Span;
 use roaring::RoaringBitmap;
 use smallvec::SmallVec;
 
-use crate::budget::Budget;
+use crate::budget::{Budget, Output};
 use crate::Result;
 
 pub(crate) const MAX_QUANTIFIER: u32 = 100;
@@ -163,18 +163,25 @@ pub(crate) struct Step {
 }
 
 impl Step {
-	fn continuations<'a>(&'a self, position: u64, limit: u64, out: &mut Vec<(u64, &'a [Slot])>) {
+	fn continuations<'a>(
+		&'a self,
+		position: u64,
+		limit: u64,
+		budget: &Budget,
+		out: &mut Vec<(u64, &'a [Slot])>,
+	) -> Result<()> {
 		match &self.matcher {
 			Matcher::Runs(runs) => {
 				let Some(run) = run_containing(runs, position) else {
-					return;
+					return Ok(());
 				};
 				let available = run.end.min(limit).saturating_sub(position);
 				let shortest = u64::from(self.min.max(1));
 				let longest = available.min(u64::from(self.max));
 				out.extend((shortest..=longest).map(|length| (position + length, &[][..])));
+				Ok(())
 			}
-			Matcher::Spans(table) => self.repeated_spans(table, position, limit, out),
+			Matcher::Spans(table) => self.repeated_spans(table, position, limit, budget, out),
 		}
 	}
 
@@ -184,28 +191,54 @@ impl Step {
 		table: &'a [Match],
 		position: u64,
 		limit: u64,
+		budget: &Budget,
 		out: &mut Vec<(u64, &'a [Slot])>,
-	) {
+	) -> Result<()> {
 		let mut frontier: Vec<(u64, &'a [Slot])> = vec![(position, &[][..])];
+		// entries of the frontier and of `out` charged while this call runs
+		let mut held = 0;
+		let charge = |entries: usize, held: &mut u64| -> Result<()> {
+			budget.hold(entries as u64)?;
+			budget.expand(entries as u64)?;
+			*held += entries as u64;
+			Ok(())
+		};
 		for repetition in 1..=self.max {
-			let mut reached: Vec<(u64, &'a [Slot])> = frontier
-				.iter()
-				.flat_map(|&(from, _)| matches_starting_at(table, from))
-				.filter(|candidate| candidate.end <= limit)
-				.map(|candidate| (candidate.end, candidate.captures.as_slice()))
-				.collect();
+			let mut reached: Vec<(u64, &'a [Slot])> = Vec::new();
+			let mut charged = 0;
+			for &(from, _) in &frontier {
+				reached.extend(
+					matches_starting_at(table, from)
+						.filter(|candidate| candidate.end <= limit)
+						.map(|candidate| (candidate.end, candidate.captures.as_slice())),
+				);
+				if reached.len() - charged >= CHARGE_STRIDE {
+					charge(reached.len() - charged, &mut held)?;
+					charged = reached.len();
+				}
+			}
+			charge(reached.len() - charged, &mut held)?;
+			let candidates = reached.len();
 			reached.sort_unstable();
 			reached.dedup();
+			// the duplicates just removed, and the frontier this one replaces
+			let dropped = (candidates - reached.len() + frontier.len()) as u64;
+			budget.release(dropped.min(held));
+			held -= dropped.min(held);
 			if reached.is_empty() {
 				break;
 			}
 			if repetition >= self.min {
+				budget.hold(reached.len() as u64)?;
+				held += reached.len() as u64;
 				out.extend_from_slice(&reached);
 			}
 			frontier = reached;
 		}
 		out.sort_unstable();
 		out.dedup();
+		budget.release(held);
+		Ok(())
 	}
 
 	fn start_positions(&self, range: Span, out: &mut Vec<u64>) {
@@ -249,7 +282,6 @@ pub(crate) struct Sequence {
 	seed_steps: usize,
 	slot_count: usize,
 	match_cost: u64,
-	output_is_intermediate: bool,
 	// per step: slots it declares that a constraint reads; left unbound by the
 	// step, they stay unbound and the constraint cannot hold
 	required: Vec<Vec<LabelId>>,
@@ -324,7 +356,6 @@ impl Sequence {
 			seed_steps,
 			slot_count,
 			match_cost: 1 + slot_count as u64 / 4,
-			output_is_intermediate: bindings == Bindings::All,
 			required,
 			decidable,
 			live,
@@ -337,27 +368,65 @@ impl Sequence {
 		range: Span,
 		holds: Holds,
 		budget: &Budget,
+		output: Output,
 	) -> Result<Vec<Match>> {
 		let mut matches = Vec::new();
 		for seeds in self.seeds(range).chunks(SEED_BATCH) {
-			self.extend_seeds::<T>(seeds, range.end, holds, budget, &mut matches)?;
+			let active = self.extend_seeds::<T>(seeds, range.end, holds, budget)?;
+			let surviving = active.len();
+			let first_new = matches.len();
+			matches.extend(
+				active
+					.into_iter()
+					.filter(|partial| partial.end > partial.start)
+					.map(|partial| Match {
+						start: partial.start,
+						end: partial.end,
+						captures: partial.track.into_captures(),
+					}),
+			);
+			matches[first_new..].sort_unstable();
+			// matches bound for a buffer stay charged, to that buffer's ledger
+			let buffered = match output {
+				Output::Final => 0,
+				Output::Buffered(ledger) => {
+					let emitted = matches.len() - first_new;
+					ledger.adopt(self.cost(emitted));
+					emitted
+				}
+			};
+			budget.release(self.cost(surviving - buffered));
 		}
 		Ok(matches)
 	}
 
+	/// The number of matches `matches_in` would return, without building them.
 	pub(crate) fn count_in(&self, range: Span, budget: &Budget) -> Result<usize> {
-		Ok(self.matches_in::<()>(range, &|_, _| true, budget)?.len())
+		let mut count = 0;
+		for seeds in self.seeds(range).chunks(SEED_BATCH) {
+			let active = self.extend_seeds::<()>(seeds, range.end, &|_, _| true, budget)?;
+			count += active
+				.iter()
+				.filter(|partial| partial.end > partial.start)
+				.count();
+			budget.release(self.cost(active.len()));
+		}
+		Ok(count)
 	}
 
+	fn cost(&self, matches: usize) -> u64 {
+		matches as u64 * self.match_cost
+	}
+
+	// The partial matches left once every step has run over `seeds`, the empty
+	// ones included. They remain charged to the budget; the caller releases them.
 	fn extend_seeds<T: Track>(
 		&self,
 		seeds: &[u64],
 		limit: u64,
 		holds: Holds,
 		budget: &Budget,
-		out: &mut Vec<Match>,
-	) -> Result<()> {
-		let cost = |matches: usize| matches as u64 * self.match_cost;
+	) -> Result<Vec<Partial<T>>> {
 		let mut active: Vec<Partial<T>> = seeds
 			.iter()
 			.map(|&position| Partial {
@@ -366,11 +435,11 @@ impl Sequence {
 				track: T::unbound(self.slot_count),
 			})
 			.collect();
-		budget.hold(cost(active.len()))?;
+		budget.hold(self.cost(active.len()))?;
 
 		for (index, step) in self.steps.iter().enumerate() {
 			if active.is_empty() {
-				return Ok(());
+				break;
 			}
 			let mut next: Vec<Partial<T>> = Vec::with_capacity(active.len());
 			let mut charged = 0;
@@ -380,7 +449,7 @@ impl Sequence {
 					next.push(partial.clone());
 				}
 				continuations.clear();
-				step.continuations(partial.end, limit, &mut continuations);
+				step.continuations(partial.end, limit, budget, &mut continuations)?;
 				for &(end, inner) in &continuations {
 					let mut track = partial.track.clone();
 					track.bind(step.label, partial.end, end, inner);
@@ -391,12 +460,12 @@ impl Sequence {
 					});
 				}
 				if next.len() - charged >= CHARGE_STRIDE {
-					budget.hold(cost(next.len() - charged))?;
+					budget.hold(self.cost(next.len() - charged))?;
 					budget.expand((next.len() - charged) as u64)?;
 					charged = next.len();
 				}
 			}
-			budget.hold(cost(next.len() - charged))?;
+			budget.hold(self.cost(next.len() - charged))?;
 			budget.expand((next.len() - charged) as u64)?;
 			let created = next.len();
 
@@ -428,30 +497,10 @@ impl Sequence {
 					later.compare_distinguishing(earlier, live).is_eq()
 				});
 			}
-			budget.release(cost(created - next.len() + active.len()));
+			budget.release(self.cost(created - next.len() + active.len()));
 			active = next;
 		}
-
-		let surviving = active.len();
-		let first_new = out.len();
-		out.extend(
-			active
-				.into_iter()
-				.filter(|partial| partial.end > partial.start)
-				.map(|partial| Match {
-					start: partial.start,
-					end: partial.end,
-					captures: partial.track.into_captures(),
-				}),
-		);
-		// matches that feed a group or a constraint stay charged to the query
-		let kept = match self.output_is_intermediate {
-			true => out.len() - first_new,
-			false => 0,
-		};
-		budget.release(cost(surviving - kept));
-		out[first_new..].sort_unstable();
-		Ok(())
+		Ok(active)
 	}
 
 	fn seeds(&self, range: Span) -> Vec<u64> {
@@ -468,7 +517,7 @@ impl Sequence {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::budget::Limits;
+	use crate::budget::{Ledger, Limits};
 	use crate::QueryError;
 
 	fn runs(positions: &[u32]) -> Vec<Run> {
@@ -503,7 +552,7 @@ mod tests {
 
 	fn spans(sequence: &Sequence, end: u64) -> Vec<(u64, u64)> {
 		sequence
-			.matches_in::<()>(Span::new(0, end), &|_, _| true, &unlimited())
+			.matches_in::<()>(Span::new(0, end), &|_, _| true, &unlimited(), Output::Final)
 			.unwrap()
 			.into_iter()
 			.map(|found| (found.start, found.end))
@@ -512,7 +561,7 @@ mod tests {
 
 	fn assignments(sequence: &Sequence, end: u64, holds: Holds) -> Vec<Match> {
 		sequence
-			.matches_in::<Slots>(Span::new(0, end), holds, &unlimited())
+			.matches_in::<Slots>(Span::new(0, end), holds, &unlimited(), Output::Final)
 			.unwrap()
 	}
 
@@ -650,47 +699,115 @@ mod tests {
 	fn budget_is_returned_once_results_are_final() {
 		let budget = unlimited();
 		floating_pair(Bindings::Canonical)
-			.matches_in::<Slots>(Span::new(0, 5), &|_, _| true, &budget)
+			.matches_in::<Slots>(Span::new(0, 5), &|_, _| true, &budget, Output::Final)
 			.unwrap();
 		assert_eq!(budget.held(), 0);
 	}
 
 	#[test]
-	fn enumerated_assignments_stay_charged() {
+	fn buffered_matches_stay_charged_until_their_ledger_is_dropped() {
 		let budget = unlimited();
+		let ledger = Ledger::new(&budget);
 		let found = floating_pair(Bindings::All)
-			.matches_in::<Slots>(Span::new(0, 5), &|_, _| true, &budget)
+			.matches_in::<Slots>(Span::new(0, 5), &|_, _| true, &budget, Output::Buffered(&ledger))
 			.unwrap();
 		assert_eq!(budget.held(), found.len() as u64);
+		drop(ledger);
+		assert_eq!(budget.held(), 0);
+	}
+
+	// every span of 1 to 100 tokens over 5,000 positions: about 495,000 matches
+	fn wide_spans() -> Sequence {
+		let positions: Vec<u32> = (0..5000).collect();
+		unlabeled(vec![token_step(&positions, 1, 100)])
+	}
+
+	#[test]
+	fn a_buffer_is_refused_while_it_fills_not_after() {
+		let limit = 60_000;
+		let budget = Budget::new(Limits {
+			max_intermediate_matches: limit,
+			max_expansions: u64::MAX,
+		});
+		let ledger = Ledger::new(&budget);
+		let outcome = wide_spans().matches_in::<()>(
+			Span::new(0, 5000),
+			&|_, _| true,
+			&budget,
+			Output::Buffered(&ledger),
+		);
+		assert!(matches!(outcome, Err(QueryError::LimitExceeded { .. })));
+		// stopped within one batch of the limit, far short of the whole buffer
+		assert!(budget.held() < limit + (SEED_BATCH as u64 + 1) * 100);
+	}
+
+	#[test]
+	fn counting_does_not_build_the_matches() {
+		let budget = Budget::new(Limits {
+			max_intermediate_matches: 60_000,
+			max_expansions: u64::MAX,
+		});
+		let expected: usize = (1..=100).map(|length| 5000 - length + 1).sum();
+		assert_eq!(wide_spans().count_in(Span::new(0, 5000), &budget).unwrap(), expected);
+		assert_eq!(budget.held(), 0);
+	}
+
+	#[test]
+	fn repeated_group_enumeration_is_charged_and_returned() {
+		// a group matching one or two tokens anywhere, repeated up to 100 times
+		let table: Vec<Match> = (0..200)
+			.flat_map(|start| [Match::unlabeled(start, start + 1, 0), Match::unlabeled(start, start + 2, 0)])
+			.filter(|found| found.end <= 200)
+			.collect();
+		let group = || Step {
+			matcher: Matcher::Spans(table.clone()),
+			min: 1,
+			max: MAX_QUANTIFIER,
+			label: None,
+			declares: Vec::new(),
+		};
+		let budget = unlimited();
+		let found = unlabeled(vec![group()])
+			.matches_in::<()>(Span::new(0, 200), &|_, _| true, &budget, Output::Final)
+			.unwrap();
+		assert!(!found.is_empty());
+		assert_eq!(budget.held(), 0);
+
+		let tight = Budget::new(Limits {
+			max_intermediate_matches: 300,
+			max_expansions: u64::MAX,
+		});
+		let outcome = unlabeled(vec![group()]).matches_in::<()>(
+			Span::new(0, 200),
+			&|_, _| true,
+			&tight,
+			Output::Final,
+		);
+		assert!(matches!(outcome, Err(QueryError::LimitExceeded { .. })));
 	}
 
 	#[test]
 	fn exceeding_the_budget_is_an_error() {
-		let budget = Budget::new(Limits {
-			max_intermediate_matches: 8,
-			max_expansions: u64::MAX,
-		});
-		let outcome = floating_pair(Bindings::Canonical).matches_in::<Slots>(
-			Span::new(0, 5),
-			&|_, _| true,
-			&budget,
-		);
+		let run = |limits: Limits| {
+			floating_pair(Bindings::Canonical).matches_in::<Slots>(
+				Span::new(0, 5),
+				&|_, _| true,
+				&Budget::new(limits),
+				Output::Final,
+			)
+		};
 		assert!(matches!(
-			outcome,
+			run(Limits {
+				max_intermediate_matches: 8,
+				max_expansions: u64::MAX,
+			}),
 			Err(QueryError::LimitExceeded { resource: "intermediate matches", limit: 8 })
 		));
-
-		let budget = Budget::new(Limits {
-			max_intermediate_matches: u64::MAX,
-			max_expansions: 10,
-		});
-		let outcome = floating_pair(Bindings::Canonical).matches_in::<Slots>(
-			Span::new(0, 5),
-			&|_, _| true,
-			&budget,
-		);
 		assert!(matches!(
-			outcome,
+			run(Limits {
+				max_intermediate_matches: u64::MAX,
+				max_expansions: 10,
+			}),
 			Err(QueryError::LimitExceeded { resource: "expansions", limit: 10 })
 		));
 	}

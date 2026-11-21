@@ -989,11 +989,25 @@ A rework of sequence execution and name validation, checked by a differential te
 **Limits**
 
 - `montre_query::Limits` holds two ceilings, and `execute_with` / `execute_count_with` take one. `execute` and `execute_count` use `Limits::default()`, so the CLI, the FFI and the daemon are all covered without changes.
-- `max_intermediate_matches` (default 10 million, roughly 1 GB) counts the intermediate matches a query holds at once, across every thread and nested group: the partial matches being extended, the prepared matches of groups, and capture assignments enumerated for a constraint. A match counts once for up to three labels in the query and more beyond that. The count is taken while a step runs, every 4,096 partial matches, not after it. The hits of the result are not counted.
-- `max_expansions` (default unlimited) counts the partial matches a query creates in total. It is a ceiling on work for callers that need one, such as a shared daemon.
+- `max_intermediate_matches` (default 10 million, roughly 1.2 GB at the limit) counts the intermediate matches a query holds at once, across every thread and nested group. A match counts once for up to three labels in the query and more beyond that.
+- `max_expansions` (default unlimited) counts the partial matches and group continuations a query creates in total. It is a ceiling on work for callers that need one, such as a shared daemon.
 - Exceeding either returns `QueryError::LimitExceeded`. A query never returns part of its result.
-- These are counts, not bytes: allocator overhead, vector capacity and sort scratch space are on top, and so is the result itself, which every caller still receives in full.
-- Documents are the unit of parallelism as before, but a document's work is now proportional to its own matches: preparation is O(postings) once, and each extension is one binary search over the step's runs. The previous per-document scan made quantified queries O(documents × postings).
+
+What is counted as intermediate:
+
+- The active set of each batch, charged every 4,096 partial matches while a step runs and released when the batch is done.
+- Every buffer the query keeps while it runs: the table of a group's sub-matches, the capture assignments enumerated for a constraint that could not be checked inside a sequence, and the source matches of an alignment projection. Each buffer has a ledger. Matches are charged to it as they are produced, batch by batch, so a buffer that would exceed the limit is refused while it fills and not after it is complete. The ledger returns its charges when the buffer is dropped.
+- The frontier of a repeated group while its continuations are enumerated.
+
+What is not counted:
+
+- The hits of the result. `execute` returns all of them, and a query with a very large result uses memory in proportion: `a:[]{1,100}` over one 200,000-token document is 20 million hits and about 5.7 GB. `execute_count` builds none of them: the same count takes 33 MB.
+- The list of start positions of one document, 8 bytes per candidate position.
+- Allocator overhead, vector capacity and sort scratch space. The limit is a count, not a byte figure.
+
+So the limit governs the engine's working storage. Whether a process such as the daemon stays within its memory also depends on how large a result it is willing to materialize and on how many queries it runs at once; neither is limited here.
+
+A label around a single quantified element, as in `a:([]{1,100})`, is planned as that element labeled and needs no group table.
 
 **Index metadata**
 
