@@ -988,24 +988,36 @@ A rework of sequence execution and name validation, checked by a differential te
 
 **Limits**
 
-- `montre_query::Limits` holds two ceilings, and `execute_with` / `execute_count_with` take one. `execute` and `execute_count` use `Limits::default()`, so the CLI, the FFI and the daemon are all covered without changes.
+- `montre_query::Limits` holds three ceilings, and `execute_with` / `execute_count_with` take one. `execute` and `execute_count` use `Limits::default()`, so the CLI, the FFI and Python bindings are covered without changes. The daemon uses its own `DEFAULT_LIMITS`, below.
 - `max_intermediate_matches` (default 10 million, roughly 1.2 GB at the limit) counts the intermediate matches a query holds at once, across every thread and nested group. A match counts once for up to three labels in the query and more beyond that.
-- `max_expansions` (default unlimited) counts the partial matches and group continuations a query creates in total. It is a ceiling on work for callers that need one, such as a shared daemon.
-- Exceeding either returns `QueryError::LimitExceeded`. A query never returns part of its result.
+- `max_expansions` (default unlimited) counts the partial matches and group continuations a query creates in total: a ceiling on work rather than memory. On a laptop the engine does about 16 million a second on an ambiguous pattern.
+- `max_results` (default unlimited) counts the hits a query returns, as they are produced and after span, component and document filters, so a filter that discards most matches does not trip it. A count builds no hits and is not subject to it.
+- Exceeding any of them returns `QueryError::LimitExceeded`, naming the resource and the limit. A query never returns part of its result.
+
+How a query is evaluated, and so how its memory is bounded:
+
+- A sequence produces its matches batch by batch. Span, component and document filters above it, and a constraint it can check as it runs, are applied to each batch as it is produced, for `execute` and `execute_count` alike. A count keeps only a running total; `execute` keeps the hits.
+- A single-token pattern, with or without such filters, goes straight from the inverted index to its hits or its count.
+- Any other shape (an alternation of multi-token sequences, a constraint over one, an alignment projection) is built as an intermediate buffer, charged to `max_intermediate_matches` as it fills, and its hits are then counted against `max_results` in one step.
 
 What is counted as intermediate:
 
 - The active set of each batch, charged every 4,096 partial matches while a step runs and released when the batch is done.
-- Every buffer the query keeps while it runs: the table of a group's sub-matches, the capture assignments enumerated for a constraint that could not be checked inside a sequence, and the source matches of an alignment projection. Each buffer has a ledger. Matches are charged to it as they are produced, batch by batch, so a buffer that would exceed the limit is refused while it fills and not after it is complete. The ledger returns its charges when the buffer is dropped.
+- Every buffer the query keeps while it runs: the table of a group's sub-matches, the capture assignments enumerated for a constraint that could not be checked inside a sequence, the source matches and the targets of an alignment projection, and the whole result of a shape outside the batch path. Each buffer has a ledger. Matches are charged to it as they are produced, so a buffer that would exceed the limit is refused while it fills and not after it is complete. The ledger returns its charges when the buffer is dropped.
 - The frontier of a repeated group while its continuations are enumerated.
 
-What is not counted:
+What is not counted as intermediate:
 
-- The hits of the result. `execute` returns all of them, and a query with a very large result uses memory in proportion: `a:[]{1,100}` over one 200,000-token document is 20 million hits and about 5.7 GB. `execute_count` builds none of them: the same count takes 33 MB.
+- The hits of a result produced batch by batch. Those fall under `max_results`. Without one, a query with a very large result uses memory in proportion: `a:[]{1,100}` over one 200,000-token document is 20 million hits and about 5.7 GB, where its count takes 33 MB.
 - The list of start positions of one document, 8 bytes per candidate position.
-- Allocator overhead, vector capacity and sort scratch space. The limit is a count, not a byte figure.
+- Allocator overhead, vector capacity and sort scratch space. The limits are counts, not byte figures.
 
-So the limit governs the engine's working storage. Whether a process such as the daemon stays within its memory also depends on how large a result it is willing to materialize and on how many queries it runs at once; neither is limited here.
+So `max_intermediate_matches` governs the engine's working storage, and `max_results` the size of what it hands back. Whether a process such as the daemon stays within its memory also depends on how many results it keeps and how many queries it runs at once; neither is limited here.
+
+**Daemon limits**
+
+- `montre_daemon::DEFAULT_LIMITS` applies to `query.execute`, `query.execute_count` and the replay of saved queries: 10 million intermediate matches, a billion expansions (about a minute of matching on a laptop), and 5 million hits (about 240 MB before captures). `ServeOptions::limits` sets other values; `montre serve` has no flags for them yet.
+- A refused query returns error `1102` (execution error), with a message naming the resource and the limit.
 
 A label around a single quantified element, as in `a:([]{1,100})`, is planned as that element labeled and needs no group table.
 

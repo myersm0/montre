@@ -17,6 +17,7 @@ use std::thread;
 use std::time::Duration;
 
 use montre_index::Corpus;
+pub use montre_query::Limits;
 
 pub use client::DaemonClient;
 
@@ -27,7 +28,19 @@ pub struct ServeOptions {
 	pub corpus_path: PathBuf,
 	pub socket_path: Option<PathBuf>,
 	pub idle_timeout: Option<Duration>,
+	/// Applied to every query the daemon runs, saved queries replayed included.
+	pub limits: Limits,
 }
+
+/// Limits for a daemon shared by several clients. Beyond the engine's own
+/// default ceiling on working storage, a query may return at most 5 million
+/// hits (about 240 MB before captures) and do at most a billion expansions,
+/// about a minute of matching on a laptop.
+pub const DEFAULT_LIMITS: Limits = Limits {
+	max_intermediate_matches: 10_000_000,
+	max_expansions: 1_000_000_000,
+	max_results: 5_000_000,
+};
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -50,6 +63,7 @@ pub(crate) struct CorpusHandle {
 	pub canonical_path: PathBuf,
 	pub state_dir: PathBuf,
 	pub results: Arc<RwLock<ResultsTable>>,
+	pub limits: Limits,
 }
 
 pub fn serve(options: ServeOptions) -> Result<(), DaemonError> {
@@ -92,6 +106,7 @@ pub fn serve(options: ServeOptions) -> Result<(), DaemonError> {
 		canonical_path,
 		state_dir,
 		results: Arc::new(RwLock::new(HashMap::new())),
+		limits: options.limits,
 	});
 
 	let coordinator = Arc::new(shutdown::ShutdownCoordinator::new(socket_path.clone()));

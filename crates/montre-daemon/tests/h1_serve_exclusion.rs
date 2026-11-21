@@ -39,6 +39,7 @@ fn second_serve_with_same_socket_fails_with_already_running() {
 		corpus_path: corpus.clone(),
 		socket_path: Some(socket.clone()),
 		idle_timeout: None,
+		limits: montre_daemon::DEFAULT_LIMITS,
 	};
 	thread::spawn(move || {
 		let _ = serve(first);
@@ -51,6 +52,7 @@ fn second_serve_with_same_socket_fails_with_already_running() {
 		corpus_path: corpus.clone(),
 		socket_path: Some(socket.clone()),
 		idle_timeout: None,
+		limits: montre_daemon::DEFAULT_LIMITS,
 	};
 	let result = serve(second);
 	assert!(
@@ -77,6 +79,7 @@ fn second_serve_with_alt_socket_fails_on_state_lock() {
 		corpus_path: corpus.clone(),
 		socket_path: Some(primary_socket.clone()),
 		idle_timeout: None,
+		limits: montre_daemon::DEFAULT_LIMITS,
 	};
 	thread::spawn(move || {
 		let _ = serve(first);
@@ -88,6 +91,7 @@ fn second_serve_with_alt_socket_fails_on_state_lock() {
 		corpus_path: corpus.clone(),
 		socket_path: Some(alt_socket.clone()),
 		idle_timeout: None,
+		limits: montre_daemon::DEFAULT_LIMITS,
 	};
 	let result = serve(second);
 	assert!(
@@ -114,6 +118,7 @@ fn serve_replaces_stale_socket_file() {
 		corpus_path: corpus,
 		socket_path: Some(socket.clone()),
 		idle_timeout: None,
+		limits: montre_daemon::DEFAULT_LIMITS,
 	};
 	thread::spawn(move || {
 		let _ = serve(options);
@@ -138,6 +143,7 @@ fn serve_refuses_to_clobber_external_listener() {
 		corpus_path: corpus,
 		socket_path: Some(socket.clone()),
 		idle_timeout: None,
+		limits: montre_daemon::DEFAULT_LIMITS,
 	};
 	let result = serve(options);
 	assert!(

@@ -529,7 +529,7 @@ Run a query, returning the `ResultMetadata` of the new (unnamed, session-form) r
 
 **Result**: `ResultMetadata`
 
-**Errors**: `1100` (parse error), `1101` (plan error), `1102` (execution error).
+**Errors**: `1100` (parse error), `1101` (plan error), `1102` (execution error). A query that exceeds one of the daemon's limits (hits returned, expansions performed, or intermediate matches held) fails with `1102`, and its message names the limit; no partial result is stored. `query.execute_count` is not subject to the limit on hits.
 
 #### `query.execute_count`
 
@@ -595,7 +595,7 @@ Look up a named result. Returns the handle (which may be the same or freshly iss
 
 **Result**: `ResultMetadata`
 
-**Errors**: `1202` (name not found), `1204` (stored query no longer valid against current corpus — only possible for query-backed results after a rebuild).
+**Errors**: `1202` (name not found), `1204` (stored query no longer valid against current corpus — only possible for query-backed results after a rebuild), `1102` (a query-backed result replayed after a restart exceeds one of the daemon's limits).
 
 #### `query.list_named`
 

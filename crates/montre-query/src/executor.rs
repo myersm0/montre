@@ -8,9 +8,10 @@ use roaring::RoaringBitmap;
 
 use crate::ast::{CmpOp, GlobalConstraint, LabelAttr};
 use crate::budget::{Budget, Ledger, Limits, Output};
+use crate::sequence::CHARGE_STRIDE;
 use crate::planner::{PlanNode, QueryPlan, SequenceStep};
 use crate::sequence::{
-	Bindings, LabelId, Match, Matcher, Run, Sequence, Slot, Slots, Step,
+	Bindings, Keep, LabelId, Match, Matcher, Run, Sequence, Slot, Slots, Step,
 	MAX_QUANTIFIER, UNBOUND, runs_from_bitmap,
 };
 use crate::validate::validate;
@@ -115,19 +116,21 @@ pub fn execute(plan: &QueryPlan, corpus: &Corpus) -> Result<Results> {
 pub fn execute_with(plan: &QueryPlan, corpus: &Corpus, limits: &Limits) -> Result<Results> {
 	validate(&plan.root, corpus)?;
 	let context = Context::new(&plan.root, corpus, limits);
-	let hits = if plan.root.is_token_level() {
-		context
-			.token_bitmap(&plan.root)?
+	if plan.root.is_token_level() {
+		let bitmap = context.token_bitmap(&plan.root)?;
+		context.budget.report(bitmap.len() as usize)?;
+		let hits = bitmap
 			.iter()
-			.map(|position| Hit::new(Span::new(u64::from(position), u64::from(position) + 1)))
-			.collect()
-	} else {
-		context
-			.matches(&plan.root, Bindings::Canonical, &[], Output::Final)?
-			.into_iter()
-			.map(|found| context.hit(found))
-			.collect()
-	};
+			.map(u64::from)
+			.map(|position| Hit::new(Span::new(position, position + 1)))
+			.collect();
+		return Ok(Results::new(hits));
+	}
+	let hits = context
+		.results(&plan.root)?
+		.into_iter()
+		.map(|found| context.hit(found))
+		.collect();
 	Ok(Results::new(hits))
 }
 
@@ -173,49 +176,166 @@ impl<'a> Context<'a> {
 		self.labels.iter().position(|label| label == name)
 	}
 
-	fn count(&self, node: &PlanNode) -> Result<usize> {
-		let inverted = self.corpus.inverted();
-		let token_count = self.corpus.token_count() as usize;
-		match node {
-			PlanNode::ScanLiteral { layer, value } => {
-				Ok(inverted.get(layer, value).map_or(0, |bitmap| bitmap.len() as usize))
-			}
-			PlanNode::ScanAll => Ok(token_count),
-			PlanNode::Difference { base, subtract } => match (base.as_ref(), subtract.as_ref()) {
-				(PlanNode::ScanAll, PlanNode::ScanLiteral { layer, value }) => Ok(token_count
-					- inverted.get(layer, value).map_or(0, |bitmap| bitmap.len() as usize)),
-				_ => Ok(self.token_bitmap(node)?.len() as usize),
-			},
-			_ if node.is_token_level() => Ok(self.token_bitmap(node)?.len() as usize),
-			PlanNode::SequenceScan { steps } => {
-				let prepared = self.prepare(steps, Bindings::Canonical, &[])?;
-				let ranges = self.ranges();
-				let count_in = |range: &Span| prepared.sequence.count_in(*range, &self.budget);
-				if runs_in_parallel(steps, &ranges) {
-					ranges.par_iter().map(count_in).sum()
-				} else {
-					ranges.iter().map(count_in).sum()
+	// The hits of the query. A sequence, under any span, component and
+	// document filters and a constraint it can apply as it runs, produces them
+	// batch by batch; so does a token-level pattern. Any other shape is built as
+	// an intermediate buffer and then reported whole.
+	fn results(&self, root: &PlanNode) -> Result<Vec<Match>> {
+		let (core, checks, filters) = self.peel(root);
+		let keep = |start: u64, end: u64| self.accepts(&filters, start, end);
+
+		if core.is_token_level() {
+			let slot_count = self.labels.len();
+			let bitmap = self.token_bitmap(core)?;
+			let mut found = Vec::with_capacity(bitmap.len() as usize);
+			for position in bitmap.iter().map(u64::from) {
+				if keep(position, position + 1) {
+					found.push(Match::unlabeled(position, position + 1, slot_count));
+					if found.len() % CHARGE_STRIDE == 0 {
+						self.budget.report(CHARGE_STRIDE)?;
+					}
 				}
 			}
-			_ => Ok(self.matches(node, Bindings::Canonical, &[], Output::Final)?.len()),
+			self.budget.report(found.len() % CHARGE_STRIDE)?;
+			return Ok(found);
+		}
+
+		if let PlanNode::SequenceScan { steps } = core {
+			return self.sequence_matches(steps, Bindings::Canonical, &checks, Output::Final, &keep);
+		}
+
+		let built = Ledger::new(&self.budget);
+		let mut found = self.matches(core, Bindings::Canonical, &[], &built)?;
+		found.retain(|found| keep(found.start, found.end));
+		self.budget.report(found.len())?;
+		Ok(found)
+	}
+
+	fn count(&self, root: &PlanNode) -> Result<usize> {
+		let inverted = self.corpus.inverted();
+		let token_count = self.corpus.token_count() as usize;
+		match root {
+			PlanNode::ScanLiteral { layer, value } => {
+				return Ok(inverted.get(layer, value).map_or(0, |bitmap| bitmap.len() as usize));
+			}
+			PlanNode::ScanAll => return Ok(token_count),
+			PlanNode::Difference { base, subtract } => {
+				if let (PlanNode::ScanAll, PlanNode::ScanLiteral { layer, value }) =
+					(base.as_ref(), subtract.as_ref())
+				{
+					let subtracted = inverted.get(layer, value).map_or(0, |bitmap| bitmap.len());
+					return Ok(token_count - subtracted as usize);
+				}
+			}
+			_ => {}
+		}
+
+		let (core, checks, filters) = self.peel(root);
+		let keep = |start: u64, end: u64| self.accepts(&filters, start, end);
+
+		if core.is_token_level() {
+			let bitmap = self.token_bitmap(core)?;
+			if filters.is_empty() {
+				return Ok(bitmap.len() as usize);
+			}
+			return Ok(bitmap
+				.iter()
+				.map(u64::from)
+				.filter(|&position| keep(position, position + 1))
+				.count());
+		}
+
+		if let PlanNode::SequenceScan { steps } = core {
+			let prepared = self.prepare(steps, Bindings::Canonical, &checks)?;
+			let sequence = &prepared.sequence;
+			let holds = |check: usize, slots: &[Slot]| self.holds(&checks[check], slots);
+			// without a constraint to decide, which captures a span has is beside the point
+			let count_in = |range: &Span| match checks.is_empty() {
+				true => sequence.count_in::<()>(*range, &holds, &keep, &self.budget),
+				false => sequence.count_in::<Slots>(*range, &holds, &keep, &self.budget),
+			};
+			let ranges = self.ranges();
+			return match runs_in_parallel(steps, &ranges) {
+				true => ranges.par_iter().map(count_in).sum(),
+				false => ranges.iter().map(count_in).sum(),
+			};
+		}
+
+		let built = Ledger::new(&self.budget);
+		let found = self.matches(core, Bindings::Canonical, &[], &built)?;
+		Ok(found.iter().filter(|found| keep(found.start, found.end)).count())
+	}
+
+	// Split off the span, component and document filters above `root`, and a
+	// constraint that its sequence can apply as it runs. What remains is the
+	// node that produces the matches those filters and checks then act on.
+	fn peel<'n>(&self, root: &'n PlanNode) -> (&'n PlanNode, Vec<Check>, Vec<Filter<'a>>) {
+		let mut core = root;
+		let mut checks = Vec::new();
+		let mut filters = Vec::new();
+		loop {
+			match core {
+				PlanNode::FilterBySpan { inner, span_layer } => {
+					let spans = self.corpus.spans().spans(span_layer).unwrap_or(&[]);
+					filters.push(Filter::Within(spans));
+					core = inner;
+				}
+				PlanNode::FilterByComponent { inner, components } => {
+					let document_count = self.documents().len();
+					let mut allowed = vec![false; document_count];
+					for component in components.iter().filter_map(|name| self.corpus.component(name)) {
+						let (first, end) = component.document_range;
+						allowed[first.min(document_count)..end.min(document_count)].fill(true);
+					}
+					filters.push(Filter::Documents(allowed));
+					core = inner;
+				}
+				PlanNode::FilterByDocument { inner, documents } => {
+					let mut allowed = vec![false; self.documents().len()];
+					for index in self.corpus.document_indices_by_name(documents) {
+						if let Some(slot) = allowed.get_mut(index) {
+							*slot = true;
+						}
+					}
+					filters.push(Filter::Documents(allowed));
+					core = inner;
+				}
+				PlanNode::GlobalConstraintFilter { inner, constraints } if applies_checks(inner) => {
+					checks = self.compile(constraints);
+					core = inner;
+				}
+				_ => return (core, checks, filters),
+			}
 		}
 	}
 
-	/// Matches sorted by (start, end, captures). `checks` are constraints the
-	/// node applies while it runs; only a node for which `applies_checks` holds
-	/// is handed any. Matches bound for a buffer are charged to its ledger as
-	/// they are produced.
+	fn accepts(&self, filters: &[Filter], start: u64, end: u64) -> bool {
+		filters.iter().all(|filter| match filter {
+			Filter::Within(spans) => fits_within_one(spans, start, end).is_some(),
+			Filter::Documents(allowed) => fits_within_one(self.documents(), start, end)
+				.is_some_and(|document| allowed[document]),
+		})
+	}
+
+	fn documents(&self) -> &'a [Span] {
+		self.corpus.spans().spans("document").unwrap_or(&[])
+	}
+
+	/// Matches sorted by (start, end, captures), built as an intermediate
+	/// buffer and charged to `ledger` as they are produced. `checks` are
+	/// constraints the node applies while it runs; only a node for which
+	/// `applies_checks` holds is handed any.
 	fn matches(
 		&self,
 		node: &PlanNode,
 		bindings: Bindings,
 		checks: &[Check],
-		output: Output,
+		ledger: &Ledger,
 	) -> Result<Vec<Match>> {
 		if node.is_token_level() {
 			let slot_count = self.labels.len();
 			let bitmap = self.token_bitmap(node)?;
-			output.hold(self.cost(bitmap.len() as usize))?;
+			ledger.hold(self.cost(bitmap.len() as usize))?;
 			return Ok(bitmap
 				.iter()
 				.map(u64::from)
@@ -227,68 +347,43 @@ impl<'a> Context<'a> {
 			PlanNode::Union(nodes) => {
 				let mut matches = Vec::new();
 				for node in nodes {
-					matches.extend(self.matches(node, bindings, &[], output)?);
+					matches.extend(self.matches(node, bindings, &[], ledger)?);
 				}
 				matches.sort_unstable();
 				Ok(deduplicated(matches, bindings))
 			}
 
 			PlanNode::SequenceScan { steps } => {
-				self.sequence_matches(steps, bindings, checks, output)
+				self.sequence_matches(steps, bindings, checks, Output::Buffered(ledger), &|_, _| true)
 			}
 
-			PlanNode::FilterBySpan { inner, span_layer } => {
-				let mut matches = self.matches(inner, bindings, checks, output)?;
-				let spans = self.corpus.spans().spans(span_layer).unwrap_or(&[]);
-				matches.retain(|found| lies_within_one(spans, found).is_some());
+			PlanNode::FilterBySpan { .. }
+			| PlanNode::FilterByComponent { .. }
+			| PlanNode::FilterByDocument { .. } => {
+				let (core, _, filters) = self.peel(node);
+				let keep = |start: u64, end: u64| self.accepts(&filters, start, end);
+				if let PlanNode::SequenceScan { steps } = core {
+					return self.sequence_matches(steps, bindings, checks, Output::Buffered(ledger), &keep);
+				}
+				let mut matches = self.matches(core, bindings, checks, ledger)?;
+				matches.retain(|found| keep(found.start, found.end));
 				Ok(matches)
 			}
 
-			PlanNode::FilterByComponent { inner, components } => {
-				let ranges: Vec<(usize, usize)> = components
-					.iter()
-					.filter_map(|name| self.corpus.component(name))
-					.map(|component| component.document_range)
-					.collect();
-				let mut matches = self.matches(inner, bindings, checks, output)?;
-				self.retain_in_documents(&mut matches, |document| {
-					ranges
-						.iter()
-						.any(|&(first, end)| document >= first && document < end)
-				});
-				Ok(matches)
-			}
-
-			PlanNode::FilterByDocument { inner, documents } => {
-				let wanted: HashSet<usize> = self
-					.corpus
-					.document_indices_by_name(documents)
-					.into_iter()
-					.collect();
-				let mut matches = self.matches(inner, bindings, checks, output)?;
-				self.retain_in_documents(&mut matches, |document| wanted.contains(&document));
-				Ok(matches)
-			}
-
-			PlanNode::ProjectAlignment { inner, alignment } => {
-				let projected = self.projected(inner, alignment)?;
-				output.hold(self.cost(projected.len()))?;
-				Ok(projected)
-			}
+			PlanNode::ProjectAlignment { inner, alignment } => self.projected(inner, alignment, ledger),
 
 			PlanNode::GlobalConstraintFilter { inner, constraints } => {
 				let own = self.compile(constraints);
 				if applies_checks(inner) {
-					return self.matches(inner, bindings, &own, output);
+					return self.matches(inner, bindings, &own, ledger);
 				}
 				// every assignment is enumerated, charged to a ledger of its own,
 				// and only the survivors are passed on
 				let enumerated = Ledger::new(&self.budget);
-				let mut matches =
-					self.matches(inner, Bindings::All, &[], Output::Buffered(&enumerated))?;
+				let mut matches = self.matches(inner, Bindings::All, &[], &enumerated)?;
 				matches.retain(|found| own.iter().all(|check| self.holds(check, &found.captures)));
 				let matches = deduplicated(matches, bindings);
-				output.hold(self.cost(matches.len()))?;
+				ledger.hold(self.cost(matches.len()))?;
 				Ok(matches)
 			}
 
@@ -296,11 +391,6 @@ impl<'a> Context<'a> {
 				"token-level operator applied to a multi-token pattern".into(),
 			)),
 		}
-	}
-
-	fn retain_in_documents(&self, matches: &mut Vec<Match>, keep: impl Fn(usize) -> bool) {
-		let documents = self.corpus.spans().spans("document").unwrap_or(&[]);
-		matches.retain(|found| lies_within_one(documents, found).is_some_and(&keep));
 	}
 
 	fn cost(&self, matches: usize) -> u64 {
@@ -452,7 +542,7 @@ impl<'a> Context<'a> {
 			true => Bindings::All,
 			false => bindings,
 		};
-		self.matches(&step.node, group_bindings, &inner_checks, Output::Buffered(ledger))
+		self.matches(&step.node, group_bindings, &inner_checks, ledger)
 	}
 
 	fn sequence_matches(
@@ -461,6 +551,7 @@ impl<'a> Context<'a> {
 		bindings: Bindings,
 		checks: &[Check],
 		output: Output,
+		keep: Keep,
 	) -> Result<Vec<Match>> {
 		let prepared = self.prepare(steps, bindings, checks)?;
 		let sequence = &prepared.sequence;
@@ -468,9 +559,9 @@ impl<'a> Context<'a> {
 		let holds = |check: usize, slots: &[Slot]| self.holds(&checks[check], slots);
 		let matches_in = |range: &Span| {
 			if self.labels.is_empty() {
-				sequence.matches_in::<()>(*range, &holds, &self.budget, output)
+				sequence.matches_in::<()>(*range, &holds, keep, &self.budget, output)
 			} else {
-				sequence.matches_in::<Slots>(*range, &holds, &self.budget, output)
+				sequence.matches_in::<Slots>(*range, &holds, keep, &self.budget, output)
 			}
 		};
 		let per_range: Vec<Vec<Match>> = if runs_in_parallel(steps, &ranges) {
@@ -481,7 +572,8 @@ impl<'a> Context<'a> {
 		Ok(per_range.into_iter().flatten().collect())
 	}
 
-	fn projected(&self, inner: &PlanNode, alignment: &str) -> Result<Vec<Match>> {
+	// targets are charged to `ledger` as they are found
+	fn projected(&self, inner: &PlanNode, alignment: &str, ledger: &Ledger) -> Result<Vec<Match>> {
 		let missing = |what: &str, name: &str| QueryError::Execution(format!("{what} not found: {name}"));
 		let corpus = self.corpus;
 		let edges = corpus
@@ -510,7 +602,8 @@ impl<'a> Context<'a> {
 		let mut projected = Vec::new();
 
 		let source = Ledger::new(&self.budget);
-		for found in self.matches(inner, Bindings::Canonical, &[], Output::Buffered(&source))? {
+		let mut charged = 0;
+		for found in self.matches(inner, Bindings::Canonical, &[], &source)? {
 			let span = Span::new(found.start, found.end);
 			let Some(source) = find_doc_and_sent(span, documents, source_units, source_component)
 			else {
@@ -529,8 +622,13 @@ impl<'a> Context<'a> {
 				) {
 					projected.push(Match::unlabeled(target.start, target.end, self.labels.len()));
 				}
+				if projected.len() - charged >= CHARGE_STRIDE {
+					ledger.hold(self.cost(projected.len() - charged))?;
+					charged = projected.len();
+				}
 			}
 		}
+		ledger.hold(self.cost(projected.len() - charged))?;
 
 		projected.sort_unstable();
 		Ok(projected)
@@ -584,6 +682,13 @@ impl<'a> Context<'a> {
 			},
 		}
 	}
+}
+
+enum Filter<'a> {
+	// a match must lie inside one of these spans
+	Within(&'a [Span]),
+	// a match must lie inside a document marked true, by document index
+	Documents(Vec<bool>),
 }
 
 // a sequence ready to run, with the charges for its group tables
@@ -649,8 +754,8 @@ fn deduplicated(mut matches: Vec<Match>, bindings: Bindings) -> Vec<Match> {
 	matches
 }
 
-fn lies_within_one(spans: &[Span], found: &Match) -> Option<usize> {
-	span_containing(spans, found.start).filter(|&index| found.end <= spans[index].end)
+fn fits_within_one(spans: &[Span], start: u64, end: u64) -> Option<usize> {
+	span_containing(spans, start).filter(|&index| end <= spans[index].end)
 }
 
 fn runs_in_parallel(steps: &[SequenceStep], ranges: &[Span]) -> bool {

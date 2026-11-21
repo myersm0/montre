@@ -1821,3 +1821,64 @@ fn label_around_one_quantified_element_needs_no_table() {
 	let first = &hits.hits()[0];
 	assert_eq!(first.captures, vec![("a".to_string(), first.span)]);
 }
+
+fn count_within(corpus: &Corpus, query_str: &str, limits: &Limits) -> Result<usize, QueryError> {
+	let parsed = montre_query::parse(query_str).unwrap();
+	let plan = montre_query::planner::plan(&parsed).unwrap();
+	montre_query::executor::execute_count_with(&plan, corpus, limits)
+}
+
+#[test]
+fn constrained_and_filtered_counts_do_not_build_their_matches() {
+	let corpus = uniform_corpus();
+	let limits = Limits {
+		max_intermediate_matches: 40_000,
+		..Limits::unlimited()
+	};
+	let all_spans: usize = (1..=100).map(|length| 600 - length + 1).sum();
+	assert!(all_spans > 40_000);
+	for query in [
+		r#"a:([]{1,100}) :: a.pos = a.pos"#,
+		r#"[]{1,100} within s"#,
+		r#"a:[]{1,100} within s :: a.pos = a.pos"#,
+		r#"[]{1,100} within doc:"test.conllu""#,
+		r#"[]{1,100} within component:"test""#,
+	] {
+		assert_eq!(count_within(&corpus, query, &limits).unwrap(), all_spans, "{query}");
+	}
+}
+
+#[test]
+fn result_limit_counts_hits_after_filtering() {
+	let corpus = build_corpus(NOUN_RUN);
+	let limited = |max_results: u64| Limits {
+		max_results,
+		..Limits::unlimited()
+	};
+	let run = |query: &str, limits: &Limits| {
+		let parsed = montre_query::parse(query).unwrap();
+		let plan = montre_query::planner::plan(&parsed).unwrap();
+		montre_query::executor::execute_with(&plan, &corpus, limits).map(|results| results.len())
+	};
+	assert_eq!(run(r#"[pos="NOUN"]"#, &limited(4)).unwrap(), 4);
+	assert!(matches!(
+		run(r#"[pos="NOUN"]"#, &limited(3)),
+		Err(QueryError::LimitExceeded { resource: "results", limit: 3 })
+	));
+	// 26 spans of one to four tokens, 20 of them inside a sentence: the limit
+	// applies to the hits, not to what the filter drops
+	assert_eq!(run(r#"[]{1,4} within s"#, &limited(20)).unwrap(), 20);
+	assert!(matches!(
+		run(r#"[]{1,4}"#, &limited(20)),
+		Err(QueryError::LimitExceeded { resource: "results", limit: 20 })
+	));
+	// counting is not limited by the result limit
+	assert_eq!(count_within(&corpus, r#"[]{1,4}"#, &limited(1)).unwrap(), 26);
+	// an alternation of sequences is built as a buffer, then its hits are counted
+	let alternation = r#"[pos="DET"] [pos="ADJ"] | [pos="VERB"] [] | [pos="NOUN"]"#;
+	assert_eq!(run(alternation, &limited(6)).unwrap(), 6);
+	assert!(matches!(
+		run(alternation, &limited(5)),
+		Err(QueryError::LimitExceeded { resource: "results", limit: 5 })
+	));
+}

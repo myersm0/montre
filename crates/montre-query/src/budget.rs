@@ -15,6 +15,10 @@ pub struct Limits {
 	/// Partial matches the query may create in total. A ceiling on work, where
 	/// the other is a ceiling on memory.
 	pub max_expansions: u64,
+	/// Hits the query may return. Counted as they are produced, after span,
+	/// component and document filters; a count never builds hits and is not
+	/// subject to it.
+	pub max_results: u64,
 }
 
 impl Limits {
@@ -22,6 +26,7 @@ impl Limits {
 		Self {
 			max_intermediate_matches: u64::MAX,
 			max_expansions: u64::MAX,
+			max_results: u64::MAX,
 		}
 	}
 }
@@ -31,6 +36,7 @@ impl Default for Limits {
 		Self {
 			max_intermediate_matches: 10_000_000,
 			max_expansions: u64::MAX,
+			max_results: u64::MAX,
 		}
 	}
 }
@@ -40,6 +46,7 @@ pub(crate) struct Budget {
 	limits: Limits,
 	held: AtomicU64,
 	expanded: AtomicU64,
+	reported: AtomicU64,
 }
 
 impl Budget {
@@ -48,7 +55,21 @@ impl Budget {
 			limits,
 			held: AtomicU64::new(0),
 			expanded: AtomicU64::new(0),
+			reported: AtomicU64::new(0),
 		}
+	}
+
+	/// Count hits produced for the result.
+	pub(crate) fn report(&self, hits: usize) -> Result<()> {
+		let hits = hits as u64;
+		let reported = self.reported.fetch_add(hits, Ordering::Relaxed).saturating_add(hits);
+		if reported > self.limits.max_results {
+			return Err(QueryError::LimitExceeded {
+				resource: "results",
+				limit: self.limits.max_results,
+			});
+		}
+		Ok(())
 	}
 
 	pub(crate) fn hold(&self, amount: u64) -> Result<()> {
@@ -119,19 +140,11 @@ impl Drop for Ledger<'_> {
 	}
 }
 
-/// Where the matches a node produces go: back to the caller of the query, or
-/// into a buffer the query keeps while it runs.
+/// Where the matches a sequence produces go: into the result of the query,
+/// counted against its result limit, or into a buffer the query keeps while it
+/// runs, charged to that buffer's ledger.
 #[derive(Clone, Copy)]
 pub(crate) enum Output<'l, 'b> {
 	Final,
 	Buffered(&'l Ledger<'b>),
-}
-
-impl Output<'_, '_> {
-	pub(crate) fn hold(&self, amount: u64) -> Result<()> {
-		match self {
-			Output::Final => Ok(()),
-			Output::Buffered(ledger) => ledger.hold(amount),
-		}
-	}
 }

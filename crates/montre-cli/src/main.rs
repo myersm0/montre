@@ -671,6 +671,7 @@ fn cmd_serve(
 		corpus_path,
 		socket_path,
 		idle_timeout,
+		limits: montre_daemon::DEFAULT_LIMITS,
 	};
 
 	montre_daemon::serve(options).map_err(anyhow::Error::from)

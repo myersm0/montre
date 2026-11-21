@@ -1828,6 +1828,7 @@ mod tests {
 			canonical_path: canonical.to_path_buf(),
 			state_dir,
 			results: Arc::new(RwLock::new(HashMap::new())),
+			limits: crate::DEFAULT_LIMITS,
 		});
 		State::new(1, handle, crate::shutdown::ShutdownCoordinator::dummy())
 	}

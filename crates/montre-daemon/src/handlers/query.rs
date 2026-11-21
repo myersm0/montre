@@ -58,7 +58,8 @@ pub(crate) fn handle_query_execute(
 	let ast = montre_query::parse(&parsed.cql).map_err(map_query_error)?;
 	let plan = montre_query::planner::plan(&ast).map_err(map_query_error)?;
 	let mut results =
-		montre_query::executor::execute(&plan, &ctx.handle.corpus).map_err(map_query_error)?;
+		montre_query::executor::execute_with(&plan, &ctx.handle.corpus, &ctx.handle.limits)
+			.map_err(map_query_error)?;
 	results.populate_context(&ctx.handle.corpus);
 	let hits = results.into_hits();
 
@@ -79,8 +80,9 @@ pub(crate) fn handle_query_execute_count(
 
 	let ast = montre_query::parse(&parsed.cql).map_err(map_query_error)?;
 	let plan = montre_query::planner::plan(&ast).map_err(map_query_error)?;
-	let count = montre_query::executor::execute_count(&plan, &ctx.handle.corpus)
-		.map_err(map_query_error)?;
+	let count =
+		montre_query::executor::execute_count_with(&plan, &ctx.handle.corpus, &ctx.handle.limits)
+			.map_err(map_query_error)?;
 
 	serialize_reply(QueryExecuteCountReply {
 		count: count as u64,
@@ -188,8 +190,12 @@ pub(crate) fn handle_query_load(
 		LoadOutcome::Pending { handle, cql, created_at } => {
 			let ast = montre_query::parse(&cql).map_err(stored_query_invalid)?;
 			let plan = montre_query::planner::plan(&ast).map_err(stored_query_invalid)?;
-			let mut results = montre_query::executor::execute(&plan, &ctx.handle.corpus)
-				.map_err(stored_query_invalid)?;
+			let mut results = montre_query::executor::execute_with(
+				&plan,
+				&ctx.handle.corpus,
+				&ctx.handle.limits,
+			)
+			.map_err(stored_query_invalid)?;
 			results.populate_context(&ctx.handle.corpus);
 			let hits = results.into_hits();
 			let hit_count = hits.len() as u64;
@@ -221,7 +227,11 @@ pub(crate) fn handle_query_load(
 	}
 }
 
+// a stored query refused by a limit is still a valid query
 fn stored_query_invalid(error: QueryError) -> ProtocolError {
+	if let QueryError::LimitExceeded { .. } = error {
+		return map_query_error(error);
+	}
 	let mapped = map_query_error(error);
 	ProtocolError::new(
 		error_codes::STORED_QUERY_INVALID,
@@ -287,6 +297,52 @@ mod tests {
 		let result = dispatch_request("query.execute", Some(params), ctx).unwrap();
 		let reply: ResultMetadata = serde_json::from_value(result).unwrap();
 		reply.handle
+	}
+
+	fn with_limits(ctx: &mut crate::dispatch::RpcContext, limits: montre_query::Limits) {
+		let handle = &ctx.handle;
+		ctx.handle = Arc::new(crate::CorpusHandle {
+			corpus: Arc::clone(&handle.corpus),
+			corpus_id: handle.corpus_id.clone(),
+			canonical_path: handle.canonical_path.clone(),
+			state_dir: handle.state_dir.clone(),
+			results: Arc::clone(&handle.results),
+			limits,
+		});
+	}
+
+	#[test]
+	fn default_limits_are_finite() {
+		let limits = crate::DEFAULT_LIMITS;
+		assert!(limits.max_intermediate_matches < u64::MAX);
+		assert!(limits.max_expansions < u64::MAX);
+		assert!(limits.max_results < u64::MAX);
+	}
+
+	#[test]
+	fn query_execute_refuses_a_result_over_the_limit() {
+		with_registered_context(|ctx| {
+			with_limits(ctx, montre_query::Limits { max_results: 1, ..crate::DEFAULT_LIMITS });
+			let params = serde_json::json!({ "cql": "[pos=\"NOUN\"]" });
+			let err = dispatch_request("query.execute", Some(params.clone()), ctx).unwrap_err();
+			assert_eq!(err.code, error_codes::EXECUTION_ERROR);
+			assert!(err.message.contains("results"), "{}", err.message);
+			// a count builds no hits, so the result limit does not apply to it
+			let result = dispatch_request("query.execute_count", Some(params), ctx).unwrap();
+			let reply: QueryExecuteCountReply = serde_json::from_value(result).unwrap();
+			assert!(reply.count > 1);
+		});
+	}
+
+	#[test]
+	fn query_execute_count_refuses_work_over_the_limit() {
+		with_registered_context(|ctx| {
+			with_limits(ctx, montre_query::Limits { max_expansions: 10, ..crate::DEFAULT_LIMITS });
+			let params = serde_json::json!({ "cql": "[]{1,3} [pos=\"NOUN\"]" });
+			let err = dispatch_request("query.execute_count", Some(params), ctx).unwrap_err();
+			assert_eq!(err.code, error_codes::EXECUTION_ERROR);
+			assert!(err.message.contains("expansions"), "{}", err.message);
+		});
 	}
 
 	#[test]

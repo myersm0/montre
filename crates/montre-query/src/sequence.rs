@@ -13,8 +13,8 @@ pub(crate) const MAX_QUANTIFIER: u32 = 100;
 // pattern proportional to the batch instead of the document
 const SEED_BATCH: usize = 256;
 
-// partial matches created between two looks at the budget
-const CHARGE_STRIDE: usize = 4096;
+// matches created between two looks at the budget
+pub(crate) const CHARGE_STRIDE: usize = 4096;
 
 /// Index of a label among the labels of the query, in query order.
 pub(crate) type LabelId = usize;
@@ -277,6 +277,10 @@ fn matches_starting_at(table: &[Match], position: u64) -> impl Iterator<Item = &
 /// Decides the constraint at an index for a capture assignment.
 pub(crate) type Holds<'a> = &'a (dyn Fn(usize, &[Slot]) -> bool + Sync);
 
+/// Decides whether a match spanning (start, end) passes the span, component
+/// and document filters above the sequence.
+pub(crate) type Keep<'a> = &'a (dyn Fn(u64, u64) -> bool + Sync);
+
 pub(crate) struct Sequence {
 	steps: Vec<Step>,
 	seed_steps: usize,
@@ -362,11 +366,13 @@ impl Sequence {
 		}
 	}
 
-	/// Non-empty matches lying inside `range`, sorted by (start, end, captures).
+	/// Non-empty matches lying inside `range` that `keep` accepts, sorted by
+	/// (start, end, captures).
 	pub(crate) fn matches_in<T: Track>(
 		&self,
 		range: Span,
 		holds: Holds,
+		keep: Keep,
 		budget: &Budget,
 		output: Output,
 	) -> Result<Vec<Match>> {
@@ -378,7 +384,7 @@ impl Sequence {
 			matches.extend(
 				active
 					.into_iter()
-					.filter(|partial| partial.end > partial.start)
+					.filter(|partial| partial.end > partial.start && keep(partial.start, partial.end))
 					.map(|partial| Match {
 						start: partial.start,
 						end: partial.end,
@@ -386,28 +392,37 @@ impl Sequence {
 					}),
 			);
 			matches[first_new..].sort_unstable();
+			let emitted = matches.len() - first_new;
 			// matches bound for a buffer stay charged, to that buffer's ledger
 			let buffered = match output {
 				Output::Final => 0,
 				Output::Buffered(ledger) => {
-					let emitted = matches.len() - first_new;
 					ledger.adopt(self.cost(emitted));
 					emitted
 				}
 			};
 			budget.release(self.cost(surviving - buffered));
+			if let Output::Final = output {
+				budget.report(emitted)?;
+			}
 		}
 		Ok(matches)
 	}
 
 	/// The number of matches `matches_in` would return, without building them.
-	pub(crate) fn count_in(&self, range: Span, budget: &Budget) -> Result<usize> {
+	pub(crate) fn count_in<T: Track>(
+		&self,
+		range: Span,
+		holds: Holds,
+		keep: Keep,
+		budget: &Budget,
+	) -> Result<usize> {
 		let mut count = 0;
 		for seeds in self.seeds(range).chunks(SEED_BATCH) {
-			let active = self.extend_seeds::<()>(seeds, range.end, &|_, _| true, budget)?;
+			let active = self.extend_seeds::<T>(seeds, range.end, holds, budget)?;
 			count += active
 				.iter()
-				.filter(|partial| partial.end > partial.start)
+				.filter(|partial| partial.end > partial.start && keep(partial.start, partial.end))
 				.count();
 			budget.release(self.cost(active.len()));
 		}
@@ -552,7 +567,7 @@ mod tests {
 
 	fn spans(sequence: &Sequence, end: u64) -> Vec<(u64, u64)> {
 		sequence
-			.matches_in::<()>(Span::new(0, end), &|_, _| true, &unlimited(), Output::Final)
+			.matches_in::<()>(Span::new(0, end), &|_, _| true, &|_, _| true, &unlimited(), Output::Final)
 			.unwrap()
 			.into_iter()
 			.map(|found| (found.start, found.end))
@@ -561,7 +576,7 @@ mod tests {
 
 	fn assignments(sequence: &Sequence, end: u64, holds: Holds) -> Vec<Match> {
 		sequence
-			.matches_in::<Slots>(Span::new(0, end), holds, &unlimited(), Output::Final)
+			.matches_in::<Slots>(Span::new(0, end), holds, &|_, _| true, &unlimited(), Output::Final)
 			.unwrap()
 	}
 
@@ -699,7 +714,7 @@ mod tests {
 	fn budget_is_returned_once_results_are_final() {
 		let budget = unlimited();
 		floating_pair(Bindings::Canonical)
-			.matches_in::<Slots>(Span::new(0, 5), &|_, _| true, &budget, Output::Final)
+			.matches_in::<Slots>(Span::new(0, 5), &|_, _| true, &|_, _| true, &budget, Output::Final)
 			.unwrap();
 		assert_eq!(budget.held(), 0);
 	}
@@ -709,7 +724,13 @@ mod tests {
 		let budget = unlimited();
 		let ledger = Ledger::new(&budget);
 		let found = floating_pair(Bindings::All)
-			.matches_in::<Slots>(Span::new(0, 5), &|_, _| true, &budget, Output::Buffered(&ledger))
+			.matches_in::<Slots>(
+				Span::new(0, 5),
+				&|_, _| true,
+				&|_, _| true,
+				&budget,
+				Output::Buffered(&ledger),
+			)
 			.unwrap();
 		assert_eq!(budget.held(), found.len() as u64);
 		drop(ledger);
@@ -727,11 +748,12 @@ mod tests {
 		let limit = 60_000;
 		let budget = Budget::new(Limits {
 			max_intermediate_matches: limit,
-			max_expansions: u64::MAX,
+			..Limits::unlimited()
 		});
 		let ledger = Ledger::new(&budget);
 		let outcome = wide_spans().matches_in::<()>(
 			Span::new(0, 5000),
+			&|_, _| true,
 			&|_, _| true,
 			&budget,
 			Output::Buffered(&ledger),
@@ -745,11 +767,44 @@ mod tests {
 	fn counting_does_not_build_the_matches() {
 		let budget = Budget::new(Limits {
 			max_intermediate_matches: 60_000,
-			max_expansions: u64::MAX,
+			..Limits::unlimited()
 		});
 		let expected: usize = (1..=100).map(|length| 5000 - length + 1).sum();
-		assert_eq!(wide_spans().count_in(Span::new(0, 5000), &budget).unwrap(), expected);
+		let counted = wide_spans()
+			.count_in::<()>(Span::new(0, 5000), &|_, _| true, &|_, _| true, &budget)
+			.unwrap();
+		assert_eq!(counted, expected);
 		assert_eq!(budget.held(), 0);
+	}
+
+	#[test]
+	fn results_are_counted_after_filtering() {
+		// 495,050 spans, of which only those inside [0, 50) are kept: 3,725
+		let budget = Budget::new(Limits {
+			max_results: 4_000,
+			..Limits::unlimited()
+		});
+		let inside = |start: u64, end: u64| start < 50 && end <= 50;
+		let found = wide_spans()
+			.matches_in::<()>(Span::new(0, 5000), &|_, _| true, &inside, &budget, Output::Final)
+			.unwrap();
+		assert_eq!(found.len(), (1..=50).map(|length| 50 - length + 1).sum::<usize>());
+
+		let tight = Budget::new(Limits {
+			max_results: 1_000,
+			..Limits::unlimited()
+		});
+		let outcome = wide_spans().matches_in::<()>(
+			Span::new(0, 5000),
+			&|_, _| true,
+			&inside,
+			&tight,
+			Output::Final,
+		);
+		assert!(matches!(
+			outcome,
+			Err(QueryError::LimitExceeded { resource: "results", limit: 1_000 })
+		));
 	}
 
 	#[test]
@@ -768,17 +823,18 @@ mod tests {
 		};
 		let budget = unlimited();
 		let found = unlabeled(vec![group()])
-			.matches_in::<()>(Span::new(0, 200), &|_, _| true, &budget, Output::Final)
+			.matches_in::<()>(Span::new(0, 200), &|_, _| true, &|_, _| true, &budget, Output::Final)
 			.unwrap();
 		assert!(!found.is_empty());
 		assert_eq!(budget.held(), 0);
 
 		let tight = Budget::new(Limits {
 			max_intermediate_matches: 300,
-			max_expansions: u64::MAX,
+			..Limits::unlimited()
 		});
 		let outcome = unlabeled(vec![group()]).matches_in::<()>(
 			Span::new(0, 200),
+			&|_, _| true,
 			&|_, _| true,
 			&tight,
 			Output::Final,
@@ -792,6 +848,7 @@ mod tests {
 			floating_pair(Bindings::Canonical).matches_in::<Slots>(
 				Span::new(0, 5),
 				&|_, _| true,
+				&|_, _| true,
 				&Budget::new(limits),
 				Output::Final,
 			)
@@ -799,14 +856,14 @@ mod tests {
 		assert!(matches!(
 			run(Limits {
 				max_intermediate_matches: 8,
-				max_expansions: u64::MAX,
+				..Limits::unlimited()
 			}),
 			Err(QueryError::LimitExceeded { resource: "intermediate matches", limit: 8 })
 		));
 		assert!(matches!(
 			run(Limits {
-				max_intermediate_matches: u64::MAX,
 				max_expansions: 10,
+				..Limits::unlimited()
 			}),
 			Err(QueryError::LimitExceeded { resource: "expansions", limit: 10 })
 		));
