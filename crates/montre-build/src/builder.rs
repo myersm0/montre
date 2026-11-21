@@ -27,6 +27,17 @@ fn default_forward_only_layers() -> HashSet<String> {
 	set
 }
 
+impl IndexSink {
+	pub(crate) fn present_forward_only_layers(&self) -> Vec<String> {
+		self.layer_indices
+			.iter()
+			.map(|(name, _)| name)
+			.filter(|name| self.forward_only_layers.contains(*name))
+			.cloned()
+			.collect()
+	}
+}
+
 pub struct IndexSink {
 	pub(crate) inverted: InMemoryInverted,
 	pub(crate) forward: Option<InMemoryForward>,
@@ -470,6 +481,7 @@ impl CorpusBuilder {
 			document_names: self.sink.document_names.clone(),
 			components: Vec::new(),
 			alignments: Vec::new(),
+			forward_only_layers: self.sink.present_forward_only_layers(),
 		};
 
 		let path = output_path.as_ref();

@@ -47,6 +47,8 @@ pub struct CorpusMeta {
 	pub components: Vec<ComponentMeta>,
 	#[serde(default)]
 	pub alignments: Vec<AlignmentMeta>,
+	#[serde(default)]
+	pub forward_only_layers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -117,8 +119,18 @@ impl Corpus {
 		let meta_path = path.join("corpus.json");
 		let meta_str = std::fs::read_to_string(&meta_path)
 			.map_err(|e| IndexError::Format(format!("Failed to read corpus.json: {}", e)))?;
-		let meta: CorpusMeta = serde_json::from_str(&meta_str)
+		let mut meta: CorpusMeta = serde_json::from_str(&meta_str)
 			.map_err(|e| IndexError::Format(format!("Failed to parse corpus.json: {}", e)))?;
+
+		// a corpus built without a manifest is one component named after the corpus
+		if meta.components.is_empty() {
+			meta.components.push(ComponentMeta {
+				id: 0,
+				name: meta.name.clone(),
+				language: String::new(),
+				document_range: (0, meta.document_names.len()),
+			});
+		}
 
 		if meta.version != crate::index_version {
 			return Err(IndexError::VersionMismatch {
@@ -232,6 +244,12 @@ impl Corpus {
 		&self.meta.span_layers
 	}
 
+	/// True for a layer stored for retrieval but left out of the inverted index.
+	/// Corpora built before this was recorded report false for every layer.
+	pub fn is_forward_only(&self, layer: &str) -> bool {
+		self.meta.forward_only_layers.iter().any(|name| name == layer)
+	}
+
 	pub fn layer_kind(&self, layer: &str) -> Option<LayerKind> {
 		self.forward.layer_kind(layer)
 	}
@@ -296,6 +314,8 @@ impl Corpus {
 			.collect()
 	}
 
+	/// Never empty: a corpus built without a manifest has a single component
+	/// named after the corpus and covering every document.
 	pub fn components(&self) -> &[ComponentMeta] {
 		&self.meta.components
 	}

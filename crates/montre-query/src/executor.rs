@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use montre_core::{Span, UnitId, span_containing};
@@ -6,8 +7,14 @@ use rayon::prelude::*;
 use roaring::RoaringBitmap;
 
 use crate::ast::{CmpOp, GlobalConstraint, LabelAttr};
+use crate::budget::{Budget, Ledger, Limits, Output};
 use crate::planner::{PlanNode, QueryPlan, SequenceStep};
-use crate::Result;
+use crate::sequence::{
+	Bindings, Keep, LabelId, Match, Matcher, Run, Sequence, Slot, Slots, Step, CHARGE_STRIDE,
+	MAX_QUANTIFIER, UNBOUND, runs_from_bitmap,
+};
+use crate::validate::validate;
+use crate::{QueryError, Result};
 
 #[derive(Debug, Clone)]
 pub struct Hit {
@@ -28,12 +35,6 @@ impl Hit {
 			captures: Vec::new(),
 		}
 	}
-}
-
-#[derive(Debug, Clone)]
-struct ActiveMatch {
-	start: u64,
-	captures: Vec<(String, Span)>,
 }
 
 pub struct Results {
@@ -105,426 +106,636 @@ impl<'a> IntoIterator for &'a Results {
 	}
 }
 
+/// Hits come back sorted by (start, end), one per distinct span. A match never
+/// extends past the document it starts in.
 pub fn execute(plan: &QueryPlan, corpus: &Corpus) -> Result<Results> {
-	let hits = execute_node(&plan.root, corpus)?;
+	execute_with(plan, corpus, &Limits::default())
+}
+
+pub fn execute_with(plan: &QueryPlan, corpus: &Corpus, limits: &Limits) -> Result<Results> {
+	validate(&plan.root, corpus)?;
+	let context = Context::new(&plan.root, corpus, limits);
+	if plan.root.is_token_level() {
+		let bitmap = context.token_bitmap(&plan.root)?;
+		context.budget.report(bitmap.len() as usize)?;
+		let hits = bitmap
+			.iter()
+			.map(u64::from)
+			.map(|position| Hit::new(Span::new(position, position + 1)))
+			.collect();
+		return Ok(Results::new(hits));
+	}
+	let hits = context
+		.results(&plan.root)?
+		.into_iter()
+		.map(|found| context.hit(found))
+		.collect();
 	Ok(Results::new(hits))
 }
 
 pub fn execute_count(plan: &QueryPlan, corpus: &Corpus) -> Result<usize> {
-	count_node(&plan.root, corpus)
+	execute_count_with(plan, corpus, &Limits::default())
 }
 
-fn count_node(node: &PlanNode, corpus: &Corpus) -> Result<usize> {
-	match node {
-		PlanNode::ScanLiteral { layer, value } => {
-			Ok(corpus.inverted().get(layer, value).map(|b| b.len() as usize).unwrap_or(0))
+pub fn execute_count_with(plan: &QueryPlan, corpus: &Corpus, limits: &Limits) -> Result<usize> {
+	validate(&plan.root, corpus)?;
+	Context::new(&plan.root, corpus, limits).count(&plan.root)
+}
+
+struct Context<'a> {
+	corpus: &'a Corpus,
+	labels: Vec<String>,
+	budget: Budget,
+}
+
+impl<'a> Context<'a> {
+	fn new(root: &PlanNode, corpus: &'a Corpus, limits: &Limits) -> Self {
+		let mut labels = Vec::new();
+		root.collect_labels(&mut labels);
+		Self {
+			corpus,
+			labels,
+			budget: Budget::new(*limits),
+		}
+	}
+
+	fn hit(&self, found: Match) -> Hit {
+		let mut hit = Hit::new(Span::new(found.start, found.end));
+		hit.captures = found
+			.captures
+			.into_iter()
+			.enumerate()
+			.filter(|(_, slot)| *slot != UNBOUND)
+			.map(|(label, (start, end))| (self.labels[label].clone(), Span::new(start, end)))
+			.collect();
+		hit
+	}
+
+	fn label_id(&self, name: &str) -> Option<LabelId> {
+		self.labels.iter().position(|label| label == name)
+	}
+
+	// The hits of the query. A sequence, under any span, component and
+	// document filters and a constraint it can apply as it runs, produces them
+	// batch by batch; so does a token-level pattern. Any other shape is built as
+	// an intermediate buffer and then reported whole.
+	fn results(&self, root: &PlanNode) -> Result<Vec<Match>> {
+		let (core, checks, filters) = self.peel(root);
+		let keep = |start: u64, end: u64| self.accepts(&filters, start, end);
+
+		if core.is_token_level() {
+			let slot_count = self.labels.len();
+			// a filter may keep few of the positions, so the result grows as they are found
+			let mut found = Vec::new();
+			for position in self.token_bitmap(core)?.iter().map(u64::from) {
+				if keep(position, position + 1) {
+					found.push(Match::unlabeled(position, position + 1, slot_count));
+					if found.len() % CHARGE_STRIDE == 0 {
+						self.budget.report(CHARGE_STRIDE)?;
+					}
+				}
+			}
+			self.budget.report(found.len() % CHARGE_STRIDE)?;
+			return Ok(found);
 		}
 
-		PlanNode::ScanAll => {
-			Ok(corpus.token_count() as usize)
+		if let PlanNode::SequenceScan { steps } = core {
+			return self.sequence_matches(steps, Bindings::Canonical, &checks, Output::Final, &keep);
 		}
 
-		PlanNode::ScanRegex { layer, pattern } => {
-			let re = regex::Regex::new(pattern)?;
-			let mut combined = RoaringBitmap::new();
-			if let Some(values) = corpus.inverted().values(layer) {
-				for value in values {
-					if re.is_match(value) {
-						if let Some(bitmap) = corpus.inverted().get(layer, value) {
+		let built = Ledger::new(&self.budget);
+		let mut found = self.matches(core, Bindings::Canonical, &[], &built)?;
+		found.retain(|found| keep(found.start, found.end));
+		self.budget.report(found.len())?;
+		Ok(found)
+	}
+
+	fn count(&self, root: &PlanNode) -> Result<usize> {
+		let inverted = self.corpus.inverted();
+		let token_count = self.corpus.token_count() as usize;
+		match root {
+			PlanNode::ScanLiteral { layer, value } => {
+				return Ok(inverted.get(layer, value).map_or(0, |bitmap| bitmap.len() as usize));
+			}
+			PlanNode::ScanAll => return Ok(token_count),
+			PlanNode::Difference { base, subtract } => {
+				if let (PlanNode::ScanAll, PlanNode::ScanLiteral { layer, value }) =
+					(base.as_ref(), subtract.as_ref())
+				{
+					let subtracted = inverted.get(layer, value).map_or(0, |bitmap| bitmap.len());
+					return Ok(token_count - subtracted as usize);
+				}
+			}
+			_ => {}
+		}
+
+		let (core, checks, filters) = self.peel(root);
+		let keep = |start: u64, end: u64| self.accepts(&filters, start, end);
+
+		if core.is_token_level() {
+			let bitmap = self.token_bitmap(core)?;
+			if filters.is_empty() {
+				return Ok(bitmap.len() as usize);
+			}
+			return Ok(bitmap
+				.iter()
+				.map(u64::from)
+				.filter(|&position| keep(position, position + 1))
+				.count());
+		}
+
+		if let PlanNode::SequenceScan { steps } = core {
+			let prepared = self.prepare(steps, Bindings::Canonical, &checks)?;
+			let sequence = &prepared.sequence;
+			let holds = |check: usize, slots: &[Slot]| self.holds(&checks[check], slots);
+			// without a constraint to decide, which captures a span has is beside the point
+			let count_in = |range: &Span| match checks.is_empty() {
+				true => sequence.count_in::<()>(*range, &holds, &keep, &self.budget),
+				false => sequence.count_in::<Slots>(*range, &holds, &keep, &self.budget),
+			};
+			let ranges = self.ranges();
+			return match runs_in_parallel(steps, &ranges) {
+				true => ranges.par_iter().map(count_in).sum(),
+				false => ranges.iter().map(count_in).sum(),
+			};
+		}
+
+		let built = Ledger::new(&self.budget);
+		let found = self.matches(core, Bindings::Canonical, &[], &built)?;
+		Ok(found.iter().filter(|found| keep(found.start, found.end)).count())
+	}
+
+	// Split off the span, component and document filters above `root`, and a
+	// constraint that its sequence can apply as it runs. What remains is the
+	// node that produces the matches those filters and checks then act on.
+	fn peel<'n>(&self, root: &'n PlanNode) -> (&'n PlanNode, Vec<Check>, Vec<Filter<'a>>) {
+		let mut core = root;
+		let mut checks = Vec::new();
+		let mut filters = Vec::new();
+		loop {
+			match core {
+				PlanNode::FilterBySpan { inner, span_layer } => {
+					let spans = self.corpus.spans().spans(span_layer).unwrap_or(&[]);
+					filters.push(Filter::Within(spans));
+					core = inner;
+				}
+				PlanNode::FilterByComponent { inner, components } => {
+					let document_count = self.documents().len();
+					let mut allowed = vec![false; document_count];
+					for component in components.iter().filter_map(|name| self.corpus.component(name)) {
+						let (first, end) = component.document_range;
+						allowed[first.min(document_count)..end.min(document_count)].fill(true);
+					}
+					filters.push(Filter::Documents(allowed));
+					core = inner;
+				}
+				PlanNode::FilterByDocument { inner, documents } => {
+					let mut allowed = vec![false; self.documents().len()];
+					for index in self.corpus.document_indices_by_name(documents) {
+						if let Some(slot) = allowed.get_mut(index) {
+							*slot = true;
+						}
+					}
+					filters.push(Filter::Documents(allowed));
+					core = inner;
+				}
+				PlanNode::GlobalConstraintFilter { inner, constraints } if applies_checks(inner) => {
+					checks = self.compile(constraints);
+					core = inner;
+				}
+				_ => return (core, checks, filters),
+			}
+		}
+	}
+
+	fn accepts(&self, filters: &[Filter], start: u64, end: u64) -> bool {
+		filters.iter().all(|filter| match filter {
+			Filter::Within(spans) => fits_within_one(spans, start, end).is_some(),
+			Filter::Documents(allowed) => fits_within_one(self.documents(), start, end)
+				.is_some_and(|document| allowed[document]),
+		})
+	}
+
+	fn documents(&self) -> &'a [Span] {
+		self.corpus.spans().spans("document").unwrap_or(&[])
+	}
+
+	/// Matches sorted by (start, end, captures), built as an intermediate
+	/// buffer and charged to `ledger` as they are produced. `checks` are
+	/// constraints the node applies while it runs; only a node for which
+	/// `applies_checks` holds is handed any.
+	fn matches(
+		&self,
+		node: &PlanNode,
+		bindings: Bindings,
+		checks: &[Check],
+		ledger: &Ledger,
+	) -> Result<Vec<Match>> {
+		if node.is_token_level() {
+			let slot_count = self.labels.len();
+			let bitmap = self.token_bitmap(node)?;
+			ledger.hold(self.cost(bitmap.len() as usize))?;
+			return Ok(bitmap
+				.iter()
+				.map(u64::from)
+				.map(|position| Match::unlabeled(position, position + 1, slot_count))
+				.collect());
+		}
+
+		match node {
+			PlanNode::Union(nodes) => {
+				let mut matches = Vec::new();
+				for node in nodes {
+					matches.extend(self.matches(node, bindings, &[], ledger)?);
+				}
+				matches.sort_unstable();
+				Ok(deduplicated(matches, bindings))
+			}
+
+			PlanNode::SequenceScan { steps } => {
+				self.sequence_matches(steps, bindings, checks, Output::Buffered(ledger), &|_, _| true)
+			}
+
+			PlanNode::FilterBySpan { .. }
+			| PlanNode::FilterByComponent { .. }
+			| PlanNode::FilterByDocument { .. } => {
+				// a constraint beneath the filters is peeled with them, and joins the caller's
+				let (core, own, filters) = self.peel(node);
+				let checks: Vec<Check> = checks.iter().cloned().chain(own).collect();
+				let keep = |start: u64, end: u64| self.accepts(&filters, start, end);
+				if let PlanNode::SequenceScan { steps } = core {
+					return self.sequence_matches(steps, bindings, &checks, Output::Buffered(ledger), &keep);
+				}
+				let mut matches = self.matches(core, bindings, &checks, ledger)?;
+				matches.retain(|found| keep(found.start, found.end));
+				Ok(matches)
+			}
+
+			PlanNode::ProjectAlignment { inner, alignment } => self.projected(inner, alignment, ledger),
+
+			PlanNode::GlobalConstraintFilter { inner, constraints } => {
+				let own = self.compile(constraints);
+				if applies_checks(inner) {
+					return self.matches(inner, bindings, &own, ledger);
+				}
+				// every assignment is enumerated, charged to a ledger of its own,
+				// and only the survivors are passed on
+				let enumerated = Ledger::new(&self.budget);
+				let mut matches = self.matches(inner, Bindings::All, &[], &enumerated)?;
+				matches.retain(|found| own.iter().all(|check| self.holds(check, &found.captures)));
+				let matches = deduplicated(matches, bindings);
+				ledger.hold(self.cost(matches.len()))?;
+				Ok(matches)
+			}
+
+			_ => Err(QueryError::Execution(
+				"token-level operator applied to a multi-token pattern".into(),
+			)),
+		}
+	}
+
+	fn cost(&self, matches: usize) -> u64 {
+		matches as u64 * (1 + self.labels.len() as u64 / 4)
+	}
+
+	fn token_bitmap(&self, node: &PlanNode) -> Result<Cow<'a, RoaringBitmap>> {
+		let inverted = self.corpus.inverted();
+		match node {
+			PlanNode::ScanLiteral { layer, value } => Ok(inverted
+				.get(layer, value)
+				.map_or_else(|| Cow::Owned(RoaringBitmap::new()), Cow::Borrowed)),
+
+			PlanNode::ScanRegex { layer, pattern } => {
+				let regex = regex::Regex::new(pattern)?;
+				let mut combined = RoaringBitmap::new();
+				for value in inverted.values(layer).unwrap_or_default() {
+					if regex.is_match(value) {
+						if let Some(bitmap) = inverted.get(layer, value) {
 							combined |= bitmap;
 						}
 					}
 				}
-			}
-			Ok(combined.len() as usize)
-		}
-
-		PlanNode::SequenceScan { steps } => count_sequence(steps, corpus),
-
-		PlanNode::Difference { base, subtract } => {
-			match (base.as_ref(), subtract.as_ref()) {
-				(PlanNode::ScanAll, PlanNode::ScanLiteral { layer, value }) => {
-					let total = corpus.token_count() as usize;
-					let excluded = corpus.inverted().get(layer, value)
-						.map(|b| b.len() as usize)
-						.unwrap_or(0);
-					Ok(total - excluded)
-				}
-				_ => {
-					let hits = execute_node(node, corpus)?;
-					Ok(hits.len())
-				}
-			}
-		}
-
-		_ => {
-			let hits = execute_node(node, corpus)?;
-			Ok(hits.len())
-		}
-	}
-}
-
-fn execute_node(node: &PlanNode, corpus: &Corpus) -> Result<Vec<Hit>> {
-	match node {
-		PlanNode::ScanLiteral { layer, value } => {
-			let Some(bitmap) = corpus.inverted().get(layer, value) else {
-				return Ok(Vec::new());
-			};
-
-			let hits: Vec<Hit> = bitmap
-				.iter()
-				.map(|pos| Hit::new(Span::new(pos as u64, pos as u64 + 1)))
-				.collect();
-
-			Ok(hits)
-		}
-
-		PlanNode::ScanRegex { layer, pattern } => {
-			let re = regex::Regex::new(pattern)?;
-			let mut positions = Vec::new();
-
-			if let Some(values) = corpus.inverted().values(layer) {
-				for value in values {
-					if re.is_match(value) {
-						if let Some(bitmap) = corpus.inverted().get(layer, value) {
-							positions.extend(bitmap.iter().map(|p| p as u64));
-						}
-					}
-				}
+				Ok(Cow::Owned(combined))
 			}
 
-			positions.sort_unstable();
-			positions.dedup();
-
-			let hits = positions
-				.into_iter()
-				.map(|pos| Hit::new(Span::new(pos, pos + 1)))
-				.collect();
-
-			Ok(hits)
-		}
-
-		PlanNode::ScanAll => {
-			let token_count = corpus.token_count();
-			let hits = (0..token_count)
-				.map(|pos| Hit::new(Span::new(pos, pos + 1)))
-				.collect();
-			Ok(hits)
-		}
-
-		PlanNode::Intersect(nodes) => {
-			if nodes.is_empty() {
-				return Ok(Vec::new());
+			PlanNode::ScanAll => {
+				let mut all = RoaringBitmap::new();
+				all.insert_range(0..self.corpus.token_count() as u32);
+				Ok(Cow::Owned(all))
 			}
 
-			let mut result_positions: Option<HashSet<u64>> = None;
-
-			for node in nodes {
-				let hits = execute_node(node, corpus)?;
-				let positions: HashSet<u64> = hits.iter().map(|h| h.span.start).collect();
-
-				result_positions = Some(match result_positions {
-					None => positions,
-					Some(existing) => existing.intersection(&positions).copied().collect(),
-				});
-			}
-
-			let mut positions: Vec<u64> = result_positions.unwrap_or_default().into_iter().collect();
-			positions.sort_unstable();
-
-			let hits = positions
-				.into_iter()
-				.map(|pos| Hit::new(Span::new(pos, pos + 1)))
-				.collect();
-
-			Ok(hits)
-		}
-
-		PlanNode::Union(nodes) => {
-			let mut all_positions = HashSet::new();
-
-			for node in nodes {
-				let hits = execute_node(node, corpus)?;
-				for hit in hits {
-					all_positions.insert(hit.span.start);
-				}
-			}
-
-			let mut positions: Vec<u64> = all_positions.into_iter().collect();
-			positions.sort_unstable();
-
-			let hits = positions
-				.into_iter()
-				.map(|pos| Hit::new(Span::new(pos, pos + 1)))
-				.collect();
-
-			Ok(hits)
-		}
-
-		PlanNode::Difference { base, subtract } => {
-			let base_hits = execute_node(base, corpus)?;
-			let subtract_hits = execute_node(subtract, corpus)?;
-
-			let subtract_positions: HashSet<u64> =
-				subtract_hits.iter().map(|h| h.span.start).collect();
-
-			let hits = base_hits
-				.into_iter()
-				.filter(|h| !subtract_positions.contains(&h.span.start))
-				.collect();
-
-			Ok(hits)
-		}
-
-		PlanNode::FilterBySpan { inner, span_layer } => {
-			let hits = execute_node(inner, corpus)?;
-
-			let Some(spans) = corpus.spans().spans(span_layer) else {
-				return Ok(hits);
-			};
-
-			let hits = hits
-				.into_iter()
-				.filter(|hit| {
-					span_containing(spans, hit.span.start)
-						.map(|idx| hit.span.end <= spans[idx].end)
-						.unwrap_or(false)
-				})
-				.collect();
-
-			Ok(hits)
-		}
-
-		PlanNode::FilterByComponent { inner, components } => {
-			let hits = execute_node(inner, corpus)?;
-
-			let comp_metas: Vec<&ComponentMeta> = components
-				.iter()
-				.filter_map(|name| corpus.component(name))
-				.collect();
-
-			if comp_metas.is_empty() {
-				return Ok(Vec::new());
-			}
-
-			let Some(doc_spans) = corpus.spans().spans("document") else {
-				return Ok(Vec::new());
-			};
-
-			let hits = hits
-				.into_iter()
-				.filter(|hit| {
-					span_containing(doc_spans, hit.span.start)
-						.map(|doc_idx| {
-							hit.span.end <= doc_spans[doc_idx].end
-								&& comp_metas.iter().any(|comp| {
-									doc_idx >= comp.document_range.0
-										&& doc_idx < comp.document_range.1
-								})
-						})
-						.unwrap_or(false)
-				})
-				.collect();
-
-			Ok(hits)
-		}
-
-		PlanNode::FilterByDocument { inner, documents } => {
-			let hits = execute_node(inner, corpus)?;
-
-			let Some(doc_spans) = corpus.spans().spans("document") else {
-				return Ok(Vec::new());
-			};
-
-			let matching_indices: HashSet<usize> = corpus
-				.document_names()
-				.iter()
-				.enumerate()
-				.filter(|(_, name)| documents.iter().any(|d| d == name.as_str()))
-				.map(|(idx, _)| idx)
-				.collect();
-
-			if matching_indices.is_empty() {
-				return Ok(Vec::new());
-			}
-
-			let hits = hits
-				.into_iter()
-				.filter(|hit| {
-					span_containing(doc_spans, hit.span.start)
-						.map(|doc_idx| {
-							hit.span.end <= doc_spans[doc_idx].end
-								&& matching_indices.contains(&doc_idx)
-						})
-						.unwrap_or(false)
-				})
-				.collect();
-
-			Ok(hits)
-		}
-
-		PlanNode::ProjectAlignment { inner, alignment } => {
-			let source_hits = execute_node(inner, corpus)?;
-
-			let Some(edges) = corpus.alignment_edges(alignment) else {
-				return Err(crate::QueryError::Execution(format!(
-					"Alignment not found: {}",
-					alignment
-				)));
-			};
-
-			let Some(align_meta) = corpus.alignment_meta(alignment) else {
-				return Err(crate::QueryError::Execution(format!(
-					"Alignment metadata not found: {}",
-					alignment
-				)));
-			};
-
-			let Some(source_comp) = corpus.component(&align_meta.source_component) else {
-				return Err(crate::QueryError::Execution(format!(
-					"Source component not found: {}",
-					align_meta.source_component
-				)));
-			};
-
-			let Some(target_comp) = corpus.component(&align_meta.target_component) else {
-				return Err(crate::QueryError::Execution(format!(
-					"Target component not found: {}",
-					align_meta.target_component
-				)));
-			};
-
-			let Some(doc_spans) = corpus.spans().spans("document") else {
-				return Ok(Vec::new());
-			};
-
-			let Some(sent_spans) = corpus.spans().spans(&align_meta.source_layer) else {
-				return Ok(Vec::new());
-			};
-
-			let Some(target_sent_spans) = corpus.spans().spans(&align_meta.target_layer) else {
-				return Ok(Vec::new());
-			};
-
-			let edge_map = build_edge_map(edges);
-
-			let mut result_hits = Vec::new();
-			let mut seen_targets = HashSet::new();
-
-			for hit in &source_hits {
-				let Some((src_doc, src_sent)) = find_doc_and_sent(
-					hit.span, doc_spans, sent_spans, source_comp,
-				) else {
-					continue;
+			PlanNode::Intersect(nodes) => {
+				let mut nodes = nodes.iter();
+				let Some(first) = nodes.next() else {
+					return Ok(Cow::Owned(RoaringBitmap::new()));
 				};
-
-				if let Some(targets) = edge_map.get(&(src_doc, src_sent)) {
-					for &(tgt_doc, tgt_sent) in targets {
-						if seen_targets.insert((tgt_doc, tgt_sent)) {
-							if let Some(target_span) = resolve_target_span(
-								tgt_doc, tgt_sent, doc_spans, target_sent_spans, target_comp,
-							) {
-								result_hits.push(Hit::new(target_span));
-							}
-						}
-					}
+				let mut combined = self.token_bitmap(first)?.into_owned();
+				for node in nodes {
+					combined &= self.token_bitmap(node)?.as_ref();
 				}
+				Ok(Cow::Owned(combined))
 			}
 
-			result_hits.sort_by_key(|h| h.span.start);
-			Ok(result_hits)
-		}
-
-		PlanNode::SequenceScan { steps } => execute_sequence(steps, corpus),
-
-		PlanNode::GlobalConstraintFilter { inner, constraints } => {
-			let hits = execute_node(inner, corpus)?;
-			let attr_keys = collect_attr_keys(constraints);
-			let filtered = hits
-				.into_iter()
-				.filter(|hit| evaluate_constraints(hit, constraints, &attr_keys, corpus))
-				.collect();
-			Ok(filtered)
-		}
-	}
-}
-
-fn collect_attr_keys(constraints: &[GlobalConstraint]) -> Vec<(String, String)> {
-	let mut keys = Vec::new();
-	for c in constraints {
-		match c {
-			GlobalConstraint::Eq { left, right } | GlobalConstraint::Ne { left, right } => {
-				let l = (left.label.clone(), left.attr.clone());
-				let r = (right.label.clone(), right.attr.clone());
-				if !keys.contains(&l) {
-					keys.push(l);
+			PlanNode::Union(nodes) => {
+				let mut combined = RoaringBitmap::new();
+				for node in nodes {
+					combined |= self.token_bitmap(node)?.as_ref();
 				}
-				if !keys.contains(&r) {
-					keys.push(r);
-				}
+				Ok(Cow::Owned(combined))
 			}
-			GlobalConstraint::Distance { .. } => {}
+
+			PlanNode::Difference { base, subtract } => {
+				let mut remaining = self.token_bitmap(base)?.into_owned();
+				remaining -= self.token_bitmap(subtract)?.as_ref();
+				Ok(Cow::Owned(remaining))
+			}
+
+			_ => Err(QueryError::Execution(
+				"token-level operator applied to a multi-token pattern".into(),
+			)),
 		}
 	}
-	keys
-}
 
-fn resolve_attrs<'a>(
-	hit: &Hit,
-	keys: &[(String, String)],
-	corpus: &'a Corpus,
-) -> Vec<Option<&'a str>> {
-	keys.iter()
-		.map(|(label, attr)| {
-			let span = hit.captures.iter().find(|(n, _)| n == label)?.1;
-			corpus.forward().get_str(span.start, attr)
+	// ranges a match may not cross: documents, or the whole corpus when there are none
+	fn ranges(&self) -> Cow<'a, [Span]> {
+		match self.corpus.spans().spans("document") {
+			Some(documents) if !documents.is_empty() => Cow::Borrowed(documents),
+			_ => Cow::Owned(vec![Span::new(0, self.corpus.token_count())]),
+		}
+	}
+
+	fn prepare(
+		&self,
+		steps: &[SequenceStep],
+		bindings: Bindings,
+		checks: &[Check],
+	) -> Result<Prepared<'_>> {
+		let mut ledgers = Vec::new();
+		let mut prepared = Vec::with_capacity(steps.len());
+		for step in steps {
+			let matcher = if matches!(step.node, PlanNode::ScanAll) {
+				Matcher::Runs(vec![Run {
+					start: 0,
+					end: self.corpus.token_count(),
+				}])
+			} else if step.node.is_token_level() {
+				Matcher::Runs(runs_from_bitmap(self.token_bitmap(&step.node)?.as_ref()))
+			} else {
+				let ledger = Ledger::new(&self.budget);
+				let table = self.group_matches(step, bindings, checks, &ledger)?;
+				ledgers.push(ledger);
+				Matcher::Spans(table)
+			};
+			prepared.push(Step {
+				matcher,
+				min: if step.node.is_nullable() { 0 } else { step.min },
+				max: step.max.unwrap_or(MAX_QUANTIFIER).min(MAX_QUANTIFIER),
+				label: step.label.as_deref().and_then(|name| self.label_id(name)),
+				declares: self.declared_by(step),
+			});
+		}
+		let constraints: Vec<Vec<LabelId>> = checks
+			.iter()
+			.map(|check| check.labels().collect())
+			.collect();
+		Ok(Prepared {
+			sequence: Sequence::new(prepared, self.labels.len(), &constraints, bindings),
+			_ledgers: ledgers,
 		})
-		.collect()
-}
+	}
 
-fn evaluate_constraints(
-	hit: &Hit,
-	constraints: &[GlobalConstraint],
-	attr_keys: &[(String, String)],
-	corpus: &Corpus,
-) -> bool {
-	let resolved = resolve_attrs(hit, attr_keys, corpus);
+	fn declared_by(&self, step: &SequenceStep) -> Vec<LabelId> {
+		let mut names: Vec<String> = step.label.iter().cloned().collect();
+		step.node.collect_labels(&mut names);
+		names.iter().filter_map(|name| self.label_id(name)).collect()
+	}
 
-	constraints.iter().all(|c| match c {
-		GlobalConstraint::Distance { left, right, op, value } => {
-			eval_distance(hit, left, right)
-				.map(|d| compare_u64(d, *op, *value as u64))
-				.unwrap_or(false)
+	// The sub-matches of a group step. A constraint whose labels all lie inside
+	// an unrepeated group is applied while the group is matched; one that also
+	// reads a label outside it needs every assignment the group can offer.
+	fn group_matches(
+		&self,
+		step: &SequenceStep,
+		bindings: Bindings,
+		checks: &[Check],
+		ledger: &Ledger,
+	) -> Result<Vec<Match>> {
+		// the step's own label spans the whole group and is bound outside it
+		let mut names = Vec::new();
+		step.node.collect_labels(&mut names);
+		let inside: Vec<LabelId> = names.iter().filter_map(|name| self.label_id(name)).collect();
+		let unrepeated = step.min == 1 && step.max == Some(1);
+		let settled_inside = |check: &Check| {
+			unrepeated
+				&& applies_checks(&step.node)
+				&& check.labels().all(|label| inside.contains(&label))
+		};
+		let reads_inside = |check: &Check| check.labels().any(|label| inside.contains(&label));
+		let inner_checks: Vec<Check> = checks
+			.iter()
+			.filter(|check| settled_inside(check))
+			.cloned()
+			.collect();
+		let contested = checks
+			.iter()
+			.any(|check| reads_inside(check) && !settled_inside(check));
+		let group_bindings = match contested {
+			true => Bindings::All,
+			false => bindings,
+		};
+		self.matches(&step.node, group_bindings, &inner_checks, ledger)
+	}
+
+	fn sequence_matches(
+		&self,
+		steps: &[SequenceStep],
+		bindings: Bindings,
+		checks: &[Check],
+		output: Output,
+		keep: Keep,
+	) -> Result<Vec<Match>> {
+		let prepared = self.prepare(steps, bindings, checks)?;
+		let sequence = &prepared.sequence;
+		let ranges = self.ranges();
+		let holds = |check: usize, slots: &[Slot]| self.holds(&checks[check], slots);
+		let matches_in = |range: &Span| {
+			if self.labels.is_empty() {
+				sequence.matches_in::<()>(*range, &holds, keep, &self.budget, output)
+			} else {
+				sequence.matches_in::<Slots>(*range, &holds, keep, &self.budget, output)
+			}
+		};
+		let per_range: Vec<Vec<Match>> = if runs_in_parallel(steps, &ranges) {
+			ranges.par_iter().map(matches_in).collect::<Result<_>>()?
+		} else {
+			ranges.iter().map(matches_in).collect::<Result<_>>()?
+		};
+		Ok(per_range.into_iter().flatten().collect())
+	}
+
+	// targets are charged to `ledger` as they are found
+	fn projected(&self, inner: &PlanNode, alignment: &str, ledger: &Ledger) -> Result<Vec<Match>> {
+		let missing = |what: &str, name: &str| QueryError::Execution(format!("{what} not found: {name}"));
+		let corpus = self.corpus;
+		let edges = corpus
+			.alignment_edges(alignment)
+			.ok_or_else(|| missing("Alignment", alignment))?;
+		let meta = corpus
+			.alignment_meta(alignment)
+			.ok_or_else(|| missing("Alignment metadata", alignment))?;
+		let source_component = corpus
+			.component(&meta.source_component)
+			.ok_or_else(|| missing("Source component", &meta.source_component))?;
+		let target_component = corpus
+			.component(&meta.target_component)
+			.ok_or_else(|| missing("Target component", &meta.target_component))?;
+
+		let (Some(documents), Some(source_units), Some(target_units)) = (
+			corpus.spans().spans("document"),
+			corpus.spans().spans(&meta.source_layer),
+			corpus.spans().spans(&meta.target_layer),
+		) else {
+			return Ok(Vec::new());
+		};
+
+		let edge_map = build_edge_map(edges);
+		let mut seen_targets = HashSet::new();
+		let mut projected = Vec::new();
+
+		let source = Ledger::new(&self.budget);
+		let mut charged = 0;
+		for found in self.matches(inner, Bindings::Canonical, &[], &source)? {
+			let span = Span::new(found.start, found.end);
+			let Some(source) = find_doc_and_sent(span, documents, source_units, source_component)
+			else {
+				continue;
+			};
+			for &(target_document, target_unit) in edge_map.get(&source).into_iter().flatten() {
+				if !seen_targets.insert((target_document, target_unit)) {
+					continue;
+				}
+				if let Some(target) = resolve_target_span(
+					target_document,
+					target_unit,
+					documents,
+					target_units,
+					target_component,
+				) {
+					projected.push(Match::unlabeled(target.start, target.end, self.labels.len()));
+				}
+				if projected.len() - charged >= CHARGE_STRIDE {
+					ledger.hold(self.cost(projected.len() - charged))?;
+					charged = projected.len();
+				}
+			}
 		}
-		GlobalConstraint::Eq { left, right } => {
-			eval_attr_compare(&resolved, attr_keys, left, right) == Some(true)
+		ledger.hold(self.cost(projected.len() - charged))?;
+
+		projected.sort_unstable();
+		Ok(projected)
+	}
+
+	fn compile(&self, constraints: &[GlobalConstraint]) -> Vec<Check> {
+		let attribute = |side: &LabelAttr| -> (Option<LabelId>, String) {
+			(self.label_id(&side.label), side.attr.clone())
+		};
+		constraints
+			.iter()
+			.map(|constraint| match constraint {
+				GlobalConstraint::Eq { left, right } => Check::Compare {
+					left: attribute(left),
+					right: attribute(right),
+					equal: true,
+				},
+				GlobalConstraint::Ne { left, right } => Check::Compare {
+					left: attribute(left),
+					right: attribute(right),
+					equal: false,
+				},
+				GlobalConstraint::Distance { left, right, op, value } => Check::Distance {
+					left: self.label_id(left),
+					right: self.label_id(right),
+					op: *op,
+					value: u64::from(*value),
+				},
+			})
+			.collect()
+	}
+
+	// a constraint that mentions an unbound label does not hold
+	fn holds(&self, check: &Check, slots: &[Slot]) -> bool {
+		let bound = |label: &Option<LabelId>| {
+			label
+				.and_then(|label| slots.get(label))
+				.filter(|slot| **slot != UNBOUND)
+		};
+		let value = |(label, attribute): &(Option<LabelId>, String)| {
+			bound(label).and_then(|slot| self.corpus.forward().get_str(slot.0, attribute))
+		};
+		match check {
+			Check::Compare { left, right, equal } => match (value(left), value(right)) {
+				(Some(left), Some(right)) => (left == right) == *equal,
+				_ => false,
+			},
+			Check::Distance { left, right, op, value } => match (bound(left), bound(right)) {
+				(Some(left), Some(right)) => compare(right.0.saturating_sub(left.1), *op, *value),
+				_ => false,
+			},
 		}
-		GlobalConstraint::Ne { left, right } => {
-			eval_attr_compare(&resolved, attr_keys, left, right) == Some(false)
-		}
-	})
+	}
 }
 
-fn eval_distance(hit: &Hit, label_a: &str, label_b: &str) -> Option<u64> {
-	let span_a = hit.captures.iter().find(|(n, _)| n == label_a)?.1;
-	let span_b = hit.captures.iter().find(|(n, _)| n == label_b)?.1;
-	Some(span_b.start.saturating_sub(span_a.end))
+enum Filter<'a> {
+	// a match must lie inside one of these spans
+	Within(&'a [Span]),
+	// a match must lie inside a document marked true, by document index
+	Documents(Vec<bool>),
 }
 
-fn eval_attr_compare(
-	resolved: &[Option<&str>],
-	keys: &[(String, String)],
-	left: &LabelAttr,
-	right: &LabelAttr,
-) -> Option<bool> {
-	let left_idx = keys.iter().position(|(l, a)| l == &left.label && a == &left.attr)?;
-	let right_idx = keys.iter().position(|(l, a)| l == &right.label && a == &right.attr)?;
-	let left_val = resolved[left_idx]?;
-	let right_val = resolved[right_idx]?;
-	Some(left_val == right_val)
+// a sequence ready to run, with the charges for its group tables
+struct Prepared<'b> {
+	sequence: Sequence,
+	_ledgers: Vec<Ledger<'b>>,
 }
 
-fn compare_u64(value: u64, op: CmpOp, target: u64) -> bool {
+#[derive(Clone)]
+enum Check {
+	Compare {
+		left: (Option<LabelId>, String),
+		right: (Option<LabelId>, String),
+		equal: bool,
+	},
+	Distance {
+		left: Option<LabelId>,
+		right: Option<LabelId>,
+		op: CmpOp,
+		value: u64,
+	},
+}
+
+impl Check {
+	fn labels(&self) -> impl Iterator<Item = LabelId> {
+		let (left, right) = match self {
+			Check::Compare { left, right, .. } => (left.0, right.0),
+			Check::Distance { left, right, .. } => (*left, *right),
+		};
+		[left, right].into_iter().flatten()
+	}
+}
+
+// a sequence, possibly beneath span, component or document filters, applies
+// constraints while it runs
+fn applies_checks(node: &PlanNode) -> bool {
+	match node {
+		PlanNode::SequenceScan { .. } => true,
+		PlanNode::FilterBySpan { inner, .. }
+		| PlanNode::FilterByComponent { inner, .. }
+		| PlanNode::FilterByDocument { inner, .. } => applies_checks(inner),
+		_ => false,
+	}
+}
+
+fn compare(value: u64, op: CmpOp, target: u64) -> bool {
 	match op {
 		CmpOp::Ge => value >= target,
 		CmpOp::Gt => value > target,
@@ -535,552 +746,28 @@ fn compare_u64(value: u64, op: CmpOp, target: u64) -> bool {
 	}
 }
 
-fn benefits_from_parallel(steps: &[SequenceStep]) -> bool {
-	steps.iter().any(|s| {
-		s.min != 1
-			|| s.max != Some(1)
-			|| matches!(s.node, PlanNode::ScanAll)
-			|| matches!(s.node, PlanNode::Difference { ref base, .. } if matches!(**base, PlanNode::ScanAll))
-	})
-}
-
-fn execute_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<Vec<Hit>> {
-	let doc_spans = corpus.spans().spans("document");
-
-	match doc_spans {
-		Some(spans) if spans.len() > 1 && benefits_from_parallel(steps) => {
-			let chunk_results: Vec<Vec<Hit>> = spans
-				.par_iter()
-				.map(|span| execute_sequence_in_range(steps, corpus, span.start, span.end))
-				.collect::<Result<_>>()?;
-
-			Ok(chunk_results.into_iter().flatten().collect())
-		}
-		_ => execute_sequence_in_range(steps, corpus, 0, corpus.token_count()),
+// expects matches sorted by (start, end, captures)
+fn deduplicated(mut matches: Vec<Match>, bindings: Bindings) -> Vec<Match> {
+	match bindings {
+		Bindings::Canonical => matches.dedup_by(|later, earlier| later.same_span(earlier)),
+		Bindings::All => matches.dedup(),
 	}
+	matches
 }
 
-fn has_labels(steps: &[SequenceStep]) -> bool {
-	steps.iter().any(|s| s.label.is_some())
+fn fits_within_one(spans: &[Span], start: u64, end: u64) -> Option<usize> {
+	span_containing(spans, start).filter(|&index| end <= spans[index].end)
 }
 
-fn execute_sequence_in_range(
-	steps: &[SequenceStep],
-	corpus: &Corpus,
-	range_start: u64,
-	range_end: u64,
-) -> Result<Vec<Hit>> {
-	if has_labels(steps) {
-		let active = run_sequence_steps_labeled(steps, corpus, range_start, range_end)?;
-
-		let mut hits: Vec<Hit> = active
-			.into_iter()
-			.flat_map(|(end, matches)| {
-				matches
-					.into_iter()
-					.filter(move |m| end > m.start)
-					.map(move |m| {
-						let mut hit = Hit::new(Span::new(m.start, end));
-						hit.captures = m.captures;
-						hit
-					})
-			})
-			.collect();
-
-		hits.sort_by_key(|h| (h.span.start, h.span.end));
-		Ok(hits)
-	} else {
-		let active = run_sequence_steps_unlabeled(steps, corpus, range_start, range_end)?;
-
-		let mut hits: Vec<Hit> = active
-			.into_iter()
-			.flat_map(|(end, starts)| {
-				starts
-					.into_iter()
-					.filter(move |&start| end > start)
-					.map(move |start| Hit::new(Span::new(start, end)))
-			})
-			.collect();
-
-		hits.sort_by_key(|h| (h.span.start, h.span.end));
-		Ok(hits)
-	}
-}
-
-fn count_sequence(steps: &[SequenceStep], corpus: &Corpus) -> Result<usize> {
-	let doc_spans = corpus.spans().spans("document");
-
-	// count path never needs captures, always use the fast unlabeled path
-	match doc_spans {
-		Some(spans) if spans.len() > 1 && benefits_from_parallel(steps) => {
-			let counts: Vec<usize> = spans
-				.par_iter()
-				.map(|span| {
-					let active = run_sequence_steps_unlabeled(
-						steps, corpus, span.start, span.end,
-					)?;
-					Ok(active
-						.into_iter()
-						.map(|(end, starts)| {
-							starts.into_iter().filter(|&start| end > start).count()
-						})
-						.sum())
-				})
-				.collect::<Result<_>>()?;
-
-			Ok(counts.into_iter().sum())
-		}
-		_ => {
-			let active = run_sequence_steps_unlabeled(
-				steps, corpus, 0, corpus.token_count(),
-			)?;
-			Ok(active
-				.into_iter()
-				.map(|(end, starts)| {
-					starts.into_iter().filter(|&start| end > start).count()
-				})
-				.sum())
-		}
-	}
-}
-
-fn build_run_indices(
-	steps: &[SequenceStep],
-	corpus: &Corpus,
-	range_start: u64,
-	range_end: u64,
-) -> Vec<RunIndex> {
-	steps
-		.iter()
-		.map(|step| {
-			if matches!(step.node, PlanNode::ScanAll) {
-				RunIndex::range(range_start, range_end)
-			} else {
-				let positions = get_matching_positions_in_range(
-					&step.node, corpus, range_start, range_end,
-				)
-				.unwrap_or_default();
-				RunIndex::from_positions(&positions)
-			}
+fn runs_in_parallel(steps: &[SequenceStep], ranges: &[Span]) -> bool {
+	ranges.len() > 1
+		&& steps.iter().any(|step| {
+			step.min != 1
+				|| step.max != Some(1)
+				|| !step.node.is_token_level()
+				|| matches!(step.node, PlanNode::ScanAll)
+				|| matches!(&step.node, PlanNode::Difference { base, .. } if matches!(**base, PlanNode::ScanAll))
 		})
-		.collect()
-}
-
-// Fast path: no labels, no capture tracking. Active set is HashMap<end, Vec<start>>.
-fn run_sequence_steps_unlabeled(
-	steps: &[SequenceStep],
-	corpus: &Corpus,
-	range_start: u64,
-	range_end: u64,
-) -> Result<HashMap<u64, Vec<u64>>> {
-	if steps.is_empty() || range_start >= range_end {
-		return Ok(HashMap::new());
-	}
-
-	let run_indices = build_run_indices(steps, corpus, range_start, range_end);
-
-	let first_step = &steps[0];
-	let first_runs = &run_indices[0];
-
-	let mut active: HashMap<u64, Vec<u64>> = HashMap::new();
-
-	for (start, end) in first_runs.spans_for_quantifier(first_step.min, first_step.max) {
-		active.entry(end).or_default().push(start);
-	}
-
-	if first_step.min == 0 && steps.len() > 1 {
-		for run in &run_indices[1].runs {
-			active.entry(run.start).or_default().push(run.start);
-		}
-	}
-
-	if active.is_empty() {
-		return Ok(HashMap::new());
-	}
-
-	for (step_idx, step) in steps[1..].iter().enumerate() {
-		if active.is_empty() {
-			break;
-		}
-
-		let runs = &run_indices[step_idx + 1];
-		let is_scan_all = matches!(step.node, PlanNode::ScanAll);
-
-		let mut next_active: HashMap<u64, Vec<u64>> = HashMap::new();
-
-		for (end_pos, starts) in &active {
-			if step.min == 0 {
-				for &s in starts {
-					next_active.entry(*end_pos).or_default().push(s);
-				}
-			}
-
-			let continuations = if is_scan_all {
-				spans_for_scan_all(*end_pos, step.min, step.max, range_end)
-			} else {
-				runs.continuations_at(*end_pos, step.min, step.max)
-			};
-
-			for new_end in continuations {
-				for &s in starts {
-					next_active.entry(new_end).or_default().push(s);
-				}
-			}
-		}
-
-		for starts in next_active.values_mut() {
-			starts.sort_unstable();
-			starts.dedup();
-		}
-
-		active = next_active;
-	}
-
-	Ok(active)
-}
-
-// Labeled path: tracks captures through ActiveMatch. Only used when at least one
-// step carries a label. The capture Vec cloning is the reason this is kept separate
-// from the unlabeled fast path — on ScanAll-first queries the overhead is ~60%.
-fn run_sequence_steps_labeled(
-	steps: &[SequenceStep],
-	corpus: &Corpus,
-	range_start: u64,
-	range_end: u64,
-) -> Result<HashMap<u64, Vec<ActiveMatch>>> {
-	if steps.is_empty() || range_start >= range_end {
-		return Ok(HashMap::new());
-	}
-
-	let run_indices = build_run_indices(steps, corpus, range_start, range_end);
-
-	let first_step = &steps[0];
-	let first_runs = &run_indices[0];
-
-	let mut active: HashMap<u64, Vec<ActiveMatch>> = HashMap::new();
-
-	for (start, end) in first_runs.spans_for_quantifier(first_step.min, first_step.max) {
-		let captures = match first_step.label {
-			Some(ref label) => vec![(label.clone(), Span::new(start, end))],
-			None => Vec::new(),
-		};
-		active.entry(end).or_default().push(ActiveMatch { start, captures });
-	}
-
-	if first_step.min == 0 && steps.len() > 1 {
-		for run in &run_indices[1].runs {
-			let captures = match first_step.label {
-				Some(ref label) => vec![(label.clone(), Span::new(run.start, run.start))],
-				None => Vec::new(),
-			};
-			active.entry(run.start).or_default().push(ActiveMatch {
-				start: run.start,
-				captures,
-			});
-		}
-	}
-
-	if active.is_empty() {
-		return Ok(HashMap::new());
-	}
-
-	for (step_idx, step) in steps[1..].iter().enumerate() {
-		if active.is_empty() {
-			break;
-		}
-
-		let runs = &run_indices[step_idx + 1];
-		let is_scan_all = matches!(step.node, PlanNode::ScanAll);
-
-		let mut next_active: HashMap<u64, Vec<ActiveMatch>> = HashMap::new();
-
-		for (end_pos, matches) in &active {
-			if step.min == 0 {
-				for m in matches {
-					let mut captures = m.captures.clone();
-					if let Some(ref label) = step.label {
-						captures.push((label.clone(), Span::new(*end_pos, *end_pos)));
-					}
-					next_active.entry(*end_pos).or_default().push(ActiveMatch {
-						start: m.start,
-						captures,
-					});
-				}
-			}
-
-			let continuations = if is_scan_all {
-				spans_for_scan_all(*end_pos, step.min, step.max, range_end)
-			} else {
-				runs.continuations_at(*end_pos, step.min, step.max)
-			};
-
-			for new_end in continuations {
-				for m in matches {
-					let mut captures = m.captures.clone();
-					if let Some(ref label) = step.label {
-						captures.push((label.clone(), Span::new(*end_pos, new_end)));
-					}
-					next_active.entry(new_end).or_default().push(ActiveMatch {
-						start: m.start,
-						captures,
-					});
-				}
-			}
-		}
-
-		for matches in next_active.values_mut() {
-			matches.sort_unstable_by_key(|m| m.start);
-			matches.dedup_by_key(|m| m.start);
-		}
-
-		active = next_active;
-	}
-
-	Ok(active)
-}
-
-fn spans_for_scan_all(start: u64, min: u32, max: Option<u32>, token_count: u64) -> Vec<u64> {
-	let max_len = max.unwrap_or(MAX_QUANTIFIER).min(MAX_QUANTIFIER) as u64;
-	let mut results = Vec::new();
-
-	for len in (min as u64)..=max_len {
-		let end = start + len;
-		if end <= token_count {
-			results.push(end);
-		} else {
-			break;
-		}
-	}
-
-	results
-}
-
-const MAX_QUANTIFIER: u32 = 100;
-
-#[derive(Debug, Clone, Copy)]
-struct Run {
-	start: u64,
-	end: u64,
-}
-
-impl Run {
-	fn len(&self) -> u64 {
-		self.end - self.start
-	}
-}
-
-struct RunIndex {
-	runs: Vec<Run>,
-}
-
-impl RunIndex {
-	fn from_positions(positions: &[u64]) -> Self {
-		if positions.is_empty() {
-			return Self { runs: Vec::new() };
-		}
-
-		let mut sorted = positions.to_vec();
-		sorted.sort_unstable();
-		sorted.dedup();
-
-		let mut runs = Vec::new();
-		let mut run_start = sorted[0];
-		let mut prev = sorted[0];
-
-		for &pos in &sorted[1..] {
-			if pos == prev + 1 {
-				prev = pos;
-			} else {
-				runs.push(Run {
-					start: run_start,
-					end: prev + 1,
-				});
-				run_start = pos;
-				prev = pos;
-			}
-		}
-
-		runs.push(Run {
-			start: run_start,
-			end: prev + 1,
-		});
-
-		Self { runs }
-	}
-
-	#[cfg(test)]
-	fn full(token_count: u64) -> Self {
-		Self::range(0, token_count)
-	}
-
-	fn range(start: u64, end: u64) -> Self {
-		if start >= end {
-			Self { runs: Vec::new() }
-		} else {
-			Self {
-				runs: vec![Run { start, end }],
-			}
-		}
-	}
-
-	fn spans_for_quantifier(&self, min: u32, max: Option<u32>) -> Vec<(u64, u64)> {
-		let max_len = max.unwrap_or(MAX_QUANTIFIER).min(MAX_QUANTIFIER) as u64;
-		let min_len = (min as u64).max(1);
-		let mut spans = Vec::new();
-
-		for run in &self.runs {
-			if run.len() < min_len {
-				continue;
-			}
-
-			let max_start = run.end - min_len;
-
-			for span_start in run.start..=max_start {
-				let available = run.end - span_start;
-				let span_max = available.min(max_len);
-
-				for span_len in min_len..=span_max {
-					spans.push((span_start, span_start + span_len));
-				}
-			}
-		}
-
-		spans
-	}
-
-	fn continuations_at(&self, pos: u64, min: u32, max: Option<u32>) -> Vec<u64> {
-		let max_len = max.unwrap_or(MAX_QUANTIFIER).min(MAX_QUANTIFIER) as u64;
-		let min_len = min as u64;
-
-		let Some(run) = self.run_containing(pos) else {
-			return Vec::new();
-		};
-
-		let available = run.end - pos;
-		if available < min_len {
-			return Vec::new();
-		}
-
-		let mut results = Vec::new();
-		let usable = available.min(max_len);
-
-		for len in min_len..=usable {
-			results.push(pos + len);
-		}
-
-		results
-	}
-
-	fn run_containing(&self, pos: u64) -> Option<&Run> {
-		let idx = self.runs.partition_point(|r| r.end <= pos);
-		if idx < self.runs.len() && self.runs[idx].start <= pos {
-			Some(&self.runs[idx])
-		} else {
-			None
-		}
-	}
-}
-
-fn get_matching_positions_in_range(
-	node: &PlanNode,
-	corpus: &Corpus,
-	range_start: u64,
-	range_end: u64,
-) -> Result<Vec<u64>> {
-	match node {
-		PlanNode::ScanAll => Ok((range_start..range_end).collect()),
-
-		PlanNode::ScanLiteral { layer, value } => {
-			let Some(bitmap) = corpus.inverted().get(layer, value) else {
-				return Ok(Vec::new());
-			};
-			Ok(bitmap
-				.iter()
-				.skip_while(|&p| (p as u64) < range_start)
-				.take_while(|&p| (p as u64) < range_end)
-				.map(|p| p as u64)
-				.collect())
-		}
-
-		PlanNode::ScanRegex { layer, pattern } => {
-			let re = regex::Regex::new(pattern)?;
-			let mut positions = Vec::new();
-
-			if let Some(values) = corpus.inverted().values(layer) {
-				for value in values {
-					if re.is_match(value) {
-						if let Some(bitmap) = corpus.inverted().get(layer, value) {
-							positions.extend(
-								bitmap
-									.iter()
-									.skip_while(|&p| (p as u64) < range_start)
-									.take_while(|&p| (p as u64) < range_end)
-									.map(|p| p as u64),
-							);
-						}
-					}
-				}
-			}
-
-			positions.sort_unstable();
-			positions.dedup();
-			Ok(positions)
-		}
-
-		PlanNode::Union(nodes) => {
-			let mut all_positions = HashSet::new();
-			for node in nodes {
-				let positions =
-					get_matching_positions_in_range(node, corpus, range_start, range_end)?;
-				all_positions.extend(positions);
-			}
-			let mut positions: Vec<u64> = all_positions.into_iter().collect();
-			positions.sort_unstable();
-			Ok(positions)
-		}
-
-		PlanNode::Intersect(nodes) => {
-			if nodes.is_empty() {
-				return Ok(Vec::new());
-			}
-			let mut result: Option<HashSet<u64>> = None;
-			for node in nodes {
-				let positions: HashSet<u64> =
-					get_matching_positions_in_range(node, corpus, range_start, range_end)?
-						.into_iter()
-						.collect();
-				result = Some(match result {
-					None => positions,
-					Some(existing) => existing.intersection(&positions).copied().collect(),
-				});
-			}
-			let mut positions: Vec<u64> = result.unwrap_or_default().into_iter().collect();
-			positions.sort_unstable();
-			Ok(positions)
-		}
-
-		PlanNode::Difference { base, subtract } => {
-			let base_positions =
-				get_matching_positions_in_range(base, corpus, range_start, range_end)?;
-			let subtract_set: HashSet<u64> =
-				get_matching_positions_in_range(subtract, corpus, range_start, range_end)?
-					.into_iter()
-					.collect();
-			Ok(base_positions
-				.into_iter()
-				.filter(|p| !subtract_set.contains(p))
-				.collect())
-		}
-
-		_ => {
-			let hits = execute_node(node, corpus)?;
-			Ok(hits
-				.into_iter()
-				.map(|h| h.span.start)
-				.filter(|&p| p >= range_start && p < range_end)
-				.collect())
-		}
-	}
 }
 
 pub fn build_edge_map(edges: &[(UnitId, UnitId)]) -> HashMap<(u32, u32), Vec<(u32, u32)>> {
@@ -1170,108 +857,5 @@ mod tests {
 		let collected: Vec<_> = results.into_iter().collect();
 		assert_eq!(collected[0].span.start, 0);
 		assert_eq!(collected[1].span.start, 5);
-	}
-
-	#[test]
-	fn run_index_from_positions() {
-		let ri = RunIndex::from_positions(&[0, 1, 2, 5, 6, 10]);
-		assert_eq!(ri.runs.len(), 3);
-		assert_eq!((ri.runs[0].start, ri.runs[0].end), (0, 3));
-		assert_eq!((ri.runs[1].start, ri.runs[1].end), (5, 7));
-		assert_eq!((ri.runs[2].start, ri.runs[2].end), (10, 11));
-	}
-
-	#[test]
-	fn run_index_from_positions_empty() {
-		let ri = RunIndex::from_positions(&[]);
-		assert!(ri.runs.is_empty());
-	}
-
-	#[test]
-	fn run_index_from_positions_unsorted() {
-		let ri = RunIndex::from_positions(&[5, 1, 3, 2, 0, 4]);
-		assert_eq!(ri.runs.len(), 1);
-		assert_eq!((ri.runs[0].start, ri.runs[0].end), (0, 6));
-	}
-
-	#[test]
-	fn run_index_from_positions_deduplicates() {
-		let ri = RunIndex::from_positions(&[1, 1, 2, 2, 3]);
-		assert_eq!(ri.runs.len(), 1);
-		assert_eq!((ri.runs[0].start, ri.runs[0].end), (1, 4));
-	}
-
-	#[test]
-	fn run_index_full() {
-		let ri = RunIndex::full(1000);
-		assert_eq!(ri.runs.len(), 1);
-		assert_eq!((ri.runs[0].start, ri.runs[0].end), (0, 1000));
-	}
-
-	#[test]
-	fn run_index_full_zero() {
-		let ri = RunIndex::full(0);
-		assert!(ri.runs.is_empty());
-	}
-
-	#[test]
-	fn run_containing() {
-		let ri = RunIndex::from_positions(&[0, 1, 2, 5, 6]);
-		assert!(ri.run_containing(0).is_some());
-		assert!(ri.run_containing(2).is_some());
-		assert!(ri.run_containing(3).is_none());
-		assert!(ri.run_containing(5).is_some());
-		assert!(ri.run_containing(7).is_none());
-	}
-
-	#[test]
-	fn continuations_at_basic() {
-		let ri = RunIndex::from_positions(&[0, 1, 2, 3, 4]);
-		// From position 2, min=1, max=Some(2): can continue to 3, 4
-		let c = ri.continuations_at(2, 1, Some(2));
-		assert_eq!(c, vec![3, 4]);
-	}
-
-	#[test]
-	fn continuations_at_gap() {
-		let ri = RunIndex::from_positions(&[0, 1, 5, 6]);
-		// Position 2 is not in any run
-		let c = ri.continuations_at(2, 1, Some(1));
-		assert!(c.is_empty());
-	}
-
-	#[test]
-	fn continuations_at_end_of_run() {
-		let ri = RunIndex::from_positions(&[0, 1, 2]);
-		// From position 3 (one past end): not in run
-		let c = ri.continuations_at(3, 1, Some(1));
-		assert!(c.is_empty());
-	}
-
-	#[test]
-	fn spans_for_quantifier_exact() {
-		let ri = RunIndex::from_positions(&[0, 1, 2]);
-		// min=2, max=2: spans of exactly length 2
-		let spans = ri.spans_for_quantifier(2, Some(2));
-		assert_eq!(spans, vec![(0, 2), (1, 3)]);
-	}
-
-	#[test]
-	fn spans_for_quantifier_range() {
-		let ri = RunIndex::from_positions(&[0, 1, 2]);
-		// min=1, max=3: all possible spans from run [0,3)
-		let spans = ri.spans_for_quantifier(1, Some(3));
-		assert_eq!(
-			spans,
-			vec![(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
-		);
-	}
-
-	#[test]
-	fn spans_for_quantifier_run_too_short() {
-		let ri = RunIndex::from_positions(&[5]);
-		// min=2: single-position run can't produce length-2 spans
-		let spans = ri.spans_for_quantifier(2, Some(3));
-		assert!(spans.is_empty());
 	}
 }

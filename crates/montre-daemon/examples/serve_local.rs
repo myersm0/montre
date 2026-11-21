@@ -70,6 +70,7 @@ fn main() {
 		corpus_path,
 		socket_path: Some(socket_path),
 		idle_timeout,
+		limits: montre_daemon::DEFAULT_LIMITS,
 	};
 
 	if let Err(e) = serve(options) {

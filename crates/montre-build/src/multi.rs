@@ -210,6 +210,7 @@ impl MultiCorpusBuilder {
 			document_names: combined.document_names.clone(),
 			components,
 			alignments: alignment_meta,
+			forward_only_layers: combined.present_forward_only_layers(),
 		};
 
 		tracing::info!(

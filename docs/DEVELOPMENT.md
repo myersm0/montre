@@ -392,7 +392,7 @@ CQL string
 [lemma="be"]                # any layer
 [pos="NOUN"]
 [word="house" & pos="NOUN"] # conjunction
-[word="hou.*"]              # regex
+[word=/^hou.*/]            # regex (unanchored; anchor with ^ and $)
 "house"                     # shorthand for [word="house"]
 [pos="DET"] [pos="NOUN"]    # sequence
 ```
@@ -619,7 +619,7 @@ Evaluation is capture-centric with resolve-once-per-hit semantics:
 3. Each constraint indexes into the resolved array rather than doing its own forward lookup.
 4. Hits are retained only if all constraints pass (flat conjunction).
 
-If a referenced layer does not exist in the corpus, the forward lookup returns `None` and the constraint evaluates to `false`. This is consistent with how `ScanLiteral` for a nonexistent layer returns no results.
+A layer name the corpus does not have is an error (`QueryError::UnknownLayer`), in a constraint as in a token pattern; see the executor correctness pass below. A constraint over a label that matched nothing (an optional element that was skipped) does not hold.
 
 The `count_node` fast path falls through to `execute_node` + `.len()` for `GlobalConstraintFilter` — constrained queries cannot avoid hit materialization.
 
@@ -737,7 +737,7 @@ Sequence execution (the `SequenceScan` plan node) partitions work by document sp
 3. Position lookups (`get_matching_positions_in_range`) restrict bitmap iteration to the document's range using `skip_while`/`take_while` on roaring iterators. `ScanAll` generates only the document's position range.
 4. Concatenate per-document results.
 
-This is correct because sequences cannot meaningfully cross document boundaries in linguistic corpora. The range restriction also provides a secondary benefit beyond parallelism: for `ScanAll` in first position, the working set per document is O(document_size) instead of O(corpus_size), which reduces the quadratic cost of span generation.
+This is correct because a match never extends past the document it starts in; that rule holds for every query, whichever path executes it. The range restriction also provides a secondary benefit beyond parallelism: for `ScanAll` in first position, the working set per document is O(document_size) instead of O(corpus_size), which reduces the quadratic cost of span generation.
 
 Not all sequences benefit from parallel dispatch. The `benefits_from_parallel` heuristic gates parallelism on the presence of quantifiers (`min != 1` or `max != Some(1)`) or `ScanAll`/`Difference`-over-`ScanAll` steps. Fixed-length sequences like `[pos="ADJ"] [pos="NOUN"]` (two literal steps, both `min=1, max=Some(1)`) run single-threaded because the per-document dispatch overhead exceeds the parallelism benefit for these cheap queries.
 
@@ -847,7 +847,7 @@ The naive approach (one query per document) was noticeably slow on the 307-docum
 
 **Single-component CLI workaround**
 
-Single-component builds leave `CorpusMeta.components` empty, so `within component:"name"` in CQL returns zero results. The CLI avoids emitting component filters for single-component corpora. A proper engine fix (always populate `ComponentMeta`) is tracked as future work.
+Single-component builds write an empty `components` list to `corpus.json`. Since the executor correctness pass, opening such a corpus supplies one component named after the corpus, so `Corpus::components()` is never empty and `within component:"<corpus name>"` matches everything. The CLI's branches for an empty component list are now unreachable and can be removed.
 
 ### Phase 4a: UD correctness — items 1–3 (v0.6.0) ✓
 
@@ -958,6 +958,81 @@ Per-corpus session daemon for long-running interactive use: one process per corp
 - [ ] Reserved for protocol v2: observations, workspaces, UUID-stamped corpus identity, `observations_changed` / `workspaces_changed` topics.
 
 **Engine-orthogonal.** The daemon consumes `montre-index` and `montre-query` through their public read/execute APIs only; it introduces no index format changes, and the index version (5, per Phase 4b) is unaffected by any daemon work. Daemon state lives entirely outside the corpus directory, under `~/.local/share/montre/state/<corpus_id>/`.
+
+### Executor correctness pass ✓
+
+A rework of sequence execution and name validation, checked by a differential test against a brute-force reference matcher. The descriptions of the active set, the labeled and unlabeled paths, and per-document position lookups in the earlier phases above are superseded by this section.
+
+**Match semantics**
+
+- A match is a non-empty span of tokens inside one document. Sequences cross sentence boundaries unless `within s` is given; they never cross document boundaries.
+- Results are sorted by (start, end) and hold one hit per distinct span.
+- A parenthesized group is a sub-pattern of any length: `([pos="DET"] [pos="ADJ"] | [pos="ADJ"]) [pos="NOUN"]`, `([pos="NOUN"] [pos="ADP"])+`. Alternation between multi-token sequences keeps whole spans.
+- A label binds to the span its element matched. A label on a quantified element covers the whole repetition; labels inside a repeated group take the values of the last repetition that matched something. An optional element that matched nothing leaves its label unbound (no zero-width capture).
+- When several capture assignments produce the same span, the hit reports the smallest one. Assignments are compared label by label in query order: a bound label before an unbound one, then the earliest start, then the shortest span. `a:[]? []? b:[]` over two tokens therefore reports `a` on the first token, not `a` skipped.
+- A global constraint holds when all its labels are bound and the comparison is true. A constrained span matches when some capture assignment satisfies every constraint, and the hit reports the smallest such assignment.
+- An explicit quantifier bound above 100 is an error (`QuantifierTooLarge`). The open-ended forms `*`, `+` and `{n,}` stop at 100 repetitions.
+- Every corpus has at least one component. A corpus built without a manifest is a single component named after the corpus, so `within component:"<corpus name>"` and the component-scoped FFI calls work on it. The component is supplied when the corpus is opened, so existing indexes need no rebuild.
+- Names the corpus does not have are errors, not empty results: token layers (`UnknownLayer`), layers stored without an inverted index such as `head` and `deps` (`UnindexedLayer`), span layers in `within` (`UnknownSpanLayer`), components (`UnknownComponent`), documents (`UnknownDocument`), and alignments. A known layer with no matching value is still an empty result.
+
+**Execution model**
+
+- Each sequence step is prepared once per query, over the whole corpus. A single-token step becomes a list of runs built from roaring set operations on the inverted index (a regex is resolved against the vocabulary once). A multi-token step (a group, or an alternation containing a sequence) becomes a sorted table of its sub-matches with their captures.
+- A match can only begin where one of the steps up to and including the first mandatory one begins; those positions seed the active set. Each step then extends every partial match, or passes it through unchanged when the step is optional.
+- The active set is a flat vector of (end, start, captures), sorted and deduplicated after every step. Nothing depends on hash iteration order.
+- Captures are one slot per label of the query, held inline for up to four labels. They are tracked only when the query declares labels; the unlabeled path carries a zero-sized payload through the same code.
+- A global constraint directly above a sequence (span, component and document filters may sit between) is checked inside the sequence, as soon as the last step that declares one of its labels has run. Until then the slots it reads keep partial matches apart; once no pending constraint reads a slot, partial matches differing only there collapse to the smallest.
+- A partial match is dropped as soon as a step finishes without binding a label that a constraint reads. The label is declared by that step alone, so it cannot be bound later. The rule is applied per top-level step: in `(a:[]?){2} b:[] :: a.lemma = b.lemma` the repeated group is one step, and `a` skipped in its first repetition can still be bound in its second.
+- A constraint whose labels all lie inside one unrepeated group (`g:( ... ) :: a.lemma = b.lemma`) is checked while that group is matched. A constraint that reads labels on both sides of a group boundary, or labels inside a repeated group or an alternation of sequences, is not: the group then supplies every capture assignment it has, and the constraint chooses among them afterwards. A top-level `( ... ){1}` is the same plan as its contents.
+- Start positions are extended in batches of 256. This reduces the peak working set of an ambiguous pattern; it does not bound it, because one start position can still have very many capture assignments. Cost for a labeled element floating between two gaps of width w is O(w²) per start position: `[]{0,20} a:[] []{0,20} b:[] :: a.lemma = b.lemma` takes about 10 s and 320 MB on 200,000 tokens. Anchoring either label to an end of the pattern removes the quadratic factor.
+
+**Limits**
+
+- `montre_query::Limits` holds three ceilings, and `execute_with` / `execute_count_with` take one. `execute` and `execute_count` use `Limits::default()`, so the CLI, the FFI and Python bindings are covered without changes. The daemon uses its own `DEFAULT_LIMITS`, below.
+- `max_intermediate_matches` (default 10 million, roughly 1.2 GB at the limit) counts the intermediate matches a query holds at once, across every thread and nested group. A match counts once for up to three labels in the query and more beyond that.
+- `max_expansions` (default unlimited) counts the partial matches and group continuations a query creates in total: a ceiling on work rather than memory. On a laptop the engine does about 16 million a second on an ambiguous pattern.
+- `max_results` (default unlimited) counts the hits a query returns, as they are produced and after span, component and document filters, so a filter that discards most matches does not trip it. A count builds no hits and is not subject to it.
+- Exceeding any of them returns `QueryError::LimitExceeded`, naming the resource and the limit. A query never returns part of its result.
+
+How a query is evaluated, and so how its memory is bounded:
+
+- A sequence produces its matches batch by batch. Span, component and document filters above it, and a constraint it can check as it runs, are applied to each batch as it is produced, for `execute` and `execute_count` alike. A count keeps only a running total; `execute` keeps the hits.
+- A single-token pattern, with or without such filters, goes straight from the inverted index to its hits or its count.
+- Any other shape (an alternation of multi-token sequences, a constraint over one, an alignment projection) is built as an intermediate buffer, charged to `max_intermediate_matches` as it fills, and its hits are then counted against `max_results` in one step.
+
+What is counted as intermediate:
+
+- The active set of each batch, charged every 4,096 partial matches while a step runs and released when the batch is done.
+- Every buffer the query keeps while it runs: the table of a group's sub-matches, the capture assignments enumerated for a constraint that could not be checked inside a sequence, the source matches and the targets of an alignment projection, and the whole result of a shape outside the batch path. Each buffer has a ledger. Matches are charged to it as they are produced, so a buffer that would exceed the limit is refused while it fills and not after it is complete. The ledger returns its charges when the buffer is dropped.
+- The frontier of a repeated group while its continuations are enumerated.
+
+What is not counted as intermediate:
+
+- The hits of a result produced batch by batch. Those fall under `max_results`. Without one, a query with a very large result uses memory in proportion: `a:[]{1,100}` over one 200,000-token document is 20 million hits and about 5.7 GB, where its count takes 33 MB.
+- The list of start positions of one document, 8 bytes per candidate position.
+- Allocator overhead, vector capacity and sort scratch space. The limits are counts, not byte figures.
+
+So `max_intermediate_matches` governs the engine's working storage, and `max_results` the size of what it hands back. Whether a process such as the daemon stays within its memory also depends on how many results it keeps and how many queries it runs at once; neither is limited here.
+
+**Daemon limits**
+
+- `montre_daemon::DEFAULT_LIMITS` applies to `query.execute`, `query.execute_count` and the replay of saved queries: 10 million intermediate matches, a billion expansions (about a minute of matching on a laptop), and 5 million hits (about 240 MB before captures). `ServeOptions::limits` sets other values; `montre serve` has no flags for them yet.
+- A refused query returns error `1102` (execution error), with a message naming the resource and the limit.
+
+A label around a single quantified element, as in `a:([]{1,100})`, is planned as that element labeled and needs no group table.
+
+**Index metadata**
+
+- `corpus.json` records `forward_only_layers`. Corpora built before this field existed load unchanged; on those, a token query on a forward-only string layer returns an empty result as it used to, where a newly built corpus reports `UnindexedLayer`.
+
+**Tests**
+
+- `crates/montre-query/tests/differential.rs` generates small random corpora and random queries (quantifiers, nested groups, alternation, labels, `within s`, global constraints) and compares spans, counts, the exact reported capture assignment, and run-to-run stability against the reference matcher. Run more cases with `PROPTEST_CASES=4000 cargo test -p montre-query --test differential`.
+- Regression tests for each corrected behaviour are at the end of `executor_integration.rs`, including the ambiguous patterns that must either answer within a tight limit or fail with `LimitExceeded`. The differential test's corpora are at most 36 tokens, so resource behaviour is covered by those targeted tests and not by the random ones.
+
+**Still to regenerate**
+
+- The benchmark tables in this file and in the README predate this pass. The match count for `[pos="ADJ"]? [pos="NOUN"]` in particular was an undercount.
 
 ### Phase 4: Statistics & bindings
 

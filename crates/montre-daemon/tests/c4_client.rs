@@ -30,6 +30,7 @@ fn boot_daemon() -> Fixture {
 		corpus_path: corpus,
 		socket_path: Some(socket.clone()),
 		idle_timeout: None,
+		limits: montre_daemon::DEFAULT_LIMITS,
 	};
 	thread::spawn(move || {
 		let _ = serve(options);

@@ -524,6 +524,7 @@ pub(crate) mod test_support {
 			canonical_path: canonical.to_path_buf(),
 			state_dir,
 			results: Arc::new(RwLock::new(HashMap::new())),
+			limits: crate::DEFAULT_LIMITS,
 		})
 	}
 

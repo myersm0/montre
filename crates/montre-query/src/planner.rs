@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::ast::{ConstraintOp, ConstraintValue, GlobalConstraint, Query, TokenPattern};
+use crate::sequence::MAX_QUANTIFIER;
 use crate::{QueryError, Result};
 
 #[derive(Debug, Clone)]
@@ -66,6 +67,73 @@ impl SequenceStep {
 	pub fn repeated(node: PlanNode, min: u32, max: Option<u32>) -> Self {
 		Self { node, min, max, label: None }
 	}
+
+	// an unlabeled, unquantified parenthesized sequence, equivalent to its own steps
+	fn is_plain_group(&self) -> bool {
+		self.label.is_none()
+			&& self.min == 1
+			&& self.max == Some(1)
+			&& matches!(self.node, PlanNode::SequenceScan { .. })
+	}
+}
+
+impl PlanNode {
+	/// True when every match of this node is exactly one token.
+	pub(crate) fn is_token_level(&self) -> bool {
+		match self {
+			PlanNode::ScanLiteral { .. } | PlanNode::ScanRegex { .. } | PlanNode::ScanAll => true,
+			PlanNode::Intersect(nodes) | PlanNode::Union(nodes) => {
+				nodes.iter().all(PlanNode::is_token_level)
+			}
+			PlanNode::Difference { base, subtract } => {
+				base.is_token_level() && subtract.is_token_level()
+			}
+			_ => false,
+		}
+	}
+
+	/// True when this node can match the empty span.
+	pub(crate) fn is_nullable(&self) -> bool {
+		match self {
+			PlanNode::SequenceScan { steps } => steps
+				.iter()
+				.all(|step| step.min == 0 || step.node.is_nullable()),
+			PlanNode::Union(nodes) => nodes.iter().any(PlanNode::is_nullable),
+			PlanNode::FilterBySpan { inner, .. }
+			| PlanNode::FilterByComponent { inner, .. }
+			| PlanNode::FilterByDocument { inner, .. } => inner.is_nullable(),
+			_ => false,
+		}
+	}
+
+	/// Labels declared anywhere beneath this node, in query order.
+	pub(crate) fn collect_labels(&self, out: &mut Vec<String>) {
+		match self {
+			PlanNode::SequenceScan { steps } => {
+				for step in steps {
+					if let Some(label) = &step.label {
+						if !out.contains(label) {
+							out.push(label.clone());
+						}
+					}
+					step.node.collect_labels(out);
+				}
+			}
+			PlanNode::Intersect(nodes) | PlanNode::Union(nodes) => {
+				nodes.iter().for_each(|node| node.collect_labels(out));
+			}
+			PlanNode::Difference { base, subtract } => {
+				base.collect_labels(out);
+				subtract.collect_labels(out);
+			}
+			PlanNode::FilterBySpan { inner, .. }
+			| PlanNode::FilterByComponent { inner, .. }
+			| PlanNode::FilterByDocument { inner, .. }
+			| PlanNode::ProjectAlignment { inner, .. }
+			| PlanNode::GlobalConstraintFilter { inner, .. } => inner.collect_labels(out),
+			PlanNode::ScanLiteral { .. } | PlanNode::ScanRegex { .. } | PlanNode::ScanAll => {}
+		}
+	}
 }
 
 #[derive(Debug)]
@@ -85,50 +153,69 @@ fn extract_label(query: &Query) -> (Option<String>, &Query) {
 	}
 }
 
+fn plan_step(query: &Query) -> Result<SequenceStep> {
+	let (quantified, min, max) = match query {
+		Query::Repetition { inner, min, max } => (inner.as_ref(), *min, *max),
+		_ => (query, 1, Some(1)),
+	};
+	if let Some(bound) = [Some(min), max]
+		.into_iter()
+		.flatten()
+		.find(|&bound| bound > MAX_QUANTIFIER)
+	{
+		return Err(QueryError::QuantifierTooLarge {
+			bound,
+			limit: MAX_QUANTIFIER,
+		});
+	}
+	let (label, inner) = extract_label(quantified);
+	let node = plan_node(inner)?;
+	// a label around one quantified element, as in a:([]{1,5}), is that element labeled
+	if min == 1 && max == Some(1) {
+		if let PlanNode::SequenceScan { steps } = &node {
+			if let [only] = steps.as_slice() {
+				if only.label.is_none() {
+					return Ok(SequenceStep {
+						label,
+						..only.clone()
+					});
+				}
+			}
+		}
+	}
+	Ok(SequenceStep {
+		node,
+		min,
+		max,
+		label,
+	})
+}
+
 fn plan_node(query: &Query) -> Result<PlanNode> {
 	match query {
 		Query::Token(pattern) => plan_token(pattern),
 
 		Query::Sequence(parts) => {
 			let mut steps = Vec::new();
-			for q in parts {
-				match q {
-					Query::Repetition { inner, min, max } => {
-						let (label, actual_inner) = extract_label(inner);
-						let inner_plan = plan_node(actual_inner)?;
-						steps.push(SequenceStep {
-							node: inner_plan,
-							min: *min,
-							max: *max,
-							label,
-						});
+			for part in parts {
+				let step = plan_step(part)?;
+				if step.is_plain_group() {
+					if let PlanNode::SequenceScan { steps: inner } = step.node {
+						steps.extend(inner);
 					}
-					_ => {
-						let (label, actual) = extract_label(q);
-						let node = plan_node(actual)?;
-						steps.push(SequenceStep {
-							node,
-							min: 1,
-							max: Some(1),
-							label,
-						});
-					}
+				} else {
+					steps.push(step);
 				}
 			}
 			Ok(PlanNode::SequenceScan { steps })
 		}
 
-		Query::Repetition { inner, min, max } => {
-			let (label, actual_inner) = extract_label(inner);
-			let inner_plan = plan_node(actual_inner)?;
-			Ok(PlanNode::SequenceScan {
-				steps: vec![SequenceStep {
-					node: inner_plan,
-					min: *min,
-					max: *max,
-					label,
-				}],
-			})
+		Query::Repetition { .. } => {
+			let step = plan_step(query)?;
+			if step.is_plain_group() {
+				return Ok(step.node);
+			}
+			Ok(PlanNode::SequenceScan { steps: vec![step] })
 		}
 
 		Query::Or(alternatives) => {
@@ -144,17 +231,9 @@ fn plan_node(query: &Query) -> Result<PlanNode> {
 			})
 		}
 
-		Query::Capture { name, inner } => {
-			let inner_plan = plan_node(inner)?;
-			Ok(PlanNode::SequenceScan {
-				steps: vec![SequenceStep {
-					node: inner_plan,
-					min: 1,
-					max: Some(1),
-					label: Some(name.clone()),
-				}],
-			})
-		}
+		Query::Capture { .. } => Ok(PlanNode::SequenceScan {
+			steps: vec![plan_step(query)?],
+		}),
 
 		Query::WithinComponent { inner, components } => {
 			let inner_plan = plan_node(inner)?;
