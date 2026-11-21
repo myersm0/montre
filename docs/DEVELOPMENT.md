@@ -1167,6 +1167,10 @@ Criterion benchmarks live in the `montre-bench` crate (`crates/montre-bench/`). 
 - `MONTRE_BENCH_CORPUS` — path to a pre-built montre corpus (query benchmarks)
 - `MONTRE_BENCH_CONLLU` — path to a directory of .conllu files (single-component build + parse benchmarks)
 - `MONTRE_BENCH_MANIFEST` — path to a corpus build manifest TOML (multi-component build benchmark)
+- `MONTRE_BENCH_ALIGNMENT` — alignment for the projection benchmarks (default: the corpus's first alignment; the projection benchmarks are skipped when it has none)
+- `MONTRE_BENCH_SOURCE_COMPONENT` — component the lemma slots are drawn from and projected out of (default: the alignment's source component, else the first component)
+
+The lexical queries take their lemmas from the corpus itself, so the same benchmarks run on any language. As in [pando](https://github.com/ufal/pando)'s engine benchmark, three slots are filled with the noun lemmas closest to 2, 100 and 3,000 occurrences per million tokens of the source component: a lemma qualifies when it is alphabetic and tagged `NOUN` in most of its occurrences, and ties go to the alphabetically first. `lemma_prefix` is a regex on the frequent lemma's first two characters, and `scanall_then_mid` is `[]` followed by the mid lemma. The slots chosen are printed at the start of the run, since a different corpus (or a rebuild with different annotation) changes them, and with them what those benchmarks measure.
 
 ```bash
 cargo bench -p montre-bench --bench query    # query and load benchmarks
