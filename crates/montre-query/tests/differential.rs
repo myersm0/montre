@@ -328,7 +328,18 @@ enum Shape {
 	Group(Vec<Vec<Shape>>),
 	Quantified(Box<Shape>, String),
 	Labeled(Box<Shape>),
+	// a group with `within s`, a constraint over its own labels, or both; with
+	// both, the constraint either applies inside the filter or around it
+	Scoped {
+		alternatives: Vec<Vec<Shape>>,
+		within_sentence: bool,
+		constraint: Option<ConstraintShape>,
+		constraint_inside: bool,
+	},
 }
+
+// (left label, right label, kind, distance), labels taken modulo those available
+type ConstraintShape = (usize, usize, u8, u32);
 
 fn token() -> impl Strategy<Value = Shape> {
 	let tag = prop::sample::select(TAGS.to_vec());
@@ -367,7 +378,21 @@ fn element() -> impl Strategy<Value = Shape> {
 			2 => (inner.clone(), quantifier())
 				.prop_map(|(shape, quantifier)| Shape::Quantified(Box::new(shape), quantifier)),
 			2 => inner.prop_map(|shape| Shape::Labeled(Box::new(shape))),
-			2 => prop::collection::vec(sequence, 1..3).prop_map(Shape::Group),
+			2 => prop::collection::vec(sequence.clone(), 1..3).prop_map(Shape::Group),
+			1 => (
+				prop::collection::vec(sequence, 1..3),
+				prop::bool::ANY,
+				prop::option::of((0usize..8, 0usize..8, 0u8..5, 0u32..3)),
+				prop::bool::ANY,
+			)
+				.prop_map(|(alternatives, within_sentence, constraint, constraint_inside)| {
+					Shape::Scoped {
+						alternatives,
+						within_sentence,
+						constraint,
+						constraint_inside,
+					}
+				}),
 		]
 	})
 }
@@ -376,7 +401,7 @@ fn element() -> impl Strategy<Value = Shape> {
 struct QueryShape {
 	alternatives: Vec<Vec<Shape>>,
 	within_sentence: bool,
-	constraints: Vec<(usize, usize, u8, u32)>,
+	constraints: Vec<ConstraintShape>,
 }
 
 fn query_shape() -> impl Strategy<Value = QueryShape> {
@@ -428,11 +453,45 @@ impl Renderer {
 				let label = LABELS[self.labels_used];
 				self.labels_used += 1;
 				match inner.as_ref() {
-					Shape::Token(_) | Shape::Group(_) => format!("{label}:{}", self.shape(inner)),
+					Shape::Token(_) | Shape::Group(_) | Shape::Scoped { .. } => {
+						format!("{label}:{}", self.shape(inner))
+					}
 					_ => format!("{label}:({})", self.shape(inner)),
 				}
 			}
+			Shape::Scoped {
+				alternatives,
+				within_sentence,
+				constraint,
+				constraint_inside,
+			} => {
+				let first_label = self.labels_used;
+				let body = self.alternatives(alternatives);
+				let declared = &LABELS[first_label..self.labels_used];
+				let constraint = constraint
+					.filter(|_| !declared.is_empty())
+					.map(|constraint| format!(" :: {}", render_constraint(constraint, declared)))
+					.unwrap_or_default();
+				let within = if *within_sentence { " within s" } else { "" };
+				if *constraint_inside {
+					format!("(({body}{constraint}){within})")
+				} else {
+					format!("({body}{within}{constraint})")
+				}
+			}
 		}
+	}
+}
+
+fn render_constraint((left, right, kind, value): ConstraintShape, labels: &[&str]) -> String {
+	let label = |index: usize| labels[index % labels.len()];
+	let (left, right) = (label(left), label(right));
+	match kind {
+		0 => format!("{left}.lemma = {right}.lemma"),
+		1 => format!("{left}.pos != {right}.pos"),
+		2 => format!("{left}.pos = {right}.pos"),
+		3 => format!("distance({left},{right}) >= {value}"),
+		_ => format!("distance({left},{right}) < {value}"),
 	}
 }
 
@@ -443,17 +502,11 @@ fn render(shape: &QueryShape) -> String {
 		query.push_str(" within s");
 	}
 	if renderer.labels_used > 0 && !shape.constraints.is_empty() {
-		let label = |index: usize| LABELS[index % renderer.labels_used];
+		let declared = &LABELS[..renderer.labels_used];
 		let rendered: Vec<String> = shape
 			.constraints
 			.iter()
-			.map(|&(left, right, kind, value)| match kind {
-				0 => format!("{}.lemma = {}.lemma", label(left), label(right)),
-				1 => format!("{}.pos != {}.pos", label(left), label(right)),
-				2 => format!("{}.pos = {}.pos", label(left), label(right)),
-				3 => format!("distance({},{}) >= {value}", label(left), label(right)),
-				_ => format!("distance({},{}) < {value}", label(left), label(right)),
-			})
+			.map(|&constraint| render_constraint(constraint, declared))
 			.collect();
 		query.push_str(" :: ");
 		query.push_str(&rendered.join(" & "));

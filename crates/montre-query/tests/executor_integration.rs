@@ -1882,3 +1882,16 @@ fn result_limit_counts_hits_after_filtering() {
 		Err(QueryError::LimitExceeded { resource: "results", limit: 5 })
 	));
 }
+
+#[test]
+fn constraint_under_a_filter_inside_a_group_still_applies() {
+	let corpus = build_corpus(NOUN_RUN);
+	// the/DET big/ADJ house/NOUN stands/VERB: DET and ADJ never share a pos
+	let never = r#"((a:[pos="DET"] b:[pos="ADJ"] :: a.pos = b.pos) within s) [pos="NOUN"]"#;
+	let always = r#"((a:[pos="DET"] b:[pos="ADJ"] :: a.pos != b.pos) within s) [pos="NOUN"]"#;
+	assert_eq!(query_count(&corpus, never), 0);
+	assert_eq!(query_spans(&corpus, always), vec![(0, 3)]);
+	let parsed = montre_query::parse(never).unwrap();
+	let plan = montre_query::planner::plan(&parsed).unwrap();
+	assert_eq!(montre_query::executor::execute_count(&plan, &corpus).unwrap(), 0);
+}

@@ -8,10 +8,9 @@ use roaring::RoaringBitmap;
 
 use crate::ast::{CmpOp, GlobalConstraint, LabelAttr};
 use crate::budget::{Budget, Ledger, Limits, Output};
-use crate::sequence::CHARGE_STRIDE;
 use crate::planner::{PlanNode, QueryPlan, SequenceStep};
 use crate::sequence::{
-	Bindings, Keep, LabelId, Match, Matcher, Run, Sequence, Slot, Slots, Step,
+	Bindings, Keep, LabelId, Match, Matcher, Run, Sequence, Slot, Slots, Step, CHARGE_STRIDE,
 	MAX_QUANTIFIER, UNBOUND, runs_from_bitmap,
 };
 use crate::validate::validate;
@@ -186,9 +185,9 @@ impl<'a> Context<'a> {
 
 		if core.is_token_level() {
 			let slot_count = self.labels.len();
-			let bitmap = self.token_bitmap(core)?;
-			let mut found = Vec::with_capacity(bitmap.len() as usize);
-			for position in bitmap.iter().map(u64::from) {
+			// a filter may keep few of the positions, so the result grows as they are found
+			let mut found = Vec::new();
+			for position in self.token_bitmap(core)?.iter().map(u64::from) {
 				if keep(position, position + 1) {
 					found.push(Match::unlabeled(position, position + 1, slot_count));
 					if found.len() % CHARGE_STRIDE == 0 {
@@ -360,12 +359,14 @@ impl<'a> Context<'a> {
 			PlanNode::FilterBySpan { .. }
 			| PlanNode::FilterByComponent { .. }
 			| PlanNode::FilterByDocument { .. } => {
-				let (core, _, filters) = self.peel(node);
+				// a constraint beneath the filters is peeled with them, and joins the caller's
+				let (core, own, filters) = self.peel(node);
+				let checks: Vec<Check> = checks.iter().cloned().chain(own).collect();
 				let keep = |start: u64, end: u64| self.accepts(&filters, start, end);
 				if let PlanNode::SequenceScan { steps } = core {
-					return self.sequence_matches(steps, bindings, checks, Output::Buffered(ledger), &keep);
+					return self.sequence_matches(steps, bindings, &checks, Output::Buffered(ledger), &keep);
 				}
-				let mut matches = self.matches(core, bindings, checks, ledger)?;
+				let mut matches = self.matches(core, bindings, &checks, ledger)?;
 				matches.retain(|found| keep(found.start, found.end));
 				Ok(matches)
 			}
