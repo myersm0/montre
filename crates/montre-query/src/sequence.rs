@@ -241,6 +241,49 @@ impl Step {
 		Ok(())
 	}
 
+	fn fixed_width(&self) -> Option<u64> {
+		match self.matcher {
+			Matcher::Runs(_) if self.min == self.max && self.min > 0 => Some(u64::from(self.min)),
+			_ => None,
+		}
+	}
+
+	fn matches_nowhere(&self) -> bool {
+		match &self.matcher {
+			Matcher::Runs(runs) => runs.is_empty(),
+			Matcher::Spans(table) => table.is_empty(),
+		}
+	}
+
+	fn start_count(&self) -> u64 {
+		match &self.matcher {
+			Matcher::Runs(runs) => runs.iter().map(|run| run.end - run.start).sum(),
+			Matcher::Spans(table) => table.len() as u64,
+		}
+	}
+
+	// whether one repetition of the step, or `min` of them for a token step,
+	// can begin at `position` and end by `limit`; `cursor` carries the search
+	// over from the previous, smaller position
+	fn can_start_at(&self, position: u64, limit: u64, cursor: &mut usize) -> bool {
+		match &self.matcher {
+			Matcher::Runs(runs) => {
+				*cursor = gallop(runs, *cursor, |run| run.end <= position);
+				let shortest = u64::from(self.min.max(1));
+				runs.get(*cursor).is_some_and(|run| {
+					run.start <= position && run.end.min(limit) >= position + shortest
+				})
+			}
+			Matcher::Spans(table) => {
+				*cursor = gallop(table, *cursor, |candidate| candidate.start < position);
+				table[*cursor..]
+					.iter()
+					.take_while(|candidate| candidate.start == position)
+					.any(|candidate| candidate.end <= limit)
+			}
+		}
+	}
+
 	fn start_positions(&self, range: Span, out: &mut Vec<u64>) {
 		match &self.matcher {
 			Matcher::Runs(runs) => {
@@ -260,6 +303,18 @@ impl Step {
 			}
 		}
 	}
+}
+
+// the first index from `from` at which `before` fails, for a predicate that
+// holds on a prefix of `items`; O(log distance) from `from`
+fn gallop<T>(items: &[T], from: usize, before: impl Fn(&T) -> bool) -> usize {
+	let rest = &items[from..];
+	let mut bound = 1;
+	while bound < rest.len() && before(&rest[bound]) {
+		bound *= 2;
+	}
+	let low = bound / 2;
+	from + low + rest[low..bound.min(rest.len())].partition_point(before)
 }
 
 fn run_containing(runs: &[Run], position: u64) -> Option<&Run> {
@@ -284,6 +339,14 @@ pub(crate) type Keep<'a> = &'a (dyn Fn(u64, u64) -> bool + Sync);
 pub(crate) struct Sequence {
 	steps: Vec<Step>,
 	seed_steps: usize,
+	// mandatory steps at a fixed offset from the start of every match, rarest
+	// first; empty when the first step is optional
+	anchors: Vec<(usize, u64)>,
+	// set when every step is a fixed-width token step and nothing is bound,
+	// so that each start the anchors admit is the start of exactly one match
+	width: Option<u64>,
+	// a mandatory step matches nowhere
+	unmatchable: bool,
 	slot_count: usize,
 	match_cost: u64,
 	// per step: slots it declares that a constraint reads; left unbound by the
@@ -310,6 +373,30 @@ impl Sequence {
 			.iter()
 			.position(|step| step.min > 0)
 			.map_or(steps.len(), |index| index + 1);
+		let mut anchors = Vec::new();
+		let mut offset = 0;
+		for (index, step) in steps.iter().enumerate() {
+			if step.min == 0 {
+				break;
+			}
+			anchors.push((index, offset));
+			match step.fixed_width() {
+				Some(width) => offset += width,
+				None => break,
+			}
+		}
+		let binds_nothing = constraints.is_empty()
+			&& steps
+				.iter()
+				.all(|step| step.label.is_none() && step.declares.is_empty());
+		let fixed = steps.iter().all(|step| step.fixed_width().is_some());
+		let width = (fixed && binds_nothing && !steps.is_empty()).then_some(offset);
+		if anchors.len() > 1 {
+			anchors.sort_by_cached_key(|&(index, _)| steps[index].start_count());
+		}
+		let unmatchable = steps
+			.iter()
+			.any(|step| step.min > 0 && step.matches_nowhere());
 		let last_step = steps.len().saturating_sub(1);
 		let declaring_step = |slot: &LabelId| {
 			steps
@@ -358,6 +445,9 @@ impl Sequence {
 		Self {
 			steps,
 			seed_steps,
+			anchors,
+			width,
+			unmatchable,
 			slot_count,
 			match_cost: 1 + slot_count as u64 / 4,
 			required,
@@ -442,6 +532,18 @@ impl Sequence {
 		holds: Holds,
 		budget: &Budget,
 	) -> Result<Vec<Partial<T>>> {
+		if let Some(width) = self.width {
+			budget.hold(self.cost(seeds.len()))?;
+			budget.expand(seeds.len() as u64)?;
+			return Ok(seeds
+				.iter()
+				.map(|&start| Partial {
+					end: start + width,
+					start,
+					track: T::unbound(self.slot_count),
+				})
+				.collect());
+		}
 		let mut active: Vec<Partial<T>> = seeds
 			.iter()
 			.map(|&position| Partial {
@@ -518,7 +620,43 @@ impl Sequence {
 		Ok(active)
 	}
 
+	// Where matches inside `range` may start. With anchors, the candidates
+	// come from the rarest of them and must suit every one.
 	fn seeds(&self, range: Span) -> Vec<u64> {
+		if self.unmatchable {
+			return Vec::new();
+		}
+		// a lone anchor is the first step, whose starts are the seeds already
+		if self.anchors.len() < 2 && self.width.is_none() {
+			return self.starts_of_leading_steps(range);
+		}
+		let Some(&(rarest, rarest_offset)) = self.anchors.first() else {
+			return self.starts_of_leading_steps(range);
+		};
+		if range.start + rarest_offset >= range.end {
+			return Vec::new();
+		}
+		let mut positions = Vec::new();
+		self.steps[rarest].start_positions(
+			Span::new(range.start + rarest_offset, range.end),
+			&mut positions,
+		);
+		positions.dedup();
+		let mut cursors = vec![0; self.anchors.len()];
+		positions.retain_mut(|position| {
+			*position -= rarest_offset;
+			let start = *position;
+			self.anchors
+				.iter()
+				.zip(&mut cursors)
+				.all(|(&(step, offset), cursor)| {
+					self.steps[step].can_start_at(start + offset, range.end, cursor)
+				})
+		});
+		positions
+	}
+
+	fn starts_of_leading_steps(&self, range: Span) -> Vec<u64> {
 		let mut positions = Vec::new();
 		for step in &self.steps[..self.seed_steps] {
 			step.start_positions(range, &mut positions);
@@ -594,6 +732,18 @@ mod tests {
 	}
 
 	#[test]
+	fn gallop_finds_the_end_of_the_prefix_from_any_start() {
+		let items: Vec<u32> = (0..37).collect();
+		for from in 0..=items.len() {
+			for threshold in 0..40 {
+				let expected = (threshold as usize).clamp(from, items.len());
+				assert_eq!(gallop(&items, from, |&item| item < threshold), expected);
+			}
+		}
+		assert_eq!(gallop(&[] as &[u32], 0, |_| true), 0);
+	}
+
+	#[test]
 	fn run_containing_respects_gaps() {
 		let found = runs(&[0, 1, 2, 5, 6]);
 		assert!(run_containing(&found, 2).is_some());
@@ -616,6 +766,56 @@ mod tests {
 		// positions 4, 5, 6 all satisfy the second step; none is preceded by the first
 		let sequence = unlabeled(vec![token_step(&[1], 0, 1), token_step(&[2, 4, 5, 6], 1, 1)]);
 		assert_eq!(spans(&sequence, 10), vec![(1, 3), (2, 3), (4, 5), (5, 6), (6, 7)]);
+	}
+
+	#[test]
+	fn a_mandatory_step_that_matches_nowhere_leaves_no_seeds() {
+		let sequence = unlabeled(vec![token_step(&[0, 1, 2], 1, 1), token_step(&[], 1, 1)]);
+		assert!(sequence.seeds(Span::new(0, 10)).is_empty());
+		let optional = unlabeled(vec![token_step(&[0, 1, 2], 1, 1), token_step(&[], 0, 1)]);
+		assert_eq!(spans(&optional, 10), vec![(0, 1), (1, 2), (2, 3)]);
+	}
+
+	#[test]
+	fn seeds_come_from_the_rarest_anchored_step() {
+		let every = (0..10).collect::<Vec<u32>>();
+		let sequence = unlabeled(vec![
+			token_step(&every, 1, 1),
+			token_step(&every, 2, 2),
+			token_step(&[4, 8], 1, 1),
+		]);
+		assert_eq!(sequence.seeds(Span::new(0, 10)), vec![1, 5]);
+		assert_eq!(spans(&sequence, 10), vec![(1, 5), (5, 9)]);
+	}
+
+	#[test]
+	fn an_anchor_after_a_variable_step_is_not_used() {
+		let sequence = unlabeled(vec![
+			token_step(&[0, 1, 2, 3], 1, 2),
+			token_step(&[3], 1, 1),
+		]);
+		assert_eq!(sequence.seeds(Span::new(0, 10)), vec![0, 1, 2, 3]);
+		assert_eq!(spans(&sequence, 10), vec![(1, 4), (2, 4)]);
+	}
+
+	#[test]
+	fn fixed_width_matches_agree_with_labeled_extension() {
+		let positions = [0, 1, 2, 4, 5, 7, 8, 9];
+		let fixed = unlabeled(vec![token_step(&positions, 1, 1), token_step(&positions, 2, 2)]);
+		let extended = Sequence::new(
+			vec![labeled(&positions, 1, 1, 0), token_step(&positions, 2, 2)],
+			1,
+			&[],
+			Bindings::Canonical,
+		);
+		assert!(fixed.width.is_some());
+		assert!(extended.width.is_none());
+		let expected: Vec<(u64, u64)> = assignments(&extended, 10, &|_, _| true)
+			.into_iter()
+			.map(|found| (found.start, found.end))
+			.collect();
+		assert_eq!(spans(&fixed, 10), expected);
+		assert_eq!(expected, vec![(0, 3), (7, 10)]);
 	}
 
 	#[test]

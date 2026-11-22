@@ -2,13 +2,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use montre_core::{LayerKind, Span, UnitId, span_containing};
-use rayon;
 use serde::{Deserialize, Serialize};
 
 use crate::empty_nodes::EmptyNodeStore;
 use crate::forward_flat::{MappedForward, ForwardStore};
 use crate::inverted::InMemoryInverted;
-use crate::lexicon::InMemoryLexicon;
 use crate::mwt::MappedMWTs;
 use crate::sentence_ids::MappedSentenceIds;
 use crate::spacing::SpacingIndex;
@@ -82,31 +80,11 @@ pub struct Corpus {
 	inverted: InMemoryInverted,
 	forward: ForwardStore,
 	spans: SpanStore,
-	lexicon: InMemoryLexicon,
 	alignments: AlignmentIndex,
 	sentence_ids: Option<MappedSentenceIds>,
 	mwts: Option<MappedMWTs>,
 	spacing: Option<SpacingIndex>,
 	empty_nodes: Option<EmptyNodeStore>,
-}
-
-fn load_indexes(
-	path: &Path,
-) -> Result<(InMemoryInverted, InMemoryLexicon)> {
-	let (inverted, lexicon) = rayon::join(
-		|| -> Result<InMemoryInverted> {
-			let bytes = std::fs::read(path.join("inverted.bin"))?;
-			bincode::deserialize(&bytes)
-				.map_err(|e| IndexError::Format(format!("Failed to deserialize inverted index: {}", e)))
-		},
-		|| -> Result<InMemoryLexicon> {
-			let bytes = std::fs::read(path.join("lexicon.bin"))?;
-			bincode::deserialize(&bytes)
-				.map_err(|e| IndexError::Format(format!("Failed to deserialize lexicon: {}", e)))
-		},
-	);
-
-	Ok((inverted?, lexicon?))
 }
 
 impl Corpus {
@@ -139,7 +117,7 @@ impl Corpus {
 			});
 		}
 
-		let (inverted, lexicon) = load_indexes(path)?;
+		let inverted = InMemoryInverted::from_bytes(&std::fs::read(path.join("inverted.bin"))?)?;
 		let spans = SpanStore::Mapped(MappedSpans::open(path.join("spans.bin"))?);
 		let forward = ForwardStore::Mapped(MappedForward::open(path.join("forward.bin"))?);
 
@@ -181,7 +159,6 @@ impl Corpus {
 			inverted,
 			forward,
 			spans,
-			lexicon,
 			alignments,
 			sentence_ids,
 			mwts,

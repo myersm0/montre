@@ -710,7 +710,7 @@ Recommend deferring this to Phase 2c or later. It's useful but not core to the q
 - [x] Multi-component build (components built sequentially, files within each in parallel)
 - [x] Document-parallel sequence execution with range-restricted position lookups
 - [x] Adaptive dispatch heuristic (`benefits_from_parallel`)
-- [x] Parallel corpus deserialization (`rayon::join` for inverted index and lexicon; forward and spans are memory-mapped)
+- [x] Parallel corpus deserialization (inverted index bitmaps parsed in parallel; lexicon not loaded; forward and spans are memory-mapped)
 - [x] Criterion benchmark suite (`montre-bench` crate)
 
 **Build pipeline**

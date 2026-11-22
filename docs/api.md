@@ -634,7 +634,7 @@ corpus/
 
 Index version is stored in `corpus.json` and checked on load.
 
-The `forward.bin`, `spans.bin`, `sentence_ids.bin`, and `mwt.bin` files use custom flat binary formats designed for memory-mapped access. They are opened via `mmap` on `Corpus::open` with no deserialization — the OS pages data into RAM on demand. The `inverted.bin` and `lexicon.bin` files are still bincode-serialized and deserialized into heap structures on open. The `spacing.bin` file contains a serialized roaring bitmap with a small header. The `empty_nodes.json` file is deserialized into memory on open.
+The `forward.bin`, `spans.bin`, `sentence_ids.bin`, and `mwt.bin` files use custom flat binary formats designed for memory-mapped access. They are opened via `mmap` on `Corpus::open` with no deserialization — the OS pages data into RAM on demand. The `inverted.bin` file is still bincode-serialized and deserialized into heap structures on open, its bitmaps parsed in parallel. The `lexicon.bin` file is written by the build but not read on open. The `spacing.bin` file contains a serialized roaring bitmap with a small header. The `empty_nodes.json` file is deserialized into memory on open.
 
 ## Build manifest
 

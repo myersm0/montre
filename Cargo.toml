@@ -32,6 +32,8 @@ fst = "0.4"
 memmap2 = "0.9"
 compact_str = { version = "0.8", features = ["serde"] }
 smallvec = { version = "1.13", features = ["union", "serde"] }
+indexmap = { version = "2", features = ["rayon", "serde"] }
+rustc-hash = "2"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

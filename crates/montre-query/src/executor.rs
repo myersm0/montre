@@ -407,15 +407,7 @@ impl<'a> Context<'a> {
 
 			PlanNode::ScanRegex { layer, pattern } => {
 				let regex = regex::Regex::new(pattern)?;
-				let mut combined = RoaringBitmap::new();
-				for value in inverted.values(layer).unwrap_or_default() {
-					if regex.is_match(value) {
-						if let Some(bitmap) = inverted.get(layer, value) {
-							combined |= bitmap;
-						}
-					}
-				}
-				Ok(Cow::Owned(combined))
+				Ok(Cow::Owned(inverted.positions_where(layer, move |value| regex.is_match(value))))
 			}
 
 			PlanNode::ScanAll => {
