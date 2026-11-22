@@ -11,7 +11,7 @@ use crate::budget::{Budget, Ledger, Limits, Output};
 use crate::planner::{PlanNode, QueryPlan, SequenceStep};
 use crate::sequence::{
 	Bindings, Keep, LabelId, Match, Matcher, Run, Sequence, Slot, Slots, Step, CHARGE_STRIDE,
-	MAX_QUANTIFIER, UNBOUND, runs_from_bitmap,
+	MAX_QUANTIFIER, SHORT_REPETITION, UNBOUND, runs_from_bitmap,
 };
 use crate::validate::validate;
 use crate::{QueryError, Result};
@@ -465,11 +465,14 @@ impl<'a> Context<'a> {
 		let mut ledgers = Vec::new();
 		let mut prepared = Vec::with_capacity(steps.len());
 		for step in steps {
+			let max = step.max.unwrap_or(MAX_QUANTIFIER).min(MAX_QUANTIFIER);
 			let matcher = if matches!(step.node, PlanNode::ScanAll) {
 				Matcher::Runs(vec![Run {
 					start: 0,
 					end: self.corpus.token_count(),
 				}])
+			} else if step.node.is_token_level() && max <= SHORT_REPETITION {
+				Matcher::Bitmap(self.token_bitmap(&step.node)?)
 			} else if step.node.is_token_level() {
 				Matcher::Runs(runs_from_bitmap(self.token_bitmap(&step.node)?.as_ref()))
 			} else {
@@ -481,7 +484,7 @@ impl<'a> Context<'a> {
 			prepared.push(Step {
 				matcher,
 				min: if step.node.is_nullable() { 0 } else { step.min },
-				max: step.max.unwrap_or(MAX_QUANTIFIER).min(MAX_QUANTIFIER),
+				max,
 				label: step.label.as_deref().and_then(|name| self.label_id(name)),
 				declares: self.declared_by(step),
 			});
@@ -686,7 +689,7 @@ enum Filter<'a> {
 
 // a sequence ready to run, with the charges for its group tables
 struct Prepared<'b> {
-	sequence: Sequence,
+	sequence: Sequence<'b>,
 	_ledgers: Vec<Ledger<'b>>,
 }
 
