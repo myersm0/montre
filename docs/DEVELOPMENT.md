@@ -682,7 +682,7 @@ Recommend deferring this to Phase 2c or later. It's useful but not core to the q
 ### Phase 3a: FFI, performance, code quality ✓
 
 - [x] C FFI crate (`montre-ffi`, 55 exported functions across 8 modules)
-- [x] Inverted index: two-level HashMap (zero-alloc lookups)
+- [x] Inverted index: two-level hash map (zero-alloc lookups), Fx-hashed, with each layer's values in an `IndexMap` so that a regex scan over them can be split across threads
 - [x] Binary search in FilterBySpan and FilterByComponent
 - [x] ScanAll: `RunIndex::full` avoids materializing all positions
 - [x] Builder deduplication: shared `IndexSink`
@@ -977,8 +977,9 @@ A rework of sequence execution and name validation, checked by a differential te
 
 **Execution model**
 
-- Each sequence step is prepared once per query, over the whole corpus. A single-token step becomes a list of runs built from roaring set operations on the inverted index (a regex is resolved against the vocabulary once). A multi-token step (a group, or an alternation containing a sequence) becomes a sorted table of its sub-matches with their captures.
-- A match can only begin where one of the steps up to and including the first mandatory one begins; those positions seed the active set. Each step then extends every partial match, or passes it through unchanged when the step is optional.
+- Each sequence step is prepared once per query, over the whole corpus. A single-token step repeated at most 8 times (`SHORT_REPETITION`) is matched against its bitmap from the inverted index, which a literal borrows without copying (a regex is resolved against the vocabulary once). A single-token step with a longer or unbounded repetition (`+`, `*`, `{n,}`), and `[]`, become a list of runs of consecutive positions, from which every possible end of a repetition can be read directly. A multi-token step (a group, or an alternation containing a sequence) becomes a sorted table of its sub-matches with their captures.
+- A match can only begin where one of the steps up to and including the first mandatory one begins. When the first step is mandatory, every mandatory step at a fixed offset from the start of a match (every step before it being a single-token step of fixed width) narrows this further. Start positions are taken from the rarest of these steps and kept only where each of the others matches at its offset. A mandatory step that matches nowhere leaves no start positions at all. The surviving positions seed the active set, and each step then extends every partial match, or passes it through unchanged when the step is optional.
+- When the query binds no labels and every step is a single-token step, the sequence is split instead into one fixed-width pattern per combination of repetition counts, up to 16 of them: `[X]? [Y]` becomes `[Y]` and `[X] [Y]`. Each pattern's matches are found from its rarest step as above, with no active set, and a span matched by two patterns of equal width is reported once. Pando's `seq_gap_bitmap` handles optional and bounded steps the same way.
 - The active set is a flat vector of (end, start, captures), sorted and deduplicated after every step. Nothing depends on hash iteration order.
 - Captures are one slot per label of the query, held inline for up to four labels. They are tracked only when the query declares labels; the unlabeled path carries a zero-sized payload through the same code.
 - A global constraint directly above a sequence (span, component and document filters may sit between) is checked inside the sequence, as soon as the last step that declares one of its labels has run. Until then the slots it reads keep partial matches apart; once no pending constraint reads a slot, partial matches differing only there collapse to the smallest.
@@ -1098,7 +1099,7 @@ Quantifier queries and `ScanAll`-in-first-position use document-parallel executi
 | Maupassant (1.5M tokens, 6 layers) | 94MB | 1.75GB | 18.7× |
 | Maupassant + ELTeC-fra (11.5M tokens, 25 layers) | 1.2GB | n/a | — |
 
-The mmap-backed forward and span indexes contribute only the pages the OS faults in during the query. The remaining RSS is dominated by the inverted index and lexicon, which are still heap-deserialized.
+The mmap-backed forward and span indexes contribute only the pages the OS faults in during the query. The remaining RSS is dominated by the inverted index, which is still heap-deserialized. These figures were measured while `lexicon.bin` was also loaded on open; it no longer is.
 
 ### Peak memory (build-time RSS)
 
@@ -1175,7 +1176,7 @@ The lexical queries take their lemmas from the corpus itself, so the same benchm
 ```bash
 cargo bench -p montre-bench --bench query    # query and load benchmarks
 cargo bench -p montre-bench --bench build    # build pipeline benchmarks
-cargo bench -p montre-bench --bench lookup   # inverted index lookup microbenchmarks
+cargo bench -p montre-bench --bench roaring  # roaring bitmap microbenchmarks
 cargo bench -p montre-bench --bench query -- corpus_open   # filter to a single benchmark
 ```
 
