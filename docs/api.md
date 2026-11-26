@@ -97,6 +97,8 @@ for hit in results { ... }          // consumes
 results.populate_context(&corpus);
 ```
 
+Hits are sorted by span start, then span end, with exactly one hit per distinct span. A query reports every distinct non-empty span that matches it, nested and overlapping ones included, and `execute_count` returns the number of those spans. For a query with an alignment projection (`=labse=>`), the hits are the target spans, sorted the same way. This order is part of the API.
+
 ### Hit
 
 ```rust
@@ -466,6 +468,8 @@ uint32_t montre_hit_document_index(const void *hits, uint64_t index);
 uint32_t montre_hit_sentence_index(const void *hits, uint64_t index);
 void     montre_hitlist_populate_context(void *hits, const void *corpus);
 ```
+
+A hit list holds one hit per distinct matching span, sorted by start, then end, so index `i` is the `i`-th span in that order. The bulk arrays below are in the same order. `montre_query_count` and `montre_query_count_in_component` return the number of spans `montre_query` would list. `montre_project` returns the distinct target units, sorted the same way.
 
 `montre_hit_document_index` and `montre_hit_sentence_index` return `UINT32_MAX` (`Hit::UNPOPULATED`) before `montre_hitlist_populate_context` is called. This includes hits returned by `montre_project`. Check for this sentinel before using the index as a lookup key.
 

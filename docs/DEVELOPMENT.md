@@ -966,7 +966,12 @@ A rework of sequence execution and name validation, checked by a differential te
 **Match semantics**
 
 - A match is a non-empty span of tokens inside one document. Sequences cross sentence boundaries unless `within s` is given; they never cross document boundaries.
+- A query reports every distinct span that satisfies it, including nested and overlapping ones, and a count counts those spans. On *big red house*, `[pos="ADJ"]* [pos="NOUN"]` gives three hits. This is a deliberate definition of a match, not an artifact of the executor: it was decided in November 2026, against rules that select among overlapping spans, such as CWB's default matching strategy.
 - Results are sorted by (start, end) and hold one hit per distinct span.
+- Restricting a query only removes matching spans. A restricted query's matches are exactly the unrestricted query's matches that satisfy the restriction, with one difference between the two kinds of restriction:
+  - `within`, component and document filters test only the outer span. A filtered query's hits are exactly the unfiltered query's hits that pass the filter, captures included.
+  - A global constraint can change which capture assignment a span reports, because constraints are existential over assignments. So the guarantee is on spans: the spans of a constrained query are a subset of the spans of the same query without the constraint, and a surviving hit may report different captures. On `x y x noun`, `a:[]{1,2} b:[]{1,2} [pos="NOUN"]` reports (0,4) with `a` on *x*; adding `:: a.word = b.word` keeps (0,4) but reports `a` on *x y*.
+- Why every span: it keeps every restriction a filter, so count(Q with C) / count(Q) is always a proportion of spans, which no rule that selects among overlapping spans preserves. Choosing a unit of observation (one hit per noun, maximal spans) is planned as an explicit modifier in the query string, so that a saved query carries its own semantics; a query beginning with `(?…)` is reserved for these and is a parse error until then.
 - A parenthesized group is a sub-pattern of any length: `([pos="DET"] [pos="ADJ"] | [pos="ADJ"]) [pos="NOUN"]`, `([pos="NOUN"] [pos="ADP"])+`. Alternation between multi-token sequences keeps whole spans.
 - A label binds to the span its element matched. A label on a quantified element covers the whole repetition; labels inside a repeated group take the values of the last repetition that matched something. An optional element that matched nothing leaves its label unbound (no zero-width capture).
 - When several capture assignments produce the same span, the hit reports the smallest one. Assignments are compared label by label in query order: a bound label before an unbound one, then the earliest start, then the shortest span. `a:[]? []? b:[]` over two tokens therefore reports `a` on the first token, not `a` skipped.
@@ -1024,11 +1029,11 @@ A label around a single quantified element, as in `a:([]{1,100})`, is planned as
 
 **Index metadata**
 
-- `corpus.json` records `forward_only_layers`. Corpora built before this field existed load unchanged; on those, a token query on a forward-only string layer returns an empty result as it used to, where a newly built corpus reports `UnindexedLayer`.
+- `corpus.json` records `forward_only_layers`. A corpus built before this field existed loads unchanged, with the field taken to be `head` and `deps`, the fixed set every builder has left out of the inverted index since 1 April 2026; so a token query on `deps` reports `UnindexedLayer` there as on a new build. The set is consulted only for a layer the inverted index has no entry for, so an older build that did index a layer is unaffected.
 
 **Tests**
 
-- `crates/montre-query/tests/differential.rs` generates small random corpora and random queries (quantifiers, nested groups, alternation, labels, `within s`, global constraints) and compares spans, counts, the exact reported capture assignment, and run-to-run stability against the reference matcher. Run more cases with `PROPTEST_CASES=4000 cargo test -p montre-query --test differential`.
+- `crates/montre-query/tests/differential.rs` generates small random corpora and random queries (quantifiers, nested groups, alternation, labels, `within s`, global constraints) and compares spans, counts, the exact reported capture assignment, and run-to-run stability against the reference matcher. A second property checks the restriction guarantees on the executor alone: each generated query without a top-level `within s` is run again with it, and must report exactly its earlier hits that lie inside one sentence, captures included; each query with constraints is run again without any, and must report a superset of its spans. Run more cases with `PROPTEST_CASES=4000 cargo test -p montre-query --test differential`.
 - Regression tests for each corrected behaviour are at the end of `executor_integration.rs`, including the ambiguous patterns that must either answer within a tight limit or fail with `LimitExceeded`. The differential test's corpora are at most 36 tokens, so resource behaviour is covered by those targeted tests and not by the random ones.
 
 **Still to regenerate**

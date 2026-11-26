@@ -100,6 +100,22 @@ A match never extends past the document it starts in. Sequences do cross sentenc
 
 A layer, span, component, or document name that the corpus does not have is an error, not an empty result.
 
+### What a match is
+
+A query reports every distinct non-empty span that matches it, including nested and overlapping ones. On *big red house*, `[pos="ADJ"]* [pos="NOUN"]` gives three hits: *house*, *red house* and *big red house*. So `count` counts spans, not phrases. CWB's default matching strategy reports fewer hits for patterns like this one.
+
+`within`, global constraints, and component and document filters only ever remove matching spans: a restricted query never reports a span that the unrestricted query does not, so a restricted count over an unrestricted one is always a proportion of spans.
+
+To count one hit per noun instead, label the noun and count its distinct positions, here in Julia:
+
+```julia
+hits = query(corpus, "[pos=\"ADJ\"]* n:[pos=\"NOUN\"]")
+length(hits)                          # 3 on "big red house"
+length(unique(captures(hits, "n")))   # 1
+```
+
+Modifiers that select a unit of observation in the query itself are planned.
+
 ### UPOS and XPOS
 
 Montre stores the UPOS and XPOS columns from CoNLL-U as separate `upos` and `xpos` layers. The familiar `pos` name is an alias for `upos` and works everywhere:

@@ -17,6 +17,7 @@
 //!   label by label in query order, bound before unbound, then earliest
 //!   start, then shortest
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -30,6 +31,7 @@ use montre_query::ast::{
 	CmpOp, Constraint, ConstraintOp, ConstraintValue, GlobalConstraint, Query,
 };
 use proptest::prelude::*;
+use proptest::test_runner::{TestRunner, contextualize_config};
 
 type Binding = BTreeMap<String, (u64, u64)>;
 type Outcome = (u64, Binding);
@@ -514,6 +516,55 @@ fn render(shape: &QueryShape) -> String {
 	query
 }
 
+fn unconstrained(alternatives: &[Vec<Shape>]) -> Vec<Vec<Shape>> {
+	alternatives
+		.iter()
+		.map(|sequence| sequence.iter().map(Shape::unconstrained).collect())
+		.collect()
+}
+
+impl Shape {
+	fn unconstrained(&self) -> Shape {
+		match self {
+			Shape::Token(_) => self.clone(),
+			Shape::Group(alternatives) => Shape::Group(unconstrained(alternatives)),
+			Shape::Quantified(inner, quantifier) => {
+				Shape::Quantified(Box::new(inner.unconstrained()), quantifier.clone())
+			}
+			Shape::Labeled(inner) => Shape::Labeled(Box::new(inner.unconstrained())),
+			Shape::Scoped {
+				alternatives,
+				within_sentence,
+				constraint_inside,
+				..
+			} => Shape::Scoped {
+				alternatives: unconstrained(alternatives),
+				within_sentence: *within_sentence,
+				constraint: None,
+				constraint_inside: *constraint_inside,
+			},
+		}
+	}
+}
+
+impl QueryShape {
+	fn within_sentence(&self) -> QueryShape {
+		QueryShape {
+			within_sentence: true,
+			..self.clone()
+		}
+	}
+
+	// every constraint removed, the top-level clause and those of scoped groups
+	fn unconstrained(&self) -> QueryShape {
+		QueryShape {
+			alternatives: unconstrained(&self.alternatives),
+			within_sentence: self.within_sentence,
+			constraints: Vec::new(),
+		}
+	}
+}
+
 // ---- the property ----
 
 type Reported = Vec<((u64, u64), Binding)>;
@@ -585,4 +636,111 @@ proptest! {
 			check(&corpus, &render(query))?;
 		}
 	}
+}
+
+// ---- restrictions only remove matches ----
+//
+// These hold of the executor whatever the reference says. `within s` is a
+// filter on whole hits, captures included; a constraint is existential over
+// capture assignments, so it is a filter on spans only.
+
+fn parsed(text: &str) -> Result<Query, TestCaseError> {
+	montre_query::parse(text)
+		.map_err(|error| TestCaseError::fail(format!("generated {text}: {error}")))
+}
+
+fn counted(corpus: &Corpus, query: &Query) -> usize {
+	let plan = montre_query::planner::plan(query).unwrap();
+	montre_query::executor::execute_count(&plan, corpus).unwrap()
+}
+
+fn check_within_filters(corpus: &Corpus, shape: &QueryShape) -> Result<(), TestCaseError> {
+	let (text, restricted_text) = (render(shape), render(&shape.within_sentence()));
+	let restricted = parsed(&restricted_text)?;
+	let sentences = corpus.spans().spans("sentence").unwrap_or(&[]);
+	let expected: Reported = executed(corpus, &parsed(&text)?)
+		.into_iter()
+		.filter(|((start, end), _)| inside_one(sentences, *start, *end))
+		.collect();
+	prop_assert_eq!(
+		&executed(corpus, &restricted),
+		&expected,
+		"{} against {} restricted to one sentence",
+		restricted_text,
+		text
+	);
+	prop_assert_eq!(counted(corpus, &restricted), expected.len(), "count for {}", restricted_text);
+	Ok(())
+}
+
+fn check_constraints_filter_spans(
+	corpus: &Corpus,
+	shape: &QueryShape,
+) -> Result<bool, TestCaseError> {
+	let (text, unconstrained_text) = (render(shape), render(&shape.unconstrained()));
+	if text == unconstrained_text {
+		return Ok(false);
+	}
+	let spans = |reported: Reported| -> BTreeSet<(u64, u64)> {
+		reported.into_iter().map(|(span, _)| span).collect()
+	};
+	let constrained = spans(executed(corpus, &parsed(&text)?));
+	let unconstrained = spans(executed(corpus, &parsed(&unconstrained_text)?));
+	let added: Vec<_> = constrained.difference(&unconstrained).collect();
+	prop_assert!(
+		added.is_empty(),
+		"{} reports spans {:?} that {} does not",
+		text,
+		added,
+		unconstrained_text
+	);
+	Ok(true)
+}
+
+#[derive(Default)]
+struct Tally {
+	corpora: Cell<usize>,
+	within: Cell<usize>,
+	constrained: Cell<usize>,
+}
+
+impl Tally {
+	fn add(counter: &Cell<usize>, amount: usize) {
+		counter.set(counter.get() + amount);
+	}
+}
+
+#[test]
+fn restrictions_only_remove_matches() {
+	let mut runner = TestRunner::new(contextualize_config(ProptestConfig {
+		cases: 64,
+		max_shrink_iters: 4000,
+		source_file: Some(file!()),
+		..ProptestConfig::default()
+	}));
+	let tally = Tally::default();
+	let strategy = (corpus_shape(), prop::collection::vec(query_shape(), 12));
+	let outcome = runner.run(&strategy, |(shape, queries)| {
+		let corpus = build(&shape);
+		Tally::add(&tally.corpora, 1);
+		for query in queries.iter().filter(|query| !query.within_sentence) {
+			check_within_filters(&corpus, query)?;
+			Tally::add(&tally.within, 1);
+		}
+		for query in &queries {
+			let checked = check_constraints_filter_spans(&corpus, query)?;
+			Tally::add(&tally.constrained, usize::from(checked));
+		}
+		Ok(())
+	});
+	if let Err(failure) = outcome {
+		panic!("{failure}");
+	}
+	eprintln!(
+		"restrictions_only_remove_matches: {} corpora, {} within pairs, {} constraint pairs",
+		tally.corpora.get(),
+		tally.within.get(),
+		tally.constrained.get()
+	);
+	assert!(tally.within.get() > 0 && tally.constrained.get() > 0);
 }

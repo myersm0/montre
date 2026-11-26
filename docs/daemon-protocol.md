@@ -555,6 +555,8 @@ Paginated retrieval. `offset` and `limit` are required. Maximum `limit` per call
 }
 ```
 
+A result holds one hit per distinct matching span, nested and overlapping spans included, sorted by `span.start`, then `span.end`; for a query with an alignment projection, the spans are the target spans. Pages are slices of that fixed order, so consecutive pages cover every hit exactly once, and `total_count`, like `query.execute_count`, counts spans.
+
 **Errors**: `1200` (handle invalid), `1203` (limit exceeds maximum), `1204` (stored query no longer valid — query-backed named results only).
 
 #### `query.metadata`

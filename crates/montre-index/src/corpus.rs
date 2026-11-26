@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use montre_core::{LayerKind, Span, UnitId, span_containing};
+use montre_core::{LayerKind, Span, UnitId, layers, span_containing};
 use serde::{Deserialize, Serialize};
 
 use crate::empty_nodes::EmptyNodeStore;
@@ -45,8 +45,13 @@ pub struct CorpusMeta {
 	pub components: Vec<ComponentMeta>,
 	#[serde(default)]
 	pub alignments: Vec<AlignmentMeta>,
-	#[serde(default)]
+	#[serde(default = "legacy_forward_only_layers")]
 	pub forward_only_layers: Vec<String>,
+}
+
+// what every builder left out of the inverted index before this was recorded
+fn legacy_forward_only_layers() -> Vec<String> {
+	vec![layers::HEAD.to_string(), layers::DEPS.to_string()]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -223,7 +228,8 @@ impl Corpus {
 	}
 
 	/// True for a layer stored for retrieval but left out of the inverted index.
-	/// Corpora built before this was recorded report false for every layer.
+	/// A corpus built before this was recorded in `corpus.json` reports `head`
+	/// and `deps`, the layers every builder of that time left out.
 	pub fn is_forward_only(&self, layer: &str) -> bool {
 		self.meta.forward_only_layers.iter().any(|name| name == layer)
 	}

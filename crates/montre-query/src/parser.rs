@@ -32,6 +32,7 @@ use crate::{QueryError, Result};
 
 pub fn parse(input: &str) -> Result<Query> {
 	let mut parser = Parser::new(input);
+	parser.reject_query_modifier()?;
 	let query = parser.parse_query()?;
 	parser.skip_whitespace();
 	if parser.pos < parser.input.len() {
@@ -174,6 +175,34 @@ impl<'a> Parser<'a> {
 		} else {
 			false
 		}
+	}
+
+	/// `(?…)` at the start of a query is reserved for match modes
+	fn reject_query_modifier(&mut self) -> Result<()> {
+		self.skip_whitespace();
+		if !self.remaining().starts_with("(?") {
+			return Ok(());
+		}
+		let start = self.pos;
+		let mut depth = 0usize;
+		for (offset, c) in self.remaining().char_indices() {
+			match c {
+				'(' => depth += 1,
+				')' => depth -= 1,
+				_ => continue,
+			}
+			if depth == 0 {
+				let modifier = &self.input[start..start + offset + 1];
+				return Err(QueryError::Parse {
+					position: start,
+					message: format!("Unsupported query modifier '{}'", modifier),
+				});
+			}
+		}
+		Err(QueryError::Parse {
+			position: start,
+			message: "Unterminated query modifier: '(?' has no matching ')'".into(),
+		})
 	}
 
 	fn parse_query(&mut self) -> Result<Query> {
@@ -1287,5 +1316,75 @@ mod tests {
 	#[test]
 	fn parse_global_constraint_bare_fails() {
 		assert!(parse(r#":: a.lemma = b.lemma"#).is_err());
+	}
+
+	fn parse_error(input: &str) -> (usize, String) {
+		match parse(input) {
+			Err(QueryError::Parse { position, message }) => (position, message),
+			other => panic!("expected a parse error for {input:?}, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn query_modifier_is_reserved() {
+		let (position, message) = parse_error(r#"(?maximal) [pos="NOUN"]"#);
+		assert_eq!(position, 0);
+		assert_eq!(message, "Unsupported query modifier '(?maximal)'");
+	}
+
+	#[test]
+	fn query_modifier_with_argument_is_reserved() {
+		let (position, message) = parse_error(r#"  (?by n) [pos="ADJ"]* n:[pos="NOUN"]"#);
+		assert_eq!(position, 2);
+		assert_eq!(message, "Unsupported query modifier '(?by n)'");
+	}
+
+	#[test]
+	fn query_modifier_alone_is_reserved() {
+		let (_, message) = parse_error("(?)");
+		assert_eq!(message, "Unsupported query modifier '(?)'");
+	}
+
+	#[test]
+	fn query_modifier_quotes_up_to_matching_paren() {
+		let (_, message) = parse_error(r#"(?by (a b)) [pos="NOUN"]"#);
+		assert_eq!(message, "Unsupported query modifier '(?by (a b))'");
+	}
+
+	#[test]
+	fn unterminated_query_modifier_fails() {
+		let (position, message) = parse_error(r#"(?by n [pos="NOUN"]"#);
+		assert_eq!(position, 0);
+		assert!(message.starts_with("Unterminated query modifier"));
+	}
+
+	#[test]
+	fn question_mark_group_elsewhere_keeps_generic_error() {
+		let (position, message) = parse_error(r#"[pos="DET"] (?x) [pos="NOUN"]"#);
+		assert_eq!(position, 13);
+		assert_eq!(message, "Unexpected character: '?'");
+		let (position, message) = parse_error(r#"((?x) [pos="NOUN"])"#);
+		assert_eq!(position, 2);
+		assert_eq!(message, "Unexpected character: '?'");
+	}
+
+	#[test]
+	fn regex_flag_inside_slashes_still_parses() {
+		let query = parse(r#"[word=/(?i)chat/]"#).unwrap();
+		match query {
+			Query::Token(pattern) => {
+				assert_eq!(
+					pattern.constraints[0].value,
+					ConstraintValue::Regex("(?i)chat".into())
+				);
+			}
+			_ => panic!("Expected Token query"),
+		}
+		assert!(parse(r#"[pos="DET"] [word=/(?i)chat/] within s"#).is_ok());
+	}
+
+	#[test]
+	fn group_at_start_still_parses() {
+		assert!(parse(r#"([pos="ADJ"] | [pos="ADV"]) [pos="NOUN"]"#).is_ok());
 	}
 }

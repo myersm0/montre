@@ -1467,6 +1467,34 @@ fn constraint_holds_when_any_binding_satisfies_it() {
 	}
 }
 
+const REPEATED_FORM: &str = "\
+1\tx\tx\tX\t_\t_\t0\troot\t_\t_
+2\ty\ty\tX\t_\t_\t1\tdep\t_\t_
+3\tx\tx\tX\t_\t_\t1\tdep\t_\t_
+4\tnoun\tnoun\tNOUN\t_\t_\t1\tdep\t_\t_
+
+";
+
+#[test]
+fn constraint_keeps_a_span_through_another_assignment() {
+	let corpus = build_corpus(REPEATED_FORM);
+	let unconstrained = r#"a:[]{1,2} b:[]{1,2} [pos="NOUN"]"#;
+	let capture = |label: &str, span: (u64, u64)| (label.to_string(), span);
+	assert_eq!(
+		query_captures(&corpus, unconstrained),
+		vec![
+			((0, 4), vec![capture("a", (0, 1)), capture("b", (1, 3))]),
+			((1, 4), vec![capture("a", (1, 2)), capture("b", (2, 3))]),
+		]
+	);
+	// (0,4) survives with the assignment that satisfies the constraint, (1,4) has none
+	let constrained = format!("{unconstrained} :: a.word = b.word");
+	assert_eq!(
+		query_captures(&corpus, &constrained),
+		vec![((0, 4), vec![capture("a", (0, 2)), capture("b", (2, 3))])]
+	);
+}
+
 #[test]
 fn unmatched_optional_label_is_unbound() {
 	let corpus = build_corpus(NOUN_RUN);
@@ -1522,6 +1550,34 @@ fn forward_only_layer_is_not_queryable() {
 		query_error(&corpus, r#"[deps="2:nsubj"]"#),
 		QueryError::UnindexedLayer(name) if name == "deps"
 	));
+}
+
+#[test]
+fn forward_only_layer_is_not_queryable_on_a_corpus_that_does_not_record_them() {
+	use montre_query::QueryError;
+	let path = test_corpus_path();
+	let sentences = ConllUReader::new(Cursor::new(FRENCH_MWT)).read_sentences().unwrap();
+	let mut builder = CorpusBuilder::new("test");
+	builder.add_document("test.conllu", sentences);
+	builder.build(&path).unwrap();
+
+	let meta_path = path.join("corpus.json");
+	let mut meta: serde_json::Value =
+		serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+	meta.as_object_mut().unwrap().remove("forward_only_layers").unwrap();
+	std::fs::write(&meta_path, meta.to_string()).unwrap();
+
+	let corpus = montre_index::open(&path).unwrap();
+	assert_eq!(corpus.forward().get_str(1, "deps"), Some("0:root"));
+	assert!(matches!(
+		query_error(&corpus, r#"[deps="0:root"]"#),
+		QueryError::UnindexedLayer(name) if name == "deps"
+	));
+	assert!(matches!(
+		query_error(&corpus, r#"[head="0"]"#),
+		QueryError::UnindexedLayer(name) if name == "head"
+	));
+	let _ = std::fs::remove_dir_all(&path);
 }
 
 #[test]
