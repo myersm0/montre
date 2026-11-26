@@ -66,6 +66,10 @@ pub type Result<T> = std::result::Result<T, IndexError>;
 
 pub const index_version: u32 = 5;
 
+/// The most tokens a corpus may hold: positions are stored as 32-bit bitmap
+/// entries, and so are the exclusive ends of spans over them.
+pub const max_token_count: u64 = u32::MAX as u64;
+
 pub fn open(path: impl AsRef<Path>) -> Result<Corpus> {
 	Corpus::open(path)
 }

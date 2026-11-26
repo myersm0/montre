@@ -1,5 +1,7 @@
 use std::cmp::Ordering;
 
+use std::borrow::Cow;
+
 use montre_core::Span;
 use roaring::RoaringBitmap;
 use smallvec::SmallVec;
@@ -9,9 +11,20 @@ use crate::Result;
 
 pub(crate) const MAX_QUANTIFIER: u32 = 100;
 
+/// Token steps repeated at most this often are matched against their bitmap;
+/// longer repetitions are matched by runs of consecutive positions.
+pub(crate) const SHORT_REPETITION: u32 = 8;
+
+// the most fixed-length variants a sequence is split into
+const MAX_VARIANTS: usize = 16;
+
 // start positions extended together; keeps the working set of an ambiguous
 // pattern proportional to the batch instead of the document
 const SEED_BATCH: usize = 256;
+
+// candidate starts each source contributes to one window, all gathered
+// before any is extended; bounds that buffer by the window, not the document
+const WINDOW_STARTS: usize = 1 << 14;
 
 // matches created between two looks at the budget
 pub(crate) const CHARGE_STRIDE: usize = 4096;
@@ -146,15 +159,17 @@ pub(crate) fn runs_from_bitmap(bitmap: &RoaringBitmap) -> Vec<Run> {
 	runs
 }
 
-pub(crate) enum Matcher {
+pub(crate) enum Matcher<'c> {
 	/// sorted, disjoint, non-adjacent runs of single-token positions
 	Runs(Vec<Run>),
+	/// single-token positions
+	Bitmap(Cow<'c, RoaringBitmap>),
 	/// non-empty sub-matches sorted by (start, end, captures)
 	Spans(Vec<Match>),
 }
 
-pub(crate) struct Step {
-	pub matcher: Matcher,
+pub(crate) struct Step<'c> {
+	pub matcher: Matcher<'c>,
 	pub min: u32,
 	pub max: u32,
 	pub label: Option<LabelId>,
@@ -162,7 +177,7 @@ pub(crate) struct Step {
 	pub declares: Vec<LabelId>,
 }
 
-impl Step {
+impl Step<'_> {
 	fn continuations<'a>(
 		&'a self,
 		position: u64,
@@ -179,6 +194,15 @@ impl Step {
 				let shortest = u64::from(self.min.max(1));
 				let longest = available.min(u64::from(self.max));
 				out.extend((shortest..=longest).map(|length| (position + length, &[][..])));
+				Ok(())
+			}
+			Matcher::Bitmap(bitmap) => {
+				let shortest = u64::from(self.min.max(1));
+				let longest = u64::from(self.max).min(limit.saturating_sub(position));
+				let available = (0..longest)
+					.take_while(|&length| bitmap.contains((position + length) as u32))
+					.count() as u64;
+				out.extend((shortest..=available).map(|length| (position + length, &[][..])));
 				Ok(())
 			}
 			Matcher::Spans(table) => self.repeated_spans(table, position, limit, budget, out),
@@ -241,13 +265,93 @@ impl Step {
 		Ok(())
 	}
 
-	fn start_positions(&self, range: Span, out: &mut Vec<u64>) {
+	fn is_token_step(&self) -> bool {
+		!matches!(self.matcher, Matcher::Spans(_))
+	}
+
+	fn fixed_width(&self) -> Option<u64> {
+		let fixed = self.is_token_step() && self.min == self.max && self.min > 0;
+		fixed.then_some(u64::from(self.min))
+	}
+
+	fn matches_nowhere(&self) -> bool {
+		match &self.matcher {
+			Matcher::Runs(runs) => runs.is_empty(),
+			Matcher::Bitmap(bitmap) => bitmap.is_empty(),
+			Matcher::Spans(table) => table.is_empty(),
+		}
+	}
+
+	fn start_count(&self) -> u64 {
+		match &self.matcher {
+			Matcher::Runs(runs) => runs.iter().map(|run| run.end - run.start).sum(),
+			Matcher::Bitmap(bitmap) => bitmap.len(),
+			Matcher::Spans(table) => table.len() as u64,
+		}
+	}
+
+	// whether a token step matches every position of [position, position +
+	// length) and that span ends by `limit`; `cursor` carries the search over
+	// from the previous, smaller position
+	fn covers(&self, position: u64, length: u64, limit: u64, cursor: &mut usize) -> bool {
+		let end = position + length;
+		match &self.matcher {
+			Matcher::Runs(runs) => {
+				*cursor = gallop(runs, *cursor, |run| run.end <= position);
+				runs.get(*cursor)
+					.is_some_and(|run| run.start <= position && run.end.min(limit) >= end)
+			}
+			Matcher::Bitmap(bitmap) => {
+				end <= limit && bitmap.contains_range(position as u32..end as u32)
+			}
+			Matcher::Spans(_) => unreachable!("a group step is not matched token by token"),
+		}
+	}
+
+	// whether one repetition of the step, or `min` of them for a token step,
+	// can begin at `position` and end by `limit`; `cursor` carries the search
+	// over from the previous, smaller position
+	fn can_start_at(&self, position: u64, limit: u64, cursor: &mut usize) -> bool {
+		match &self.matcher {
+			Matcher::Runs(_) | Matcher::Bitmap(_) => {
+				self.covers(position, u64::from(self.min.max(1)), limit, cursor)
+			}
+			Matcher::Spans(table) => {
+				*cursor = gallop(table, *cursor, |candidate| candidate.start < position);
+				table[*cursor..]
+					.iter()
+					.take_while(|candidate| candidate.start == position)
+					.any(|candidate| candidate.end <= limit)
+			}
+		}
+	}
+
+	// the first `count` positions inside `range` at which the step begins
+	fn start_positions(&self, range: Span, count: usize, out: &mut Vec<u64>) {
+		let Some(last) = count.checked_sub(1) else {
+			return;
+		};
+		let full = out.len() + count;
 		match &self.matcher {
 			Matcher::Runs(runs) => {
 				let first = runs.partition_point(|run| run.end <= range.start);
 				for run in runs[first..].iter().take_while(|run| run.start < range.end) {
-					out.extend(run.start.max(range.start)..run.end.min(range.end));
+					let start = run.start.max(range.start);
+					let room = (full - out.len()) as u64;
+					out.extend(start..run.end.min(range.end).min(start + room));
+					if out.len() == full {
+						break;
+					}
 				}
+			}
+			Matcher::Bitmap(bitmap) => {
+				// bounded by position rather than by `take`, which would bypass
+				// the bulk path roaring gives `extend`
+				let end = bitmap
+					.range(range.start as u32..range.end as u32)
+					.nth(last)
+					.map_or(range.end, |position| u64::from(position) + 1);
+				out.extend(bitmap.range(range.start as u32..end as u32).map(u64::from));
 			}
 			Matcher::Spans(table) => {
 				let first = table.partition_point(|candidate| candidate.start < range.start);
@@ -255,11 +359,59 @@ impl Step {
 					table[first..]
 						.iter()
 						.take_while(|candidate| candidate.start < range.end)
-						.map(|candidate| candidate.start),
+						.map(|candidate| candidate.start)
+						.take(count),
 				);
 			}
 		}
 	}
+}
+
+// Every choice of repetition count for the steps, when all are token steps
+// and the choices are few. A variant that matches nothing at all is dropped.
+fn variants(steps: &[Step]) -> Vec<Variant> {
+	let mut choices: Vec<Vec<u32>> = vec![Vec::new()];
+	for step in steps {
+		let counts = step.max - step.min + 1;
+		if !step.is_token_step() || choices.len() * counts as usize > MAX_VARIANTS {
+			return Vec::new();
+		}
+		choices = choices
+			.into_iter()
+			.flat_map(|chosen| {
+				(step.min..=step.max).map(move |count| [chosen.as_slice(), &[count]].concat())
+			})
+			.collect();
+	}
+	let start_counts: Vec<u64> = steps.iter().map(Step::start_count).collect();
+	choices
+		.into_iter()
+		.filter_map(|counts| {
+			let mut segments = Vec::new();
+			let mut offset = 0;
+			for (step, &count) in counts.iter().enumerate() {
+				if count > 0 {
+					let length = u64::from(count);
+					segments.push(Segment { step, offset, length });
+					offset += length;
+				}
+			}
+			segments.sort_by_key(|segment| start_counts[segment.step]);
+			(offset > 0).then_some(Variant { segments, width: offset })
+		})
+		.collect()
+}
+
+// the first index from `from` at which `before` fails, for a predicate that
+// holds on a prefix of `items`; O(log distance) from `from`
+fn gallop<T>(items: &[T], from: usize, before: impl Fn(&T) -> bool) -> usize {
+	let rest = &items[from..];
+	let mut bound = 1;
+	while bound < rest.len() && before(&rest[bound]) {
+		bound *= 2;
+	}
+	let low = bound / 2;
+	from + low + rest[low..bound.min(rest.len())].partition_point(before)
 }
 
 fn run_containing(runs: &[Run], position: u64) -> Option<&Run> {
@@ -281,9 +433,35 @@ pub(crate) type Holds<'a> = &'a (dyn Fn(usize, &[Slot]) -> bool + Sync);
 /// and document filters above the sequence.
 pub(crate) type Keep<'a> = &'a (dyn Fn(u64, u64) -> bool + Sync);
 
-pub(crate) struct Sequence {
-	steps: Vec<Step>,
+// tokens of a step at a fixed offset from the start of a match
+struct Segment {
+	step: usize,
+	offset: u64,
+	length: u64,
+}
+
+// one choice of repetition count for every step: a pattern of fixed width
+// whose segments are listed rarest step first
+struct Variant {
+	segments: Vec<Segment>,
+	width: u64,
+}
+
+pub(crate) struct Sequence<'c> {
+	steps: Vec<Step<'c>>,
 	seed_steps: usize,
+	// mandatory steps at a fixed offset from the start of every match, rarest
+	// first; empty when the first step is optional
+	anchors: Vec<(usize, u64)>,
+	// set when nothing is bound and every step is a token step with few
+	// possible repetition counts; each match is then the match of a variant
+	variants: Vec<Variant>,
+	// steps, with their offsets, whose start positions less the offset are
+	// the candidate starts: one per variant, the rarest anchor, or else every
+	// step that may begin a match
+	sources: Vec<(usize, u64)>,
+	// a mandatory step matches nowhere
+	unmatchable: bool,
 	slot_count: usize,
 	match_cost: u64,
 	// per step: slots it declares that a constraint reads; left unbound by the
@@ -295,11 +473,11 @@ pub(crate) struct Sequence {
 	live: Vec<Vec<LabelId>>,
 }
 
-impl Sequence {
+impl<'c> Sequence<'c> {
 	/// `constraints` lists, for each constraint the caller will be asked to
 	/// decide, the slots it reads.
 	pub(crate) fn new(
-		steps: Vec<Step>,
+		steps: Vec<Step<'c>>,
 		slot_count: usize,
 		constraints: &[Vec<LabelId>],
 		bindings: Bindings,
@@ -310,6 +488,40 @@ impl Sequence {
 			.iter()
 			.position(|step| step.min > 0)
 			.map_or(steps.len(), |index| index + 1);
+		let mut anchors = Vec::new();
+		let mut offset = 0;
+		for (index, step) in steps.iter().enumerate() {
+			if step.min == 0 {
+				break;
+			}
+			anchors.push((index, offset));
+			match step.fixed_width() {
+				Some(width) => offset += width,
+				None => break,
+			}
+		}
+		let binds_nothing = constraints.is_empty()
+			&& steps
+				.iter()
+				.all(|step| step.label.is_none() && step.declares.is_empty());
+		let variants = match binds_nothing {
+			true => variants(&steps),
+			false => Vec::new(),
+		};
+		if anchors.len() > 1 {
+			anchors.sort_by_cached_key(|&(index, _)| steps[index].start_count());
+		}
+		let sources = match (variants.is_empty(), anchors.len()) {
+			(false, _) => variants
+				.iter()
+				.map(|variant| (variant.segments[0].step, variant.segments[0].offset))
+				.collect(),
+			(true, count) if count > 1 => vec![anchors[0]],
+			(true, _) => (0..seed_steps).map(|step| (step, 0)).collect(),
+		};
+		let unmatchable = steps
+			.iter()
+			.any(|step| step.min > 0 && step.matches_nowhere());
 		let last_step = steps.len().saturating_sub(1);
 		let declaring_step = |slot: &LabelId| {
 			steps
@@ -358,6 +570,10 @@ impl Sequence {
 		Self {
 			steps,
 			seed_steps,
+			anchors,
+			variants,
+			sources,
+			unmatchable,
 			slot_count,
 			match_cost: 1 + slot_count as u64 / 4,
 			required,
@@ -377,33 +593,37 @@ impl Sequence {
 		output: Output,
 	) -> Result<Vec<Match>> {
 		let mut matches = Vec::new();
-		for seeds in self.seeds(range).chunks(SEED_BATCH) {
-			let active = self.extend_seeds::<T>(seeds, range.end, holds, budget)?;
-			let surviving = active.len();
-			let first_new = matches.len();
-			matches.extend(
-				active
-					.into_iter()
-					.filter(|partial| partial.end > partial.start && keep(partial.start, partial.end))
-					.map(|partial| Match {
-						start: partial.start,
-						end: partial.end,
-						captures: partial.track.into_captures(),
-					}),
-			);
-			matches[first_new..].sort_unstable();
-			let emitted = matches.len() - first_new;
-			// matches bound for a buffer stay charged, to that buffer's ledger
-			let buffered = match output {
-				Output::Final => 0,
-				Output::Buffered(ledger) => {
-					ledger.adopt(self.cost(emitted));
-					emitted
+		for starts in self.start_windows(range) {
+			for batch in starts.chunks(SEED_BATCH) {
+				let active = self.extend_seeds::<T>(batch, range.end, holds, budget)?;
+				let surviving = active.len();
+				let first_new = matches.len();
+				matches.extend(
+					active
+						.into_iter()
+						.filter(|partial| {
+							partial.end > partial.start && keep(partial.start, partial.end)
+						})
+						.map(|partial| Match {
+							start: partial.start,
+							end: partial.end,
+							captures: partial.track.into_captures(),
+						}),
+				);
+				matches[first_new..].sort_unstable();
+				let emitted = matches.len() - first_new;
+				// matches bound for a buffer stay charged, to that buffer's ledger
+				let buffered = match output {
+					Output::Final => 0,
+					Output::Buffered(ledger) => {
+						ledger.adopt(self.cost(emitted));
+						emitted
+					}
+				};
+				budget.release(self.cost(surviving - buffered));
+				if let Output::Final = output {
+					budget.report(emitted)?;
 				}
-			};
-			budget.release(self.cost(surviving - buffered));
-			if let Output::Final = output {
-				budget.report(emitted)?;
 			}
 		}
 		Ok(matches)
@@ -418,13 +638,17 @@ impl Sequence {
 		budget: &Budget,
 	) -> Result<usize> {
 		let mut count = 0;
-		for seeds in self.seeds(range).chunks(SEED_BATCH) {
-			let active = self.extend_seeds::<T>(seeds, range.end, holds, budget)?;
-			count += active
-				.iter()
-				.filter(|partial| partial.end > partial.start && keep(partial.start, partial.end))
-				.count();
-			budget.release(self.cost(active.len()));
+		for starts in self.start_windows(range) {
+			for batch in starts.chunks(SEED_BATCH) {
+				let active = self.extend_seeds::<T>(batch, range.end, holds, budget)?;
+				count += active
+					.iter()
+					.filter(|partial| {
+						partial.end > partial.start && keep(partial.start, partial.end)
+					})
+					.count();
+				budget.release(self.cost(active.len()));
+			}
 		}
 		Ok(count)
 	}
@@ -433,23 +657,29 @@ impl Sequence {
 		matches as u64 * self.match_cost
 	}
 
-	// The partial matches left once every step has run over `seeds`, the empty
-	// ones included. They remain charged to the budget; the caller releases them.
+	// The partial matches left once every step has run over `starts`, the
+	// empty ones included. They remain charged to the budget; the caller
+	// releases them.
 	fn extend_seeds<T: Track>(
 		&self,
-		seeds: &[u64],
+		starts: &[(u64, u64)],
 		limit: u64,
 		holds: Holds,
 		budget: &Budget,
 	) -> Result<Vec<Partial<T>>> {
-		let mut active: Vec<Partial<T>> = seeds
+		let mut active: Vec<Partial<T>> = starts
 			.iter()
-			.map(|&position| Partial {
-				end: position,
-				start: position,
+			.map(|&(start, end)| Partial {
+				end,
+				start,
 				track: T::unbound(self.slot_count),
 			})
 			.collect();
+		if !self.variants.is_empty() {
+			budget.hold(self.cost(active.len()))?;
+			budget.expand(active.len() as u64)?;
+			return Ok(active);
+		}
 		budget.hold(self.cost(active.len()))?;
 
 		for (index, step) in self.steps.iter().enumerate() {
@@ -518,13 +748,121 @@ impl Sequence {
 		Ok(active)
 	}
 
-	fn seeds(&self, range: Span) -> Vec<u64> {
-		let mut positions = Vec::new();
-		for step in &self.steps[..self.seed_steps] {
-			step.start_positions(range, &mut positions);
+	// The starts inside `range`, sorted, a window at a time: see `starts`.
+	fn start_windows(&self, range: Span) -> impl Iterator<Item = Vec<(u64, u64)>> + '_ {
+		let mut from = range.start;
+		std::iter::from_fn(move || {
+			if from >= range.end {
+				return None;
+			}
+			let (starts, end) = self.starts(from, range.end);
+			from = end;
+			Some(starts)
+		})
+	}
+
+	// Matches of the variants as (start, end), or where matches may start as
+	// (start, start), sorted, for matches ending by `limit` that start in the
+	// window from `from`; with where that window ends.
+	fn starts(&self, from: u64, limit: u64) -> (Vec<(u64, u64)>, u64) {
+		if self.unmatchable {
+			return (Vec::new(), limit);
 		}
-		positions.sort_unstable();
+		let (candidates, end) = self.candidates(from, limit);
+		let starts = match self.variants.is_empty() {
+			true => self
+				.seeds(candidates, limit)
+				.into_iter()
+				.map(|start| (start, start))
+				.collect(),
+			false => self.variant_matches(candidates, limit),
+		};
+		(starts, end)
+	}
+
+	// The candidate starts of each source from `from` on, cut back to the
+	// window in which none has more than `WINDOW_STARTS`; with where that
+	// window ends.
+	fn candidates(&self, from: u64, limit: u64) -> (Vec<Vec<u64>>, u64) {
+		let mut candidates: Vec<Vec<u64>> = self
+			.sources
+			.iter()
+			.map(|&(step, offset)| {
+				let mut positions = Vec::new();
+				if from + offset < limit {
+					let range = Span::new(from + offset, limit);
+					self.steps[step].start_positions(range, WINDOW_STARTS, &mut positions);
+				}
+				if offset > 0 {
+					positions.iter_mut().for_each(|position| *position -= offset);
+				}
+				positions
+			})
+			.collect();
+		let end = candidates
+			.iter()
+			.filter(|positions| positions.len() == WINDOW_STARTS)
+			.map(|positions| positions[WINDOW_STARTS - 1] + 1)
+			.min()
+			.unwrap_or(limit);
+		for positions in &mut candidates {
+			positions.truncate(positions.partition_point(|&start| start < end));
+		}
+		(candidates, end)
+	}
+
+	// The matches, ending by `limit`, of each variant from its candidates.
+	fn variant_matches(&self, candidates: Vec<Vec<u64>>, limit: u64) -> Vec<(u64, u64)> {
+		let mut spans = Vec::new();
+		for (variant, starts) in self.variants.iter().zip(candidates) {
+			let mut cursors = vec![0; variant.segments.len()];
+			spans.extend(
+				starts
+					.into_iter()
+					.filter(|&start| {
+						variant.segments.iter().zip(&mut cursors).all(|(segment, cursor)| {
+							let step = &self.steps[segment.step];
+							step.covers(start + segment.offset, segment.length, limit, cursor)
+						})
+					})
+					.map(|start| (start, start + variant.width)),
+			);
+		}
+		// variants of equal width may match the same span
+		if self.variants.len() > 1 {
+			spans.sort_unstable();
+			spans.dedup();
+		}
+		spans
+	}
+
+	// Where matches ending by `limit` may start, from the candidates. With
+	// anchors, the candidates come from the rarest of them and must suit
+	// every one.
+	fn seeds(&self, candidates: Vec<Vec<u64>>, limit: u64) -> Vec<u64> {
+		// a single source's candidates are in order already
+		let mut positions = match <[Vec<u64>; 1]>::try_from(candidates) {
+			Ok([positions]) => positions,
+			Err(candidates) => {
+				let mut positions = candidates.concat();
+				positions.sort_unstable();
+				positions
+			}
+		};
 		positions.dedup();
+		// a lone anchor is the first step, whose starts are the seeds already
+		if self.anchors.len() < 2 {
+			return positions;
+		}
+		let mut cursors = vec![0; self.anchors.len()];
+		positions.retain(|&start| {
+			self.anchors
+				.iter()
+				.zip(&mut cursors)
+				.all(|(&(step, offset), cursor)| {
+					self.steps[step].can_start_at(start + offset, limit, cursor)
+				})
+		});
 		positions
 	}
 }
@@ -539,7 +877,7 @@ mod tests {
 		runs_from_bitmap(&positions.iter().copied().collect())
 	}
 
-	fn token_step(positions: &[u32], min: u32, max: u32) -> Step {
+	fn token_step(positions: &[u32], min: u32, max: u32) -> Step<'static> {
 		Step {
 			matcher: Matcher::Runs(runs(positions)),
 			min,
@@ -549,7 +887,14 @@ mod tests {
 		}
 	}
 
-	fn labeled(positions: &[u32], min: u32, max: u32, label: LabelId) -> Step {
+	fn bitmap_step(positions: &[u32], min: u32, max: u32) -> Step<'static> {
+		Step {
+			matcher: Matcher::Bitmap(Cow::Owned(positions.iter().copied().collect())),
+			..token_step(&[], min, max)
+		}
+	}
+
+	fn labeled(positions: &[u32], min: u32, max: u32, label: LabelId) -> Step<'static> {
 		Step {
 			label: Some(label),
 			declares: vec![label],
@@ -557,7 +902,7 @@ mod tests {
 		}
 	}
 
-	fn unlabeled(steps: Vec<Step>) -> Sequence {
+	fn unlabeled(steps: Vec<Step<'static>>) -> Sequence<'static> {
 		Sequence::new(steps, 0, &[], Bindings::Canonical)
 	}
 
@@ -594,6 +939,18 @@ mod tests {
 	}
 
 	#[test]
+	fn gallop_finds_the_end_of_the_prefix_from_any_start() {
+		let items: Vec<u32> = (0..37).collect();
+		for from in 0..=items.len() {
+			for threshold in 0..40 {
+				let expected = (threshold as usize).clamp(from, items.len());
+				assert_eq!(gallop(&items, from, |&item| item < threshold), expected);
+			}
+		}
+		assert_eq!(gallop(&[] as &[u32], 0, |_| true), 0);
+	}
+
+	#[test]
 	fn run_containing_respects_gaps() {
 		let found = runs(&[0, 1, 2, 5, 6]);
 		assert!(run_containing(&found, 2).is_some());
@@ -616,6 +973,126 @@ mod tests {
 		// positions 4, 5, 6 all satisfy the second step; none is preceded by the first
 		let sequence = unlabeled(vec![token_step(&[1], 0, 1), token_step(&[2, 4, 5, 6], 1, 1)]);
 		assert_eq!(spans(&sequence, 10), vec![(1, 3), (2, 3), (4, 5), (5, 6), (6, 7)]);
+	}
+
+	fn seed_starts(sequence: &Sequence, end: u64) -> Vec<u64> {
+		sequence
+			.start_windows(Span::new(0, end))
+			.flatten()
+			.map(|(start, _)| start)
+			.collect()
+	}
+
+	#[test]
+	fn a_mandatory_step_that_matches_nowhere_leaves_no_seeds() {
+		let sequence = unlabeled(vec![token_step(&[0, 1, 2], 1, 1), token_step(&[], 1, 1)]);
+		assert!(seed_starts(&sequence, 10).is_empty());
+		let optional = unlabeled(vec![token_step(&[0, 1, 2], 1, 1), token_step(&[], 0, 1)]);
+		assert_eq!(spans(&optional, 10), vec![(0, 1), (1, 2), (2, 3)]);
+	}
+
+	#[test]
+	fn seeds_come_from_the_rarest_anchored_step() {
+		let every = (0..10).collect::<Vec<u32>>();
+		let steps = vec![
+			labeled(&every, 1, 1, 0),
+			token_step(&every, 2, 2),
+			token_step(&[4, 8], 1, 1),
+		];
+		let sequence = Sequence::new(steps, 1, &[], Bindings::Canonical);
+		assert!(sequence.variants.is_empty());
+		assert_eq!(seed_starts(&sequence, 10), vec![1, 5]);
+		assert_eq!(spans(&sequence, 10), vec![(1, 5), (5, 9)]);
+	}
+
+	#[test]
+	fn an_anchor_after_a_variable_step_is_not_used() {
+		let steps = vec![labeled(&[0, 1, 2, 3], 1, 2, 0), token_step(&[3], 1, 1)];
+		let sequence = Sequence::new(steps, 1, &[], Bindings::Canonical);
+		assert!(sequence.variants.is_empty());
+		assert_eq!(seed_starts(&sequence, 10), vec![0, 1, 2, 3]);
+		assert_eq!(spans(&sequence, 10), vec![(1, 4), (2, 4)]);
+	}
+
+	#[test]
+	fn fixed_width_matches_agree_with_labeled_extension() {
+		let positions = [0, 1, 2, 4, 5, 7, 8, 9];
+		let fixed = unlabeled(vec![token_step(&positions, 1, 1), token_step(&positions, 2, 2)]);
+		let extended = Sequence::new(
+			vec![labeled(&positions, 1, 1, 0), token_step(&positions, 2, 2)],
+			1,
+			&[],
+			Bindings::Canonical,
+		);
+		assert!(!fixed.variants.is_empty());
+		assert!(extended.variants.is_empty());
+		let expected: Vec<(u64, u64)> = assignments(&extended, 10, &|_, _| true)
+			.into_iter()
+			.map(|found| (found.start, found.end))
+			.collect();
+		assert_eq!(spans(&fixed, 10), expected);
+		assert_eq!(expected, vec![(0, 3), (7, 10)]);
+	}
+
+	fn distinct_spans(matches: Vec<Match>) -> Vec<(u64, u64)> {
+		let mut spans: Vec<(u64, u64)> = matches.iter().map(|found| (found.start, found.end)).collect();
+		spans.dedup();
+		spans
+	}
+
+	#[test]
+	fn bitmaps_runs_and_variants_find_the_same_spans() {
+		let first = [0, 1, 2, 4, 5, 7, 8, 9, 12];
+		let second = [1, 2, 3, 5, 6, 9, 10, 11, 12, 13];
+		let shapes: [(u32, u32, u32, u32); 6] =
+			[(1, 1, 1, 1), (0, 1, 1, 1), (1, 3, 1, 1), (0, 2, 0, 2), (2, 2, 1, 2), (1, 1, 0, 3)];
+		for (first_min, first_max, second_min, second_max) in shapes {
+			let by_runs = Sequence::new(
+				vec![
+					labeled(&first, first_min, first_max, 0),
+					token_step(&second, second_min, second_max),
+				],
+				1,
+				&[],
+				Bindings::Canonical,
+			);
+			let by_bitmaps = Sequence::new(
+				vec![
+					Step {
+						label: Some(0),
+						declares: vec![0],
+						..bitmap_step(&first, first_min, first_max)
+					},
+					bitmap_step(&second, second_min, second_max),
+				],
+				1,
+				&[],
+				Bindings::Canonical,
+			);
+			let by_variants = unlabeled(vec![
+				bitmap_step(&first, first_min, first_max),
+				bitmap_step(&second, second_min, second_max),
+			]);
+			assert!(!by_variants.variants.is_empty());
+			let expected = distinct_spans(assignments(&by_runs, 14, &|_, _| true));
+			assert_eq!(distinct_spans(assignments(&by_bitmaps, 14, &|_, _| true)), expected);
+			assert_eq!(spans(&by_variants, 14), expected);
+			assert_eq!(spans(&by_variants, 11), distinct_spans(assignments(&by_runs, 11, &|_, _| true)));
+		}
+	}
+
+	#[test]
+	fn variants_of_equal_width_report_a_span_once() {
+		let sequence = unlabeled(vec![bitmap_step(&[3], 0, 1), bitmap_step(&[3], 0, 1)]);
+		assert_eq!(sequence.variants.len(), 3);
+		assert_eq!(spans(&sequence, 10), vec![(3, 4)]);
+	}
+
+	#[test]
+	fn many_repetition_counts_are_not_split() {
+		let sequence = unlabeled(vec![bitmap_step(&[1], 0, 5), bitmap_step(&[2], 0, 5)]);
+		assert!(sequence.variants.is_empty());
+		assert_eq!(spans(&sequence, 10), vec![(1, 2), (1, 3), (2, 3)]);
 	}
 
 	#[test]
@@ -645,6 +1122,59 @@ mod tests {
 		let found = spans(&sequence, 5000);
 		assert_eq!(found.len(), 5000 + 4999);
 		assert!(found.windows(2).all(|pair| pair[0] < pair[1]));
+	}
+
+	fn every_position_to(end: u64) -> Vec<u32> {
+		(0..end as u32).collect()
+	}
+
+	#[test]
+	fn seeded_matches_cross_start_windows() {
+		let window = WINDOW_STARTS as u64;
+		let length = 2 * window + 10;
+		let steps = vec![labeled(&every_position_to(length), 1, 3, 0)];
+		let sequence = Sequence::new(steps, 1, &[], Bindings::Canonical);
+		assert!(sequence.variants.is_empty());
+		let found = distinct_spans(assignments(&sequence, length, &|_, _| true));
+		assert_eq!(found.len() as u64, 3 * length - 3);
+		assert!(found.windows(2).all(|pair| pair[0] < pair[1]));
+		assert!(found.contains(&(window - 1, window + 2)));
+	}
+
+	#[test]
+	fn anchored_seeds_cross_start_windows() {
+		let length = 3 * WINDOW_STARTS as u64;
+		let every = every_position_to(length);
+		let even: Vec<u32> = every.iter().copied().step_by(2).collect();
+		let steps = vec![
+			labeled(&every, 1, 1, 0),
+			token_step(&every, 2, 2),
+			token_step(&even, 1, 1),
+		];
+		let sequence = Sequence::new(steps, 1, &[], Bindings::Canonical);
+		assert_eq!(sequence.sources, vec![(2, 3)]);
+		let expected: Vec<(u64, u64)> = (0..=length - 4)
+			.filter(|start| (start + 3) % 2 == 0)
+			.map(|start| (start, start + 4))
+			.collect();
+		assert_eq!(distinct_spans(assignments(&sequence, length, &|_, _| true)), expected);
+	}
+
+	#[test]
+	fn variant_matches_cross_start_windows() {
+		let length = 3 * WINDOW_STARTS as u64 + 10;
+		let even: Vec<u32> = every_position_to(length).into_iter().step_by(2).collect();
+		let sequence = unlabeled(vec![
+			bitmap_step(&every_position_to(length), 0, 1),
+			bitmap_step(&even, 1, 1),
+		]);
+		assert!(sequence.sources.contains(&(1, 1)));
+		let ends = even.iter().map(|&position| u64::from(position) + 1);
+		let alone = ends.clone().map(|end| (end - 1, end));
+		let preceded = ends.filter(|&end| end >= 2).map(|end| (end - 2, end));
+		let mut expected: Vec<(u64, u64)> = alone.chain(preceded).collect();
+		expected.sort_unstable();
+		assert_eq!(spans(&sequence, length), expected);
 	}
 
 	#[test]
@@ -682,7 +1212,7 @@ mod tests {
 	}
 
 	// gap a:[] gap b:[] over five tokens, with one constraint reading both labels
-	fn floating_pair(bindings: Bindings) -> Sequence {
+	fn floating_pair(bindings: Bindings) -> Sequence<'static> {
 		let everywhere = [0, 1, 2, 3, 4];
 		let gap = || token_step(&everywhere, 0, 3);
 		let steps = vec![gap(), labeled(&everywhere, 1, 1, 0), gap(), labeled(&everywhere, 1, 1, 1)];
@@ -738,7 +1268,7 @@ mod tests {
 	}
 
 	// every span of 1 to 100 tokens over 5,000 positions: about 495,000 matches
-	fn wide_spans() -> Sequence {
+	fn wide_spans() -> Sequence<'static> {
 		let positions: Vec<u32> = (0..5000).collect();
 		unlabeled(vec![token_step(&positions, 1, 100)])
 	}

@@ -18,7 +18,7 @@ use walkdir::WalkDir;
 
 use crate::format::conllu::ConllUReader;
 use crate::format::{CorpusReader, ParsedSentence};
-use crate::Result;
+use crate::{BuildError, Result};
 
 fn default_forward_only_layers() -> HashSet<String> {
 	let mut set = HashSet::new();
@@ -111,7 +111,11 @@ impl IndexSink {
 		self
 	}
 
-	pub fn merge_from(&mut self, other: Self) {
+	pub fn merge_from(&mut self, other: Self) -> Result<()> {
+		let total = self.current_position + other.current_position;
+		if total > montre_index::max_token_count {
+			return Err(BuildError::TooManyTokens(total));
+		}
 		let offset = self.current_position;
 		let sentence_offset = self.sentence_ids.len() as u32;
 
@@ -145,6 +149,7 @@ impl IndexSink {
 		}
 
 		self.current_position += other.current_position;
+		Ok(())
 	}
 
 	pub fn take_forward(&mut self) -> Option<InMemoryForward> {
@@ -289,6 +294,9 @@ impl IndexSink {
 	}
 
 	pub fn write(mut self, path: &Path, meta: CorpusMeta) -> Result<()> {
+		if self.current_position > montre_index::max_token_count {
+			return Err(BuildError::TooManyTokens(self.current_position));
+		}
 		self.spans.finalize();
 
 		if path.exists() {
@@ -401,12 +409,13 @@ pub fn build_from_directory_streaming(
 		.collect::<Result<Vec<_>>>()?;
 
 	let mut combined = IndexSink::new_without_forward().with_decompose_feats(decompose_feats);
-	for mut sink in file_sinks {		if sink.current_position > 0 {
+	for mut sink in file_sinks {
+		if sink.current_position > 0 {
 			if let Some(forward) = sink.take_forward() {
 				let offset = position_offset + combined.current_position;
 				streaming_forward.append_from(forward, offset)?;
 			}
-			combined.merge_from(sink);
+			combined.merge_from(sink)?;
 		}
 	}
 
@@ -548,5 +557,38 @@ mod tests {
 
 		let world_pos = builder.sink.inverted.get("word", "World").unwrap();
 		assert!(world_pos.contains(1));
+	}
+
+	fn one_token_sink() -> IndexSink {
+		let conllu = "1\tWorld\tworld\tNOUN\tNN\t_\t0\troot\t_\t_\n";
+		let mut sink = IndexSink::new_without_forward();
+		let sentences = ConllUReader::new(Cursor::new(conllu)).read_sentences().unwrap();
+		sink.add_document("doc.conllu", sentences);
+		sink
+	}
+
+	#[test]
+	fn a_merge_may_fill_the_position_space_but_not_exceed_it() {
+		let last = montre_index::max_token_count - 1;
+		let mut sink = IndexSink::new_without_forward();
+		sink.current_position = last;
+		sink.merge_from(one_token_sink()).unwrap();
+		assert_eq!(sink.current_position, montre_index::max_token_count);
+		assert!(sink.inverted.get("word", "World").unwrap().contains(last as u32));
+		assert!(matches!(
+			sink.merge_from(one_token_sink()),
+			Err(BuildError::TooManyTokens(total)) if total == montre_index::max_token_count + 1
+		));
+	}
+
+	#[test]
+	fn an_oversized_corpus_is_refused_before_its_directory_is_touched() {
+		let directory = tempfile::tempdir().unwrap();
+		let kept = directory.path().join("kept");
+		std::fs::write(&kept, b"").unwrap();
+		let mut builder = CorpusBuilder::new("oversized");
+		builder.sink.current_position = montre_index::max_token_count + 1;
+		assert!(matches!(builder.build(directory.path()), Err(BuildError::TooManyTokens(_))));
+		assert!(kept.exists());
 	}
 }

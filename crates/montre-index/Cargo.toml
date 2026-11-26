@@ -8,6 +8,8 @@ license.workspace = true
 [dependencies]
 montre-core = { workspace = true }
 roaring = { workspace = true }
+indexmap = { workspace = true }
+rustc-hash = { workspace = true }
 memmap2 = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }
