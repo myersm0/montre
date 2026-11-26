@@ -93,7 +93,7 @@ impl MultiCorpusBuilder {
 			);
 
 			let doc_start = combined.document_names.len();
-			combined.merge_from(sink);
+			combined.merge_from(sink)?;
 			let doc_end = combined.document_names.len();
 
 			components.push(ComponentMeta {

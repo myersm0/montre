@@ -117,7 +117,8 @@ impl Corpus {
 			});
 		}
 
-		let inverted = InMemoryInverted::from_bytes(&std::fs::read(path.join("inverted.bin"))?)?;
+		let inverted_file = std::fs::File::open(path.join("inverted.bin"))?;
+		let inverted = InMemoryInverted::from_bytes(&unsafe { memmap2::Mmap::map(&inverted_file)? })?;
 		let spans = SpanStore::Mapped(MappedSpans::open(path.join("spans.bin"))?);
 		let forward = ForwardStore::Mapped(MappedForward::open(path.join("forward.bin"))?);
 

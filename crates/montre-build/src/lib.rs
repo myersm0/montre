@@ -32,6 +32,12 @@ pub enum BuildError {
 
 	#[error("Alignment error: {0}")]
 	Alignment(String),
+
+	#[error(
+		"Corpus would hold {0} tokens; at most {max} are supported",
+		max = montre_index::max_token_count
+	)]
+	TooManyTokens(u64),
 }
 
 pub type Result<T> = std::result::Result<T, BuildError>;

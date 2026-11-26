@@ -263,6 +263,55 @@ mod tests {
 		assert!(InMemoryInverted::from_bytes(&bytes[..bytes.len() - 3]).is_err());
 	}
 
+	fn small_index_bytes() -> Vec<u8> {
+		let mut index = InMemoryInverted::new();
+		index.insert("word", "the", [0, 5, 10, 70_000]);
+		index.insert("word", "cat", 3..5000);
+		index.insert("pos", "DET", [0, 5]);
+		bincode::serialize(&index).unwrap()
+	}
+
+	#[test]
+	fn from_bytes_rejects_every_truncation() {
+		let bytes = small_index_bytes();
+		for length in 0..bytes.len() {
+			assert!(InMemoryInverted::from_bytes(&bytes[..length]).is_err(), "length {length}");
+		}
+	}
+
+	#[test]
+	fn from_bytes_fails_cleanly_on_any_corrupted_byte() {
+		let bytes = small_index_bytes();
+		for offset in 0..bytes.len() {
+			for flip in [0x01, 0x80, 0xff] {
+				let mut corrupted = bytes.clone();
+				corrupted[offset] ^= flip;
+				let _ = InMemoryInverted::from_bytes(&corrupted);
+			}
+		}
+	}
+
+	#[test]
+	fn from_bytes_rejects_lengths_past_the_input_without_allocating_them() {
+		let mut huge_layer_count = u64::MAX.to_le_bytes().to_vec();
+		huge_layer_count.extend_from_slice(&[0; 64]);
+		assert!(InMemoryInverted::from_bytes(&huge_layer_count).is_err());
+
+		// one layer "w" holding one value "v" whose bitmap claims u32::MAX containers
+		let mut huge_bitmap = Vec::new();
+		huge_bitmap.extend_from_slice(&1u64.to_le_bytes());
+		huge_bitmap.extend_from_slice(&1u64.to_le_bytes());
+		huge_bitmap.push(b'w');
+		huge_bitmap.extend_from_slice(&1u64.to_le_bytes());
+		huge_bitmap.extend_from_slice(&1u64.to_le_bytes());
+		huge_bitmap.push(b'v');
+		let bitmap = [12346u32.to_le_bytes(), u32::MAX.to_le_bytes()].concat();
+		huge_bitmap.extend_from_slice(&(bitmap.len() as u64).to_le_bytes());
+		huge_bitmap.extend_from_slice(&bitmap);
+		// framing intact, so the refusal is the bitmap's own
+		assert!(matches!(InMemoryInverted::from_bytes(&huge_bitmap), Err(IndexError::Io(_))));
+	}
+
 	#[test]
 	fn positions_where_unions_matching_values() {
 		let mut index = InMemoryInverted::new();

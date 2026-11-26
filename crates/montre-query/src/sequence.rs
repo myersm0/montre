@@ -22,6 +22,10 @@ const MAX_VARIANTS: usize = 16;
 // pattern proportional to the batch instead of the document
 const SEED_BATCH: usize = 256;
 
+// candidate starts each source contributes to one window, all gathered
+// before any is extended; bounds that buffer by the window, not the document
+const WINDOW_STARTS: usize = 1 << 14;
+
 // matches created between two looks at the budget
 pub(crate) const CHARGE_STRIDE: usize = 4096;
 
@@ -322,16 +326,32 @@ impl Step<'_> {
 		}
 	}
 
-	fn start_positions(&self, range: Span, out: &mut Vec<u64>) {
+	// the first `count` positions inside `range` at which the step begins
+	fn start_positions(&self, range: Span, count: usize, out: &mut Vec<u64>) {
+		let Some(last) = count.checked_sub(1) else {
+			return;
+		};
+		let full = out.len() + count;
 		match &self.matcher {
 			Matcher::Runs(runs) => {
 				let first = runs.partition_point(|run| run.end <= range.start);
 				for run in runs[first..].iter().take_while(|run| run.start < range.end) {
-					out.extend(run.start.max(range.start)..run.end.min(range.end));
+					let start = run.start.max(range.start);
+					let room = (full - out.len()) as u64;
+					out.extend(start..run.end.min(range.end).min(start + room));
+					if out.len() == full {
+						break;
+					}
 				}
 			}
 			Matcher::Bitmap(bitmap) => {
-				out.extend(bitmap.range(range.start as u32..range.end as u32).map(u64::from));
+				// bounded by position rather than by `take`, which would bypass
+				// the bulk path roaring gives `extend`
+				let end = bitmap
+					.range(range.start as u32..range.end as u32)
+					.nth(last)
+					.map_or(range.end, |position| u64::from(position) + 1);
+				out.extend(bitmap.range(range.start as u32..end as u32).map(u64::from));
 			}
 			Matcher::Spans(table) => {
 				let first = table.partition_point(|candidate| candidate.start < range.start);
@@ -339,7 +359,8 @@ impl Step<'_> {
 					table[first..]
 						.iter()
 						.take_while(|candidate| candidate.start < range.end)
-						.map(|candidate| candidate.start),
+						.map(|candidate| candidate.start)
+						.take(count),
 				);
 			}
 		}
@@ -435,6 +456,10 @@ pub(crate) struct Sequence<'c> {
 	// set when nothing is bound and every step is a token step with few
 	// possible repetition counts; each match is then the match of a variant
 	variants: Vec<Variant>,
+	// steps, with their offsets, whose start positions less the offset are
+	// the candidate starts: one per variant, the rarest anchor, or else every
+	// step that may begin a match
+	sources: Vec<(usize, u64)>,
 	// a mandatory step matches nowhere
 	unmatchable: bool,
 	slot_count: usize,
@@ -486,6 +511,14 @@ impl<'c> Sequence<'c> {
 		if anchors.len() > 1 {
 			anchors.sort_by_cached_key(|&(index, _)| steps[index].start_count());
 		}
+		let sources = match (variants.is_empty(), anchors.len()) {
+			(false, _) => variants
+				.iter()
+				.map(|variant| (variant.segments[0].step, variant.segments[0].offset))
+				.collect(),
+			(true, count) if count > 1 => vec![anchors[0]],
+			(true, _) => (0..seed_steps).map(|step| (step, 0)).collect(),
+		};
 		let unmatchable = steps
 			.iter()
 			.any(|step| step.min > 0 && step.matches_nowhere());
@@ -539,6 +572,7 @@ impl<'c> Sequence<'c> {
 			seed_steps,
 			anchors,
 			variants,
+			sources,
 			unmatchable,
 			slot_count,
 			match_cost: 1 + slot_count as u64 / 4,
@@ -559,33 +593,37 @@ impl<'c> Sequence<'c> {
 		output: Output,
 	) -> Result<Vec<Match>> {
 		let mut matches = Vec::new();
-		for batch in self.starts(range).chunks(SEED_BATCH) {
-			let active = self.extend_seeds::<T>(batch, range.end, holds, budget)?;
-			let surviving = active.len();
-			let first_new = matches.len();
-			matches.extend(
-				active
-					.into_iter()
-					.filter(|partial| partial.end > partial.start && keep(partial.start, partial.end))
-					.map(|partial| Match {
-						start: partial.start,
-						end: partial.end,
-						captures: partial.track.into_captures(),
-					}),
-			);
-			matches[first_new..].sort_unstable();
-			let emitted = matches.len() - first_new;
-			// matches bound for a buffer stay charged, to that buffer's ledger
-			let buffered = match output {
-				Output::Final => 0,
-				Output::Buffered(ledger) => {
-					ledger.adopt(self.cost(emitted));
-					emitted
+		for starts in self.start_windows(range) {
+			for batch in starts.chunks(SEED_BATCH) {
+				let active = self.extend_seeds::<T>(batch, range.end, holds, budget)?;
+				let surviving = active.len();
+				let first_new = matches.len();
+				matches.extend(
+					active
+						.into_iter()
+						.filter(|partial| {
+							partial.end > partial.start && keep(partial.start, partial.end)
+						})
+						.map(|partial| Match {
+							start: partial.start,
+							end: partial.end,
+							captures: partial.track.into_captures(),
+						}),
+				);
+				matches[first_new..].sort_unstable();
+				let emitted = matches.len() - first_new;
+				// matches bound for a buffer stay charged, to that buffer's ledger
+				let buffered = match output {
+					Output::Final => 0,
+					Output::Buffered(ledger) => {
+						ledger.adopt(self.cost(emitted));
+						emitted
+					}
+				};
+				budget.release(self.cost(surviving - buffered));
+				if let Output::Final = output {
+					budget.report(emitted)?;
 				}
-			};
-			budget.release(self.cost(surviving - buffered));
-			if let Output::Final = output {
-				budget.report(emitted)?;
 			}
 		}
 		Ok(matches)
@@ -600,13 +638,17 @@ impl<'c> Sequence<'c> {
 		budget: &Budget,
 	) -> Result<usize> {
 		let mut count = 0;
-		for batch in self.starts(range).chunks(SEED_BATCH) {
-			let active = self.extend_seeds::<T>(batch, range.end, holds, budget)?;
-			count += active
-				.iter()
-				.filter(|partial| partial.end > partial.start && keep(partial.start, partial.end))
-				.count();
-			budget.release(self.cost(active.len()));
+		for starts in self.start_windows(range) {
+			for batch in starts.chunks(SEED_BATCH) {
+				let active = self.extend_seeds::<T>(batch, range.end, holds, budget)?;
+				count += active
+					.iter()
+					.filter(|partial| {
+						partial.end > partial.start && keep(partial.start, partial.end)
+					})
+					.count();
+				budget.release(self.cost(active.len()));
+			}
 		}
 		Ok(count)
 	}
@@ -706,15 +748,85 @@ impl<'c> Sequence<'c> {
 		Ok(active)
 	}
 
+	// The starts inside `range`, sorted, a window at a time: see `starts`.
+	fn start_windows(&self, range: Span) -> impl Iterator<Item = Vec<(u64, u64)>> + '_ {
+		let mut from = range.start;
+		std::iter::from_fn(move || {
+			if from >= range.end {
+				return None;
+			}
+			let (starts, end) = self.starts(from, range.end);
+			from = end;
+			Some(starts)
+		})
+	}
+
 	// Matches of the variants as (start, end), or where matches may start as
-	// (start, start), sorted.
-	fn starts(&self, range: Span) -> Vec<(u64, u64)> {
-		if self.variants.is_empty() {
-			return self.seeds(range).into_iter().map(|start| (start, start)).collect();
+	// (start, start), sorted, for matches ending by `limit` that start in the
+	// window from `from`; with where that window ends.
+	fn starts(&self, from: u64, limit: u64) -> (Vec<(u64, u64)>, u64) {
+		if self.unmatchable {
+			return (Vec::new(), limit);
 		}
+		let (candidates, end) = self.candidates(from, limit);
+		let starts = match self.variants.is_empty() {
+			true => self
+				.seeds(candidates, limit)
+				.into_iter()
+				.map(|start| (start, start))
+				.collect(),
+			false => self.variant_matches(candidates, limit),
+		};
+		(starts, end)
+	}
+
+	// The candidate starts of each source from `from` on, cut back to the
+	// window in which none has more than `WINDOW_STARTS`; with where that
+	// window ends.
+	fn candidates(&self, from: u64, limit: u64) -> (Vec<Vec<u64>>, u64) {
+		let mut candidates: Vec<Vec<u64>> = self
+			.sources
+			.iter()
+			.map(|&(step, offset)| {
+				let mut positions = Vec::new();
+				if from + offset < limit {
+					let range = Span::new(from + offset, limit);
+					self.steps[step].start_positions(range, WINDOW_STARTS, &mut positions);
+				}
+				if offset > 0 {
+					positions.iter_mut().for_each(|position| *position -= offset);
+				}
+				positions
+			})
+			.collect();
+		let end = candidates
+			.iter()
+			.filter(|positions| positions.len() == WINDOW_STARTS)
+			.map(|positions| positions[WINDOW_STARTS - 1] + 1)
+			.min()
+			.unwrap_or(limit);
+		for positions in &mut candidates {
+			positions.truncate(positions.partition_point(|&start| start < end));
+		}
+		(candidates, end)
+	}
+
+	// The matches, ending by `limit`, of each variant from its candidates.
+	fn variant_matches(&self, candidates: Vec<Vec<u64>>, limit: u64) -> Vec<(u64, u64)> {
 		let mut spans = Vec::new();
-		for variant in &self.variants {
-			spans.extend(self.variant_matches(variant, range));
+		for (variant, starts) in self.variants.iter().zip(candidates) {
+			let mut cursors = vec![0; variant.segments.len()];
+			spans.extend(
+				starts
+					.into_iter()
+					.filter(|&start| {
+						variant.segments.iter().zip(&mut cursors).all(|(segment, cursor)| {
+							let step = &self.steps[segment.step];
+							step.covers(start + segment.offset, segment.length, limit, cursor)
+						})
+					})
+					.map(|start| (start, start + variant.width)),
+			);
 		}
 		// variants of equal width may match the same span
 		if self.variants.len() > 1 {
@@ -724,71 +836,33 @@ impl<'c> Sequence<'c> {
 		spans
 	}
 
-	fn variant_matches(&self, variant: &Variant, range: Span) -> Vec<(u64, u64)> {
-		let rarest = &variant.segments[0];
-		if self.unmatchable || range.start + rarest.offset >= range.end {
-			return Vec::new();
-		}
-		let mut positions = Vec::new();
-		self.steps[rarest.step]
-			.start_positions(Span::new(range.start + rarest.offset, range.end), &mut positions);
-		let mut cursors = vec![0; variant.segments.len()];
-		positions
-			.into_iter()
-			.map(|position| position - rarest.offset)
-			.filter(|&start| {
-				variant.segments.iter().zip(&mut cursors).all(|(segment, cursor)| {
-					let step = &self.steps[segment.step];
-					step.covers(start + segment.offset, segment.length, range.end, cursor)
-				})
-			})
-			.map(|start| (start, start + variant.width))
-			.collect()
-	}
-
-	// Where matches inside `range` may start. With anchors, the candidates
-	// come from the rarest of them and must suit every one.
-	fn seeds(&self, range: Span) -> Vec<u64> {
-		if self.unmatchable {
-			return Vec::new();
-		}
+	// Where matches ending by `limit` may start, from the candidates. With
+	// anchors, the candidates come from the rarest of them and must suit
+	// every one.
+	fn seeds(&self, candidates: Vec<Vec<u64>>, limit: u64) -> Vec<u64> {
+		// a single source's candidates are in order already
+		let mut positions = match <[Vec<u64>; 1]>::try_from(candidates) {
+			Ok([positions]) => positions,
+			Err(candidates) => {
+				let mut positions = candidates.concat();
+				positions.sort_unstable();
+				positions
+			}
+		};
+		positions.dedup();
 		// a lone anchor is the first step, whose starts are the seeds already
 		if self.anchors.len() < 2 {
-			return self.starts_of_leading_steps(range);
+			return positions;
 		}
-		let Some(&(rarest, rarest_offset)) = self.anchors.first() else {
-			return self.starts_of_leading_steps(range);
-		};
-		if range.start + rarest_offset >= range.end {
-			return Vec::new();
-		}
-		let mut positions = Vec::new();
-		self.steps[rarest].start_positions(
-			Span::new(range.start + rarest_offset, range.end),
-			&mut positions,
-		);
-		positions.dedup();
 		let mut cursors = vec![0; self.anchors.len()];
-		positions.retain_mut(|position| {
-			*position -= rarest_offset;
-			let start = *position;
+		positions.retain(|&start| {
 			self.anchors
 				.iter()
 				.zip(&mut cursors)
 				.all(|(&(step, offset), cursor)| {
-					self.steps[step].can_start_at(start + offset, range.end, cursor)
+					self.steps[step].can_start_at(start + offset, limit, cursor)
 				})
 		});
-		positions
-	}
-
-	fn starts_of_leading_steps(&self, range: Span) -> Vec<u64> {
-		let mut positions = Vec::new();
-		for step in &self.steps[..self.seed_steps] {
-			step.start_positions(range, &mut positions);
-		}
-		positions.sort_unstable();
-		positions.dedup();
 		positions
 	}
 }
@@ -901,10 +975,18 @@ mod tests {
 		assert_eq!(spans(&sequence, 10), vec![(1, 3), (2, 3), (4, 5), (5, 6), (6, 7)]);
 	}
 
+	fn seed_starts(sequence: &Sequence, end: u64) -> Vec<u64> {
+		sequence
+			.start_windows(Span::new(0, end))
+			.flatten()
+			.map(|(start, _)| start)
+			.collect()
+	}
+
 	#[test]
 	fn a_mandatory_step_that_matches_nowhere_leaves_no_seeds() {
 		let sequence = unlabeled(vec![token_step(&[0, 1, 2], 1, 1), token_step(&[], 1, 1)]);
-		assert!(sequence.seeds(Span::new(0, 10)).is_empty());
+		assert!(seed_starts(&sequence, 10).is_empty());
 		let optional = unlabeled(vec![token_step(&[0, 1, 2], 1, 1), token_step(&[], 0, 1)]);
 		assert_eq!(spans(&optional, 10), vec![(0, 1), (1, 2), (2, 3)]);
 	}
@@ -912,22 +994,23 @@ mod tests {
 	#[test]
 	fn seeds_come_from_the_rarest_anchored_step() {
 		let every = (0..10).collect::<Vec<u32>>();
-		let sequence = unlabeled(vec![
-			token_step(&every, 1, 1),
+		let steps = vec![
+			labeled(&every, 1, 1, 0),
 			token_step(&every, 2, 2),
 			token_step(&[4, 8], 1, 1),
-		]);
-		assert_eq!(sequence.seeds(Span::new(0, 10)), vec![1, 5]);
+		];
+		let sequence = Sequence::new(steps, 1, &[], Bindings::Canonical);
+		assert!(sequence.variants.is_empty());
+		assert_eq!(seed_starts(&sequence, 10), vec![1, 5]);
 		assert_eq!(spans(&sequence, 10), vec![(1, 5), (5, 9)]);
 	}
 
 	#[test]
 	fn an_anchor_after_a_variable_step_is_not_used() {
-		let sequence = unlabeled(vec![
-			token_step(&[0, 1, 2, 3], 1, 2),
-			token_step(&[3], 1, 1),
-		]);
-		assert_eq!(sequence.seeds(Span::new(0, 10)), vec![0, 1, 2, 3]);
+		let steps = vec![labeled(&[0, 1, 2, 3], 1, 2, 0), token_step(&[3], 1, 1)];
+		let sequence = Sequence::new(steps, 1, &[], Bindings::Canonical);
+		assert!(sequence.variants.is_empty());
+		assert_eq!(seed_starts(&sequence, 10), vec![0, 1, 2, 3]);
 		assert_eq!(spans(&sequence, 10), vec![(1, 4), (2, 4)]);
 	}
 
@@ -1039,6 +1122,59 @@ mod tests {
 		let found = spans(&sequence, 5000);
 		assert_eq!(found.len(), 5000 + 4999);
 		assert!(found.windows(2).all(|pair| pair[0] < pair[1]));
+	}
+
+	fn every_position_to(end: u64) -> Vec<u32> {
+		(0..end as u32).collect()
+	}
+
+	#[test]
+	fn seeded_matches_cross_start_windows() {
+		let window = WINDOW_STARTS as u64;
+		let length = 2 * window + 10;
+		let steps = vec![labeled(&every_position_to(length), 1, 3, 0)];
+		let sequence = Sequence::new(steps, 1, &[], Bindings::Canonical);
+		assert!(sequence.variants.is_empty());
+		let found = distinct_spans(assignments(&sequence, length, &|_, _| true));
+		assert_eq!(found.len() as u64, 3 * length - 3);
+		assert!(found.windows(2).all(|pair| pair[0] < pair[1]));
+		assert!(found.contains(&(window - 1, window + 2)));
+	}
+
+	#[test]
+	fn anchored_seeds_cross_start_windows() {
+		let length = 3 * WINDOW_STARTS as u64;
+		let every = every_position_to(length);
+		let even: Vec<u32> = every.iter().copied().step_by(2).collect();
+		let steps = vec![
+			labeled(&every, 1, 1, 0),
+			token_step(&every, 2, 2),
+			token_step(&even, 1, 1),
+		];
+		let sequence = Sequence::new(steps, 1, &[], Bindings::Canonical);
+		assert_eq!(sequence.sources, vec![(2, 3)]);
+		let expected: Vec<(u64, u64)> = (0..=length - 4)
+			.filter(|start| (start + 3) % 2 == 0)
+			.map(|start| (start, start + 4))
+			.collect();
+		assert_eq!(distinct_spans(assignments(&sequence, length, &|_, _| true)), expected);
+	}
+
+	#[test]
+	fn variant_matches_cross_start_windows() {
+		let length = 3 * WINDOW_STARTS as u64 + 10;
+		let even: Vec<u32> = every_position_to(length).into_iter().step_by(2).collect();
+		let sequence = unlabeled(vec![
+			bitmap_step(&every_position_to(length), 0, 1),
+			bitmap_step(&even, 1, 1),
+		]);
+		assert!(sequence.sources.contains(&(1, 1)));
+		let ends = even.iter().map(|&position| u64::from(position) + 1);
+		let alone = ends.clone().map(|end| (end - 1, end));
+		let preceded = ends.filter(|&end| end >= 2).map(|end| (end - 2, end));
+		let mut expected: Vec<(u64, u64)> = alone.chain(preceded).collect();
+		expected.sort_unstable();
+		assert_eq!(spans(&sequence, length), expected);
 	}
 
 	#[test]
