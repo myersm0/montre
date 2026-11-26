@@ -8,8 +8,8 @@ use montre_daemon::{serve, DaemonClient, ServeOptions};
 use tempfile::TempDir;
 
 fn build_test_corpus(out: &Path) {
-	let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
-		.join("../../testdata/parallel/corpus.toml");
+	let manifest =
+		Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/parallel/corpus.toml");
 	montre_build::MultiCorpusBuilder::from_manifest(&manifest)
 		.expect("manifest load")
 		.build(out)
@@ -35,7 +35,10 @@ fn boot_daemon() -> Fixture {
 	thread::spawn(move || {
 		let _ = serve(options);
 	});
-	Fixture { _temp: temp, socket }
+	Fixture {
+		_temp: temp,
+		socket,
+	}
 }
 
 fn connect(fx: &Fixture) -> DaemonClient {
@@ -45,7 +48,10 @@ fn connect(fx: &Fixture) -> DaemonClient {
 			return client;
 		}
 		if Instant::now() >= deadline {
-			panic!("daemon socket never became connectable at {}", fx.socket.display());
+			panic!(
+				"daemon socket never became connectable at {}",
+				fx.socket.display()
+			);
 		}
 		thread::sleep(Duration::from_millis(20));
 	}
@@ -80,14 +86,20 @@ fn register_round_trip_over_socket() {
 	assert_eq!(response.process_id, 1);
 	assert_eq!(response.protocol_version, PROTOCOL_VERSION);
 	assert_eq!(response.daemon_epoch, 1);
-	assert!(response.capabilities.coupler_kinds.iter().any(|k| k == "sentence_mirror"));
+	assert!(response
+		.capabilities
+		.coupler_kinds
+		.iter()
+		.any(|k| k == "sentence_mirror"));
 }
 
 #[test]
 fn protocol_errors_are_returned_over_socket() {
 	let (_fx, mut client) = connect_and_register();
 	let error = client
-		.query_execute(QueryExecuteParams { cql: "[pos=\"NOUN\"".to_string() })
+		.query_execute(QueryExecuteParams {
+			cql: "[pos=\"NOUN\"".to_string(),
+		})
 		.unwrap_err();
 	match error {
 		DaemonClientError::Protocol(protocol) => {
@@ -122,7 +134,10 @@ fn text_round_trip_via_corpus_documents_over_socket() {
 		.expect("la_maison present");
 
 	let sentence = client
-		.text_sentence(TextSentenceParams { doc: la_maison.index, sent: 0 })
+		.text_sentence(TextSentenceParams {
+			doc: la_maison.index,
+			sent: 0,
+		})
 		.expect("text sentence");
 	assert_eq!(sentence.sentence_id, "1");
 	assert!(sentence.surface.contains("La"));
@@ -147,7 +162,9 @@ fn query_execute_then_hits_round_trip_over_socket() {
 	let (_fx, mut client) = connect_and_register();
 
 	let exec = client
-		.query_execute(QueryExecuteParams { cql: "[pos=\"NOUN\"]".to_string() })
+		.query_execute(QueryExecuteParams {
+			cql: "[pos=\"NOUN\"]".to_string(),
+		})
 		.expect("query execute");
 	assert!(exec.hit_count > 0);
 	assert!(exec.handle.starts_with("r-"));

@@ -56,9 +56,7 @@ mod tests {
 	use crate::dispatch::dispatch_request;
 	use crate::dispatch::test_support::{register_context, with_state_thread};
 	use crate::protocol::error_codes;
-	use crate::protocol::{
-		CouplerCreateReply, CouplerListReply, OkReply, ProcessKind,
-	};
+	use crate::protocol::{CouplerCreateReply, CouplerListReply, OkReply, ProcessKind};
 	use std::sync::Arc;
 
 	#[test]
@@ -71,21 +69,15 @@ mod tests {
 				&["position", "span", "sentence"],
 				&["sentence"],
 			);
-			let (ctx_b, _rx_b) = register_context(
-				state_tx,
-				handle,
-				ProcessKind::External,
-				&[],
-				&["sentence"],
-			);
+			let (ctx_b, _rx_b) =
+				register_context(state_tx, handle, ProcessKind::External, &[], &["sentence"]);
 
 			let params = serde_json::json!({
 				"master_id": ctx_a.process_id.unwrap(),
 				"follower_id": ctx_b.process_id.unwrap(),
 				"kind": { "type": "sentence_mirror" },
 			});
-			let result =
-				dispatch_request("coupler.create", Some(params), &mut ctx_a).unwrap();
+			let result = dispatch_request("coupler.create", Some(params), &mut ctx_a).unwrap();
 			let reply: CouplerCreateReply = serde_json::from_value(result).unwrap();
 			assert!(reply.coupler_id > 0);
 		});
@@ -101,13 +93,8 @@ mod tests {
 				&["hit"],
 				&[],
 			);
-			let (ctx_b, _rx_b) = register_context(
-				state_tx,
-				handle,
-				ProcessKind::External,
-				&[],
-				&["sentence"],
-			);
+			let (ctx_b, _rx_b) =
+				register_context(state_tx, handle, ProcessKind::External, &[], &["sentence"]);
 
 			let params = serde_json::json!({
 				"master_id": ctx_a.process_id.unwrap(),
@@ -143,13 +130,8 @@ mod tests {
 	#[test]
 	fn coupler_create_missing_params_rejected() {
 		with_state_thread(|state_tx, handle| {
-			let (mut ctx, _rx) = register_context(
-				state_tx,
-				handle,
-				ProcessKind::External,
-				&[],
-				&[],
-			);
+			let (mut ctx, _rx) =
+				register_context(state_tx, handle, ProcessKind::External, &[], &[]);
 			let err = dispatch_request("coupler.create", None, &mut ctx).unwrap_err();
 			assert_eq!(err.code, -32602);
 		});
@@ -165,13 +147,8 @@ mod tests {
 				&["position", "span", "sentence"],
 				&["sentence"],
 			);
-			let (ctx_b, _rx_b) = register_context(
-				state_tx,
-				handle,
-				ProcessKind::External,
-				&[],
-				&["sentence"],
-			);
+			let (ctx_b, _rx_b) =
+				register_context(state_tx, handle, ProcessKind::External, &[], &["sentence"]);
 
 			let create_params = serde_json::json!({
 				"master_id": ctx_a.process_id.unwrap(),
@@ -180,8 +157,7 @@ mod tests {
 			});
 			let create_result =
 				dispatch_request("coupler.create", Some(create_params), &mut ctx_a).unwrap();
-			let create_reply: CouplerCreateReply =
-				serde_json::from_value(create_result).unwrap();
+			let create_reply: CouplerCreateReply = serde_json::from_value(create_result).unwrap();
 
 			let remove_params = serde_json::json!({ "coupler_id": create_reply.coupler_id });
 			let result =
@@ -194,13 +170,8 @@ mod tests {
 	#[test]
 	fn coupler_remove_unknown_returns_1401() {
 		with_state_thread(|state_tx, handle| {
-			let (mut ctx, _rx) = register_context(
-				state_tx,
-				handle,
-				ProcessKind::External,
-				&[],
-				&[],
-			);
+			let (mut ctx, _rx) =
+				register_context(state_tx, handle, ProcessKind::External, &[], &[]);
 			let params = serde_json::json!({ "coupler_id": 9999 });
 			let err = dispatch_request("coupler.remove", Some(params), &mut ctx).unwrap_err();
 			assert_eq!(err.code, error_codes::COUPLER_NOT_FOUND);
@@ -210,13 +181,8 @@ mod tests {
 	#[test]
 	fn coupler_list_empty_when_no_couplers() {
 		with_state_thread(|state_tx, handle| {
-			let (mut ctx, _rx) = register_context(
-				state_tx,
-				handle,
-				ProcessKind::External,
-				&[],
-				&[],
-			);
+			let (mut ctx, _rx) =
+				register_context(state_tx, handle, ProcessKind::External, &[], &[]);
 			let result = dispatch_request("coupler.list", None, &mut ctx).unwrap();
 			let reply: CouplerListReply = serde_json::from_value(result).unwrap();
 			assert!(reply.couplers.is_empty());
@@ -233,13 +199,8 @@ mod tests {
 				&["position", "span", "sentence"],
 				&["sentence"],
 			);
-			let (ctx_b, _rx_b) = register_context(
-				state_tx,
-				handle,
-				ProcessKind::External,
-				&[],
-				&["sentence"],
-			);
+			let (ctx_b, _rx_b) =
+				register_context(state_tx, handle, ProcessKind::External, &[], &["sentence"]);
 
 			let create_params = serde_json::json!({
 				"master_id": ctx_a.process_id.unwrap(),
@@ -271,13 +232,8 @@ mod tests {
 				&[],
 				&["sentence"],
 			);
-			let (ctx_c, _rx_c) = register_context(
-				state_tx,
-				handle,
-				ProcessKind::External,
-				&[],
-				&[],
-			);
+			let (ctx_c, _rx_c) =
+				register_context(state_tx, handle, ProcessKind::External, &[], &[]);
 
 			let create_params = serde_json::json!({
 				"master_id": ctx_a.process_id.unwrap(),

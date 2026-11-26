@@ -54,16 +54,15 @@ impl MultiCorpusBuilder {
 
 	pub fn build(self, output_path: impl AsRef<Path>) -> Result<()> {
 		let build_id = BUILD_COUNTER.fetch_add(1, Ordering::SeqCst);
-		let temp_dir = std::env::temp_dir().join(format!(
-			"montre_build_{}_{}", std::process::id(), build_id
-		));
+		let temp_dir =
+			std::env::temp_dir().join(format!("montre_build_{}_{}", std::process::id(), build_id));
 		let mut streaming_forward = StreamingForwardWriter::new(&temp_dir)?;
 
-		let mut component_names: Vec<String> =
-			self.manifest.components.keys().cloned().collect();
+		let mut component_names: Vec<String> = self.manifest.components.keys().cloned().collect();
 		component_names.sort();
 
-		let mut combined = IndexSink::new_without_forward().with_decompose_feats(self.decompose_feats);
+		let mut combined =
+			IndexSink::new_without_forward().with_decompose_feats(self.decompose_feats);
 		let mut components = Vec::new();
 
 		for (id, name) in component_names.iter().enumerate() {
@@ -107,8 +106,7 @@ impl MultiCorpusBuilder {
 		let mut alignments = AlignmentIndex::new();
 		let mut alignment_meta = Vec::new();
 
-		let alignment_names: Vec<String> =
-			self.manifest.alignments.keys().cloned().collect();
+		let alignment_names: Vec<String> = self.manifest.alignments.keys().cloned().collect();
 		for alignment_name in &alignment_names {
 			let config = self
 				.manifest
@@ -123,20 +121,14 @@ impl MultiCorpusBuilder {
 				.iter()
 				.find(|c| c.name == config.source)
 				.ok_or_else(|| {
-					BuildError::Alignment(format!(
-						"Source component not found: {}",
-						config.source
-					))
+					BuildError::Alignment(format!("Source component not found: {}", config.source))
 				})?;
 
 			let target_comp = components
 				.iter()
 				.find(|c| c.name == config.target)
 				.ok_or_else(|| {
-					BuildError::Alignment(format!(
-						"Target component not found: {}",
-						config.target
-					))
+					BuildError::Alignment(format!("Target component not found: {}", config.target))
 				})?;
 
 			let edges_path = self.manifest_dir.join(&config.edges);
@@ -182,15 +174,14 @@ impl MultiCorpusBuilder {
 
 		let path = output_path.as_ref();
 
-		let alignment_bytes = if !alignments.alignments.is_empty() {
-			Some(
-				bincode::serialize(&alignments).map_err(|e| {
+		let alignment_bytes =
+			if !alignments.alignments.is_empty() {
+				Some(bincode::serialize(&alignments).map_err(|e| {
 					BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
-				})?,
-			)
-		} else {
-			None
-		};
+				})?)
+			} else {
+				None
+			};
 
 		let meta = CorpusMeta {
 			name: self.manifest.corpus.name.clone(),
@@ -233,10 +224,7 @@ impl MultiCorpusBuilder {
 	}
 }
 
-fn build_doc_name_map(
-	comp: &ComponentMeta,
-	document_names: &[String],
-) -> HashMap<String, u32> {
+fn build_doc_name_map(comp: &ComponentMeta, document_names: &[String]) -> HashMap<String, u32> {
 	let mut map = HashMap::new();
 	for (i, doc_idx) in (comp.document_range.0..comp.document_range.1).enumerate() {
 		if let Some(name) = document_names.get(doc_idx) {
@@ -254,9 +242,7 @@ fn parse_alignment_dir(
 	strict: bool,
 ) -> Result<Vec<(UnitId, UnitId)>> {
 	let mut files: Vec<_> = std::fs::read_dir(dir)
-		.map_err(|e| {
-			BuildError::Alignment(format!("Failed to read directory {:?}: {}", dir, e))
-		})?
+		.map_err(|e| BuildError::Alignment(format!("Failed to read directory {:?}: {}", dir, e)))?
 		.filter_map(|e| e.ok())
 		.filter(|e| {
 			e.path()
@@ -291,10 +277,7 @@ fn parse_alignment_file(
 	strict: bool,
 ) -> Result<Vec<(UnitId, UnitId)>> {
 	let file = File::open(path).map_err(|e| {
-		BuildError::Alignment(format!(
-			"Failed to open alignment file {:?}: {}",
-			path, e
-		))
+		BuildError::Alignment(format!("Failed to open alignment file {:?}: {}", path, e))
 	})?;
 
 	let source_doc_map = build_doc_name_map(source_comp, document_names);

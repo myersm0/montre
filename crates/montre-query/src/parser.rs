@@ -1,6 +1,6 @@
 use crate::ast::{
-	CmpOp, Constraint, ConstraintOp, ConstraintValue, GlobalConstraint, LabelAttr,
-	Query, TokenPattern,
+	CmpOp, Constraint, ConstraintOp, ConstraintValue, GlobalConstraint, LabelAttr, Query,
+	TokenPattern,
 };
 use crate::{QueryError, Result};
 
@@ -375,7 +375,12 @@ impl<'a> Parser<'a> {
 		let op = self.parse_cmp_op()?;
 		self.skip_whitespace();
 		let value = self.parse_number()?;
-		Ok(GlobalConstraint::Distance { left, right, op, value })
+		Ok(GlobalConstraint::Distance {
+			left,
+			right,
+			op,
+			value,
+		})
 	}
 
 	fn parse_compare_constraint(&mut self) -> Result<GlobalConstraint> {
@@ -482,7 +487,10 @@ impl<'a> Parser<'a> {
 			Some('w') => {
 				let r = self.remaining();
 				r.starts_with("within")
-					&& r[6..].chars().next().map_or(true, |c| !c.is_alphanumeric() && c != '_')
+					&& r[6..]
+						.chars()
+						.next()
+						.map_or(true, |c| !c.is_alphanumeric() && c != '_')
 			}
 			Some('=') if !self.remaining().starts_with("==") => true,
 			_ => false,
@@ -526,12 +534,25 @@ impl<'a> Parser<'a> {
 			self.pos = save;
 			return Err(QueryError::Parse {
 				position: self.pos,
-				message: format!("Unexpected identifier '{}' (did you mean a label like '{}:[...]'?)", name, name),
+				message: format!(
+					"Unexpected identifier '{}' (did you mean a label like '{}:[...]'?)",
+					name, name
+				),
 			});
 		}
 		self.pos += 1;
 
-		const RESERVED: &[&str] = &["doc", "document", "s", "sent", "sentence", "p", "para", "paragraph", "component"];
+		const RESERVED: &[&str] = &[
+			"doc",
+			"document",
+			"s",
+			"sent",
+			"sentence",
+			"p",
+			"para",
+			"paragraph",
+			"component",
+		];
 		if RESERVED.contains(&name.as_str()) {
 			return Err(QueryError::Parse {
 				position: save,
@@ -763,13 +784,13 @@ impl<'a> Parser<'a> {
 			if c == '"' {
 				let word = self.input[start..self.pos].to_string();
 				self.pos += 1;
-				return Ok(Query::token(
-					TokenPattern::new().with_constraint(Constraint {
+				return Ok(Query::token(TokenPattern::new().with_constraint(
+					Constraint {
 						layer: "word".into(),
 						op: ConstraintOp::Eq,
 						value: ConstraintValue::Literal(word),
-					}),
-				));
+					},
+				)));
 			} else if c == '\\' {
 				self.pos += 1;
 				if self.peek_char().is_some() {
@@ -1275,7 +1296,12 @@ mod tests {
 			Query::Constrained { constraints, .. } => {
 				assert_eq!(constraints.len(), 1);
 				match &constraints[0] {
-					GlobalConstraint::Distance { left, right, op, value } => {
+					GlobalConstraint::Distance {
+						left,
+						right,
+						op,
+						value,
+					} => {
 						assert_eq!(left, "a");
 						assert_eq!(right, "b");
 						assert_eq!(*op, CmpOp::Ge);
@@ -1303,7 +1329,8 @@ mod tests {
 
 	#[test]
 	fn parse_global_constraint_after_within() {
-		let query = parse(r#"a:[pos="NOUN"] b:[pos="NOUN"] within s :: a.lemma = b.lemma"#).unwrap();
+		let query =
+			parse(r#"a:[pos="NOUN"] b:[pos="NOUN"] within s :: a.lemma = b.lemma"#).unwrap();
 		match query {
 			Query::Constrained { inner, constraints } => {
 				assert!(matches!(*inner, Query::Within { .. }));

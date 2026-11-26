@@ -45,10 +45,17 @@ pub fn build_dict_encoded_layer(name: &str, data: &[Value]) -> LayerBuild {
 		}
 	}
 
-	let mut distinct: Vec<&str> = raw_values.iter().copied().collect::<std::collections::HashSet<_>>().into_iter().collect();
+	let mut distinct: Vec<&str> = raw_values
+		.iter()
+		.copied()
+		.collect::<std::collections::HashSet<_>>()
+		.into_iter()
+		.collect();
 	distinct.sort();
 
-	let term_to_id: HashMap<&str, u32> = distinct.iter().enumerate()
+	let term_to_id: HashMap<&str, u32> = distinct
+		.iter()
+		.enumerate()
 		.map(|(i, &t)| (t, i as u32))
 		.collect();
 
@@ -61,9 +68,13 @@ pub fn build_dict_encoded_layer(name: &str, data: &[Value]) -> LayerBuild {
 	term_offsets.push(term_strings.len() as u32);
 
 	let vocab_count = distinct.len() as u32;
-	let id_width = if vocab_count <= 256 { 1u8 }
-		else if vocab_count <= 65_536 { 2u8 }
-		else { 4u8 };
+	let id_width = if vocab_count <= 256 {
+		1u8
+	} else if vocab_count <= 65_536 {
+		2u8
+	} else {
+		4u8
+	};
 
 	let mut data_bytes = Vec::with_capacity(raw_values.len() * id_width as usize);
 	for &val in &raw_values {
@@ -77,7 +88,9 @@ pub fn build_dict_encoded_layer(name: &str, data: &[Value]) -> LayerBuild {
 	}
 
 	let mut bitmap_bytes = Vec::new();
-	bitmap.serialize_into(&mut bitmap_bytes).expect("bitmap serialization failed");
+	bitmap
+		.serialize_into(&mut bitmap_bytes)
+		.expect("bitmap serialization failed");
 
 	LayerBuild {
 		name: name.to_string(),
@@ -95,10 +108,13 @@ pub fn build_dict_encoded_layer(name: &str, data: &[Value]) -> LayerBuild {
 pub fn build_dense_numeric_layer(name: &str, data: &[Value], token_count: u64) -> LayerBuild {
 	let mut data_bytes = Vec::with_capacity(token_count as usize * 4);
 	for pos in 0..token_count as usize {
-		let val = data.get(pos).and_then(|v| match v {
-			Value::Int(n) => Some(*n as u32),
-			_ => None,
-		}).unwrap_or(0);
+		let val = data
+			.get(pos)
+			.and_then(|v| match v {
+				Value::Int(n) => Some(*n as u32),
+				_ => None,
+			})
+			.unwrap_or(0);
 		data_bytes.extend_from_slice(&val.to_ne_bytes());
 	}
 
@@ -224,11 +240,19 @@ pub fn write_mfwd(
 			write_padding(&mut file, tt_size, align_to_8(tt_size))?;
 
 			file.write_all(&layer.bitmap_bytes)?;
-			write_padding(&mut file, layer.bitmap_bytes.len(), align_to_8(layer.bitmap_bytes.len()))?;
+			write_padding(
+				&mut file,
+				layer.bitmap_bytes.len(),
+				align_to_8(layer.bitmap_bytes.len()),
+			)?;
 		}
 
 		file.write_all(&layer.data_bytes)?;
-		write_padding(&mut file, layer.data_bytes.len(), align_to_8(layer.data_bytes.len()))?;
+		write_padding(
+			&mut file,
+			layer.data_bytes.len(),
+			align_to_8(layer.data_bytes.len()),
+		)?;
 	}
 
 	Ok(())
@@ -323,9 +347,10 @@ impl MappedForward {
 		}
 		let version = u32::from_ne_bytes(buf[4..8].try_into().unwrap());
 		if version != FORMAT_VERSION {
-			return Err(crate::IndexError::Format(
-				format!("forward format version {}, expected {}", version, FORMAT_VERSION),
-			));
+			return Err(crate::IndexError::Format(format!(
+				"forward format version {}, expected {}",
+				version, FORMAT_VERSION
+			)));
 		}
 		let bom = u32::from_ne_bytes(buf[8..12].try_into().unwrap());
 		if bom != BYTE_ORDER_MARK {
@@ -356,8 +381,10 @@ impl MappedForward {
 			let mapped_layer = match entry.encoding {
 				ENCODING_DICT => {
 					let bitmap = RoaringBitmap::deserialize_from(
-						&buf[entry.bitmap_offset as usize..entry.bitmap_offset as usize + entry.bitmap_len as usize]
-					).map_err(|e| crate::IndexError::Format(format!("bitmap deserialize: {}", e)))?;
+						&buf[entry.bitmap_offset as usize
+							..entry.bitmap_offset as usize + entry.bitmap_len as usize],
+					)
+					.map_err(|e| crate::IndexError::Format(format!("bitmap deserialize: {}", e)))?;
 
 					let is_dense = bitmap.len() == token_count;
 
@@ -370,16 +397,15 @@ impl MappedForward {
 						data_offset: entry.data_offset as usize,
 					}
 				}
-				ENCODING_DENSE_NUMERIC => {
-					MappedLayer::DenseNumeric {
-						data_offset: entry.data_offset as usize,
-						data_count: entry.data_count,
-					}
-				}
+				ENCODING_DENSE_NUMERIC => MappedLayer::DenseNumeric {
+					data_offset: entry.data_offset as usize,
+					data_count: entry.data_count,
+				},
 				other => {
-					return Err(crate::IndexError::Format(
-						format!("unknown encoding kind: 0x{:02x}", other),
-					));
+					return Err(crate::IndexError::Format(format!(
+						"unknown encoding kind: 0x{:02x}",
+						other
+					)));
 				}
 			};
 
@@ -387,12 +413,21 @@ impl MappedForward {
 			layers.push(mapped_layer);
 		}
 
-		Ok(Self { mmap, token_count, layer_map, layers })
+		Ok(Self {
+			mmap,
+			token_count,
+			layer_map,
+			layers,
+		})
 	}
 
 	fn term_str(&self, layer: &MappedLayer, term_id: u32) -> Option<&str> {
 		let (vocab_offset, vocab_count) = match layer {
-			MappedLayer::DictEncoded { vocab_offset, vocab_count, .. } => (*vocab_offset, *vocab_count),
+			MappedLayer::DictEncoded {
+				vocab_offset,
+				vocab_count,
+				..
+			} => (*vocab_offset, *vocab_count),
 			_ => return None,
 		};
 
@@ -415,7 +450,11 @@ impl MappedForward {
 
 	fn read_term_id(&self, layer: &MappedLayer, idx: usize) -> Option<u32> {
 		let (id_width, data_offset) = match layer {
-			MappedLayer::DictEncoded { id_width, data_offset, .. } => (*id_width, *data_offset),
+			MappedLayer::DictEncoded {
+				id_width,
+				data_offset,
+				..
+			} => (*id_width, *data_offset),
 			_ => return None,
 		};
 
@@ -447,7 +486,9 @@ impl ForwardIndex for MappedForward {
 		let mapped_layer = &self.layers[layer_idx];
 
 		match mapped_layer {
-			MappedLayer::DictEncoded { bitmap, is_dense, .. } => {
+			MappedLayer::DictEncoded {
+				bitmap, is_dense, ..
+			} => {
 				let idx = if *is_dense {
 					if position >= self.token_count {
 						return None;
@@ -472,7 +513,10 @@ impl ForwardIndex for MappedForward {
 		let mapped_layer = &self.layers[layer_idx];
 
 		match mapped_layer {
-			MappedLayer::DenseNumeric { data_offset, data_count } => {
+			MappedLayer::DenseNumeric {
+				data_offset,
+				data_count,
+			} => {
 				if position >= *data_count {
 					return None;
 				}
@@ -646,7 +690,8 @@ mod tests {
 		let is_word_layer = {
 			let string_pool_start = HEADER_SIZE + 2 * DIR_ENTRY_SIZE;
 			let name_start = string_pool_start + entry.name_offset as usize;
-			let name = std::str::from_utf8(&data[name_start..name_start + entry.name_len as usize]).unwrap();
+			let name = std::str::from_utf8(&data[name_start..name_start + entry.name_len as usize])
+				.unwrap();
 			name == "word"
 		};
 
@@ -732,15 +777,18 @@ mod tests {
 		for i in 0..2 {
 			let entry = read_dir_entry(&data, i).unwrap();
 			let name_start = string_pool_start + entry.name_offset as usize;
-			let name = std::str::from_utf8(&data[name_start..name_start + entry.name_len as usize]).unwrap();
+			let name = std::str::from_utf8(&data[name_start..name_start + entry.name_len as usize])
+				.unwrap();
 
 			if name == "feats.Number" {
 				assert_eq!(entry.vocab_count, 2);
 				assert_eq!(entry.data_count, 3);
 
 				let bitmap = RoaringBitmap::deserialize_from(
-					&data[entry.bitmap_offset as usize..entry.bitmap_offset as usize + entry.bitmap_len as usize]
-				).unwrap();
+					&data[entry.bitmap_offset as usize
+						..entry.bitmap_offset as usize + entry.bitmap_len as usize],
+				)
+				.unwrap();
 				assert_eq!(bitmap.len(), 3);
 				assert!(bitmap.contains(2));
 				assert!(bitmap.contains(5));
@@ -823,10 +871,25 @@ mod tests {
 		for i in 0..layer_count as usize {
 			let entry = read_dir_entry(&data, i).unwrap();
 			if entry.encoding == ENCODING_DICT {
-				assert_eq!(entry.vocab_offset as usize % 8, 0, "vocab_offset misaligned for layer {}", i);
-				assert_eq!(entry.bitmap_offset as usize % 8, 0, "bitmap_offset misaligned for layer {}", i);
+				assert_eq!(
+					entry.vocab_offset as usize % 8,
+					0,
+					"vocab_offset misaligned for layer {}",
+					i
+				);
+				assert_eq!(
+					entry.bitmap_offset as usize % 8,
+					0,
+					"bitmap_offset misaligned for layer {}",
+					i
+				);
 			}
-			assert_eq!(entry.data_offset as usize % 8, 0, "data_offset misaligned for layer {}", i);
+			assert_eq!(
+				entry.data_offset as usize % 8,
+				0,
+				"data_offset misaligned for layer {}",
+				i
+			);
 		}
 	}
 

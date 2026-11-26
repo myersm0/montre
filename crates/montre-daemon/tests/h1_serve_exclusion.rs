@@ -7,8 +7,8 @@ use montre_daemon::{serve, DaemonClient, DaemonError, ServeOptions};
 use tempfile::TempDir;
 
 fn build_test_corpus(out: &Path) {
-	let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
-		.join("../../testdata/parallel/corpus.toml");
+	let manifest =
+		Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/parallel/corpus.toml");
 	montre_build::MultiCorpusBuilder::from_manifest(&manifest)
 		.expect("manifest load")
 		.build(out)
@@ -60,7 +60,10 @@ fn second_serve_with_same_socket_fails_with_already_running() {
 		"expected AlreadyRunning, got {:?}",
 		result,
 	);
-	assert!(socket.exists(), "socket file must not be clobbered by failed serve");
+	assert!(
+		socket.exists(),
+		"socket file must not be clobbered by failed serve"
+	);
 
 	let _post_probe = DaemonClient::connect(&socket)
 		.expect("first daemon still reachable after failed second serve");
@@ -99,7 +102,10 @@ fn second_serve_with_alt_socket_fails_on_state_lock() {
 		"expected AlreadyRunning from state lock, got {:?}",
 		result,
 	);
-	assert!(!alt_socket.exists(), "alt socket must not be created by failed serve");
+	assert!(
+		!alt_socket.exists(),
+		"alt socket must not be created by failed serve"
+	);
 }
 
 #[test]
@@ -112,7 +118,10 @@ fn serve_replaces_stale_socket_file() {
 	{
 		let _stale = UnixListener::bind(&socket).expect("bind stale");
 	}
-	assert!(socket.exists(), "stale socket file must remain after listener drop");
+	assert!(
+		socket.exists(),
+		"stale socket file must remain after listener drop"
+	);
 
 	let options = ServeOptions {
 		corpus_path: corpus,
@@ -126,8 +135,8 @@ fn serve_replaces_stale_socket_file() {
 
 	wait_for_serving(&socket, Duration::from_secs(5));
 
-	let _probe = DaemonClient::connect(&socket)
-		.expect("new daemon connect over replaced stale socket");
+	let _probe =
+		DaemonClient::connect(&socket).expect("new daemon connect over replaced stale socket");
 }
 
 #[test]
@@ -151,7 +160,10 @@ fn serve_refuses_to_clobber_external_listener() {
 		"expected AlreadyRunning when external listener occupies path, got {:?}",
 		result,
 	);
-	assert!(socket.exists(), "external listener's socket must not be clobbered");
+	assert!(
+		socket.exists(),
+		"external listener's socket must not be clobbered"
+	);
 
 	drop(occupier);
 }

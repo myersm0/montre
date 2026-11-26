@@ -1,16 +1,16 @@
 #![allow(non_upper_case_globals)]
 
-pub mod inverted;
+pub mod corpus;
+pub mod empty_nodes;
 pub mod forward;
 pub mod forward_flat;
+pub mod inverted;
+pub mod lexicon;
+pub mod mwt;
+pub mod sentence_ids;
+pub mod spacing;
 pub mod spans;
 pub mod spans_flat;
-pub mod sentence_ids;
-pub mod mwt;
-pub mod spacing;
-pub mod empty_nodes;
-pub mod lexicon;
-pub mod corpus;
 
 use std::path::Path;
 use thiserror::Error;
@@ -19,17 +19,17 @@ use thiserror::Error;
 pub use montre_core::{LayerKind, Position, Span};
 
 // Reading API
-pub use corpus::{Corpus, CorpusMeta, ComponentMeta, AlignmentMeta, AlignmentIndex};
-pub use inverted::{InvertedIndex, InMemoryInverted};
-pub use forward::{ForwardIndex, InMemoryForward};
-pub use forward_flat::{MappedForward, ForwardStore};
-pub use spans::{SpanIndex, InMemorySpans};
-pub use spans_flat::{MappedSpans, SpanStore};
-pub use sentence_ids::MappedSentenceIds;
-pub use mwt::{MWTEntry, MappedMWTs};
-pub use spacing::SpacingIndex;
+pub use corpus::{AlignmentIndex, AlignmentMeta, ComponentMeta, Corpus, CorpusMeta};
 pub use empty_nodes::{EmptyNode, EmptyNodeStore};
-pub use lexicon::{Lexicon, InMemoryLexicon};
+pub use forward::{ForwardIndex, InMemoryForward};
+pub use forward_flat::{ForwardStore, MappedForward};
+pub use inverted::{InMemoryInverted, InvertedIndex};
+pub use lexicon::{InMemoryLexicon, Lexicon};
+pub use mwt::{MWTEntry, MappedMWTs};
+pub use sentence_ids::MappedSentenceIds;
+pub use spacing::SpacingIndex;
+pub use spans::{InMemorySpans, SpanIndex};
+pub use spans_flat::{MappedSpans, SpanStore};
 
 /// Common traits re-exported for ergonomic bulk import.
 pub mod prelude {
@@ -37,12 +37,15 @@ pub mod prelude {
 }
 
 // Build helpers (consumed by montre-build)
-pub use forward_flat::{write_flat_forward, write_mfwd, LayerBuild, build_dict_encoded_layer, build_dense_numeric_layer, is_numeric_layer};
-pub use spans_flat::write_flat_spans;
-pub use sentence_ids::write_sentence_ids;
-pub use mwt::write_mwts;
-pub use spacing::write_spacing;
 pub use empty_nodes::write_empty_nodes;
+pub use forward_flat::{
+	build_dense_numeric_layer, build_dict_encoded_layer, is_numeric_layer, write_flat_forward,
+	write_mfwd, LayerBuild,
+};
+pub use mwt::write_mwts;
+pub use sentence_ids::write_sentence_ids;
+pub use spacing::write_spacing;
+pub use spans_flat::write_flat_spans;
 
 #[derive(Error, Debug)]
 pub enum IndexError {
@@ -58,7 +61,9 @@ pub enum IndexError {
 	#[error("Layer not found: {0}")]
 	LayerNotFound(String),
 
-	#[error("Index version mismatch: expected {expected}, found {found}. Rebuild with `montre build`.")]
+	#[error(
+		"Index version mismatch: expected {expected}, found {found}. Rebuild with `montre build`."
+	)]
 	VersionMismatch { expected: u32, found: u32 },
 }
 

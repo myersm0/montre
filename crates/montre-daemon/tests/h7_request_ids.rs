@@ -38,10 +38,7 @@ fn stub_corpus_info_response(id: u64) -> serde_json::Value {
 	})
 }
 
-fn run_echo_server(
-	listener: UnixListener,
-	observed_ids: mpsc::Sender<u64>,
-) {
+fn run_echo_server(listener: UnixListener, observed_ids: mpsc::Sender<u64>) {
 	let (mut stream, _) = match listener.accept() {
 		Ok(pair) => pair,
 		Err(_) => return,
@@ -79,7 +76,9 @@ fn request_ids_are_monotonic_and_unique() {
 	let mut client = DaemonClient::connect(&socket).expect("connect");
 	let request_count = 8;
 	for _ in 0..request_count {
-		client.corpus_info().expect("corpus_info should succeed via stub");
+		client
+			.corpus_info()
+			.expect("corpus_info should succeed via stub");
 	}
 	drop(client);
 	let _ = server.join();

@@ -2,22 +2,18 @@ use crate::dispatch::{
 	parse_params, parse_params_or_default, serialize_reply, state_roundtrip, RpcContext,
 };
 use crate::protocol::{
-	OkReply, ProtocolError, SessionRosterParams, SessionRosterReply,
-	SessionUpdateLabelParams,
+	OkReply, ProtocolError, SessionRosterParams, SessionRosterReply, SessionUpdateLabelParams,
 };
 use crate::state::Command;
 
 pub(crate) fn handle_session_unregister(
 	ctx: &mut RpcContext,
 ) -> Result<serde_json::Value, ProtocolError> {
-	let process_id = ctx.process_id.ok_or_else(|| {
-		ProtocolError::new(-32603, "internal: unregister without process_id")
-	})?;
+	let process_id = ctx
+		.process_id
+		.ok_or_else(|| ProtocolError::new(-32603, "internal: unregister without process_id"))?;
 
-	state_roundtrip(ctx, |reply| Command::Unregister {
-		process_id,
-		reply,
-	})?;
+	state_roundtrip(ctx, |reply| Command::Unregister { process_id, reply })?;
 
 	ctx.process_id = None;
 
@@ -30,9 +26,9 @@ pub(crate) fn handle_session_update_label(
 ) -> Result<serde_json::Value, ProtocolError> {
 	let parsed: SessionUpdateLabelParams = parse_params("session.update_label", params)?;
 
-	let process_id = ctx.process_id.ok_or_else(|| {
-		ProtocolError::new(-32603, "internal: update_label without process_id")
-	})?;
+	let process_id = ctx
+		.process_id
+		.ok_or_else(|| ProtocolError::new(-32603, "internal: update_label without process_id"))?;
 
 	state_roundtrip(ctx, |reply| Command::UpdateLabel {
 		process_id,
@@ -60,7 +56,9 @@ pub(crate) fn handle_session_roster(
 #[cfg(test)]
 mod tests {
 	use crate::dispatch::dispatch_request;
-	use crate::dispatch::test_support::{register_context, with_registered_context, with_state_thread};
+	use crate::dispatch::test_support::{
+		register_context, with_registered_context, with_state_thread,
+	};
 	use crate::protocol::error_codes;
 	use crate::protocol::{OkReply, ProcessKind, SessionRosterReply};
 	use std::sync::Arc;
@@ -123,13 +121,8 @@ mod tests {
 				&["sentence"],
 				&["sentence"],
 			);
-			let (_ctx_b, _rx_b) = register_context(
-				state_tx,
-				handle,
-				ProcessKind::Kwic,
-				&["hit"],
-				&[],
-			);
+			let (_ctx_b, _rx_b) =
+				register_context(state_tx, handle, ProcessKind::Kwic, &["hit"], &[]);
 
 			let result = dispatch_request("session.roster", None, &mut ctx_a).unwrap();
 			let reply: SessionRosterReply = serde_json::from_value(result).unwrap();
@@ -147,19 +140,12 @@ mod tests {
 				&[],
 				&[],
 			);
-			let (_ctx_b, _rx_b) = register_context(
-				state_tx,
-				handle,
-				ProcessKind::Kwic,
-				&[],
-				&[],
-			);
+			let (_ctx_b, _rx_b) = register_context(state_tx, handle, ProcessKind::Kwic, &[], &[]);
 
 			let params = serde_json::json!({
 				"filter": { "kinds": ["reader"] }
 			});
-			let result =
-				dispatch_request("session.roster", Some(params), &mut ctx_a).unwrap();
+			let result = dispatch_request("session.roster", Some(params), &mut ctx_a).unwrap();
 			let reply: SessionRosterReply = serde_json::from_value(result).unwrap();
 			assert_eq!(reply.processes.len(), 1);
 			assert!(matches!(reply.processes[0].kind, ProcessKind::Reader));

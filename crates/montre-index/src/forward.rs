@@ -102,7 +102,10 @@ impl ForwardIndex for InMemoryForward {
 
 	fn layer_kind(&self, layer: &str) -> Option<LayerKind> {
 		let layer_idx = self.layer_index(layer)?;
-		let kind = if self.data[layer_idx].iter().any(|v| matches!(v, Value::Int(_))) {
+		let kind = if self.data[layer_idx]
+			.iter()
+			.any(|v| matches!(v, Value::Int(_)))
+		{
 			LayerKind::Int
 		} else {
 			LayerKind::String

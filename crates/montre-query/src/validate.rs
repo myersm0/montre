@@ -32,7 +32,10 @@ pub(crate) fn validate(node: &PlanNode, corpus: &Corpus) -> Result<()> {
 			validate(inner, corpus)
 		}
 		PlanNode::FilterByComponent { inner, components } => {
-			if let Some(name) = components.iter().find(|name| corpus.component(name).is_none()) {
+			if let Some(name) = components
+				.iter()
+				.find(|name| corpus.component(name).is_none())
+			{
 				return Err(QueryError::UnknownComponent(name.clone()));
 			}
 			validate(inner, corpus)

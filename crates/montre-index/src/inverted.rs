@@ -32,7 +32,12 @@ impl InMemoryInverted {
 		}
 	}
 
-	pub fn insert(&mut self, layer: &str, value: &str, positions: impl IntoIterator<Item = Position>) {
+	pub fn insert(
+		&mut self,
+		layer: &str,
+		value: &str,
+		positions: impl IntoIterator<Item = Position>,
+	) {
 		let bitmap = self
 			.data
 			.entry(layer.to_string())
@@ -104,8 +109,7 @@ impl InMemoryInverted {
 		for (layer, values) in other.data {
 			let target_layer = self.data.entry(layer).or_default();
 			for (value, bitmap) in values {
-				let shifted: RoaringBitmap =
-					bitmap.iter().map(|p| p + position_offset).collect();
+				let shifted: RoaringBitmap = bitmap.iter().map(|p| p + position_offset).collect();
 				target_layer
 					.entry(value)
 					.and_modify(|existing| *existing |= &shifted)
@@ -131,9 +135,9 @@ impl InvertedIndex for InMemoryInverted {
 	}
 
 	fn values(&self, layer: &str) -> Option<Vec<&str>> {
-		self.data.get(layer).map(|values| {
-			values.keys().map(|s| s.as_str()).collect()
-		})
+		self.data
+			.get(layer)
+			.map(|values| values.keys().map(|s| s.as_str()).collect())
 	}
 
 	fn value_count(&self, layer: &str) -> Option<usize> {
@@ -275,7 +279,10 @@ mod tests {
 	fn from_bytes_rejects_every_truncation() {
 		let bytes = small_index_bytes();
 		for length in 0..bytes.len() {
-			assert!(InMemoryInverted::from_bytes(&bytes[..length]).is_err(), "length {length}");
+			assert!(
+				InMemoryInverted::from_bytes(&bytes[..length]).is_err(),
+				"length {length}"
+			);
 		}
 	}
 
@@ -309,7 +316,10 @@ mod tests {
 		huge_bitmap.extend_from_slice(&(bitmap.len() as u64).to_le_bytes());
 		huge_bitmap.extend_from_slice(&bitmap);
 		// framing intact, so the refusal is the bitmap's own
-		assert!(matches!(InMemoryInverted::from_bytes(&huge_bitmap), Err(IndexError::Io(_))));
+		assert!(matches!(
+			InMemoryInverted::from_bytes(&huge_bitmap),
+			Err(IndexError::Io(_))
+		));
 	}
 
 	#[test]

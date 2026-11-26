@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use montre_core::{LayerKind, Span, UnitId, layers, span_containing};
+use montre_core::{layers, span_containing, LayerKind, Span, UnitId};
 use serde::{Deserialize, Serialize};
 
 use crate::empty_nodes::EmptyNodeStore;
-use crate::forward_flat::{MappedForward, ForwardStore};
+use crate::forward_flat::{ForwardStore, MappedForward};
 use crate::inverted::InMemoryInverted;
 use crate::mwt::MappedMWTs;
 use crate::sentence_ids::MappedSentenceIds;
@@ -123,14 +123,16 @@ impl Corpus {
 		}
 
 		let inverted_file = std::fs::File::open(path.join("inverted.bin"))?;
-		let inverted = InMemoryInverted::from_bytes(&unsafe { memmap2::Mmap::map(&inverted_file)? })?;
+		let inverted =
+			InMemoryInverted::from_bytes(&unsafe { memmap2::Mmap::map(&inverted_file)? })?;
 		let spans = SpanStore::Mapped(MappedSpans::open(path.join("spans.bin"))?);
 		let forward = ForwardStore::Mapped(MappedForward::open(path.join("forward.bin"))?);
 
 		let alignments = if path.join("alignments.bin").exists() {
 			let align_bytes = std::fs::read(path.join("alignments.bin"))?;
-			bincode::deserialize(&align_bytes)
-				.map_err(|e| IndexError::Format(format!("Failed to deserialize alignments: {}", e)))?
+			bincode::deserialize(&align_bytes).map_err(|e| {
+				IndexError::Format(format!("Failed to deserialize alignments: {}", e))
+			})?
 		} else {
 			AlignmentIndex::new()
 		};
@@ -231,7 +233,10 @@ impl Corpus {
 	/// A corpus built before this was recorded in `corpus.json` reports `head`
 	/// and `deps`, the layers every builder of that time left out.
 	pub fn is_forward_only(&self, layer: &str) -> bool {
-		self.meta.forward_only_layers.iter().any(|name| name == layer)
+		self.meta
+			.forward_only_layers
+			.iter()
+			.any(|name| name == layer)
 	}
 
 	pub fn layer_kind(&self, layer: &str) -> Option<LayerKind> {
@@ -309,9 +314,10 @@ impl Corpus {
 	}
 
 	pub fn component_for_document(&self, doc_index: usize) -> Option<&ComponentMeta> {
-		self.meta.components.iter().find(|c| {
-			doc_index >= c.document_range.0 && doc_index < c.document_range.1
-		})
+		self.meta
+			.components
+			.iter()
+			.find(|c| doc_index >= c.document_range.0 && doc_index < c.document_range.1)
 	}
 
 	pub fn is_multi_component(&self) -> bool {
@@ -327,11 +333,15 @@ impl Corpus {
 	}
 
 	pub fn document_span(&self, doc_index: usize) -> Option<Span> {
-		self.spans.spans("document").and_then(|spans| spans.get(doc_index).copied())
+		self.spans
+			.spans("document")
+			.and_then(|spans| spans.get(doc_index).copied())
 	}
 
 	pub fn sentence_span(&self, sent_index: usize) -> Option<Span> {
-		self.spans.spans("sentence").and_then(|spans| spans.get(sent_index).copied())
+		self.spans
+			.spans("sentence")
+			.and_then(|spans| spans.get(sent_index).copied())
 	}
 
 	pub fn sentences_in_document(&self, doc_index: usize) -> Option<Vec<(usize, Span)>> {
@@ -373,7 +383,9 @@ impl Corpus {
 	}
 
 	pub fn has_no_space_after(&self, position: u64) -> bool {
-		self.spacing.as_ref().map_or(false, |s| s.has_no_space_after(position))
+		self.spacing
+			.as_ref()
+			.map_or(false, |s| s.has_no_space_after(position))
 	}
 
 	pub fn empty_nodes(&self) -> Option<&EmptyNodeStore> {

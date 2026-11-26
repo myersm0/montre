@@ -4,9 +4,9 @@ use std::ptr;
 use montre_index::{Corpus, SpanIndex};
 use montre_query::executor::{self, Hit};
 
+use crate::error::{clear_error, set_error};
+use crate::strings::{borrow_cstr, export_array, to_cstring};
 use crate::HitList;
-use crate::error::{set_error, clear_error};
-use crate::strings::{to_cstring, borrow_cstr, export_array};
 
 #[no_mangle]
 pub unsafe extern "C" fn montre_corpus_alignment_count(corpus: *const Corpus) -> u32 {
@@ -135,7 +135,9 @@ pub unsafe extern "C" fn montre_corpus_alignment_edges(
 	out_len: *mut u64,
 ) -> *mut u32 {
 	if corpus.is_null() || out_len.is_null() {
-		if !out_len.is_null() { *out_len = 0; }
+		if !out_len.is_null() {
+			*out_len = 0;
+		}
 		return ptr::null_mut();
 	}
 	let c = &*corpus;
@@ -190,9 +192,15 @@ pub unsafe extern "C" fn montre_project(
 ) -> *mut HitList {
 	clear_error();
 
-	if !out_unmapped.is_null() { *out_unmapped = 0; }
-	if !out_no_alignment.is_null() { *out_no_alignment = 0; }
-	if !out_projected.is_null() { *out_projected = 0; }
+	if !out_unmapped.is_null() {
+		*out_unmapped = 0;
+	}
+	if !out_no_alignment.is_null() {
+		*out_no_alignment = 0;
+	}
+	if !out_projected.is_null() {
+		*out_projected = 0;
+	}
 
 	if corpus.is_null() || source_hits.is_null() {
 		set_error("null corpus or hits".into());
@@ -217,12 +225,18 @@ pub unsafe extern "C" fn montre_project(
 	};
 
 	let Some(source_comp) = c.component(&align_meta.source_component) else {
-		set_error(format!("source component not found: {}", align_meta.source_component));
+		set_error(format!(
+			"source component not found: {}",
+			align_meta.source_component
+		));
 		return ptr::null_mut();
 	};
 
 	let Some(target_comp) = c.component(&align_meta.target_component) else {
-		set_error(format!("target component not found: {}", align_meta.target_component));
+		set_error(format!(
+			"target component not found: {}",
+			align_meta.target_component
+		));
 		return ptr::null_mut();
 	};
 
@@ -232,12 +246,18 @@ pub unsafe extern "C" fn montre_project(
 	};
 
 	let Some(source_sent_spans) = c.spans().spans(&align_meta.source_layer) else {
-		set_error(format!("source span layer not found: {}", align_meta.source_layer));
+		set_error(format!(
+			"source span layer not found: {}",
+			align_meta.source_layer
+		));
 		return ptr::null_mut();
 	};
 
 	let Some(target_sent_spans) = c.spans().spans(&align_meta.target_layer) else {
-		set_error(format!("target span layer not found: {}", align_meta.target_layer));
+		set_error(format!(
+			"target span layer not found: {}",
+			align_meta.target_layer
+		));
 		return ptr::null_mut();
 	};
 
@@ -249,9 +269,9 @@ pub unsafe extern "C" fn montre_project(
 	let mut no_alignment = 0u64;
 
 	for hit in &source.hits {
-		let Some((src_doc, src_sent)) = executor::find_doc_and_sent(
-			hit.span, doc_spans, source_sent_spans, source_comp,
-		) else {
+		let Some((src_doc, src_sent)) =
+			executor::find_doc_and_sent(hit.span, doc_spans, source_sent_spans, source_comp)
+		else {
 			unmapped += 1;
 			continue;
 		};
@@ -260,7 +280,11 @@ pub unsafe extern "C" fn montre_project(
 			for &(tgt_doc, tgt_sent) in targets {
 				if seen_targets.insert((tgt_doc, tgt_sent)) {
 					if let Some(span) = executor::resolve_target_span(
-						tgt_doc, tgt_sent, doc_spans, target_sent_spans, target_comp,
+						tgt_doc,
+						tgt_sent,
+						doc_spans,
+						target_sent_spans,
+						target_comp,
 					) {
 						result_hits.push(Hit {
 							span,
@@ -278,9 +302,15 @@ pub unsafe extern "C" fn montre_project(
 
 	result_hits.sort_by_key(|h| h.span.start);
 
-	if !out_unmapped.is_null() { *out_unmapped = unmapped; }
-	if !out_no_alignment.is_null() { *out_no_alignment = no_alignment; }
-	if !out_projected.is_null() { *out_projected = result_hits.len() as u64; }
+	if !out_unmapped.is_null() {
+		*out_unmapped = unmapped;
+	}
+	if !out_no_alignment.is_null() {
+		*out_no_alignment = no_alignment;
+	}
+	if !out_projected.is_null() {
+		*out_projected = result_hits.len() as u64;
+	}
 
 	Box::into_raw(Box::new(HitList { hits: result_hits }))
 }
@@ -301,10 +331,15 @@ pub unsafe extern "C" fn montre_corpus_alignment_coverage(
 ) -> i32 {
 	clear_error();
 
-	if corpus.is_null() || out_doc_indices.is_null()
-		|| out_aligned.is_null() || out_total.is_null() || out_len.is_null()
+	if corpus.is_null()
+		|| out_doc_indices.is_null()
+		|| out_aligned.is_null()
+		|| out_total.is_null()
+		|| out_len.is_null()
 	{
-		if !out_len.is_null() { *out_len = 0; }
+		if !out_len.is_null() {
+			*out_len = 0;
+		}
 		return 0;
 	}
 	let c = &*corpus;
@@ -325,7 +360,10 @@ pub unsafe extern "C" fn montre_corpus_alignment_coverage(
 		return 0;
 	};
 	let Some(source_comp) = c.component(&align_meta.source_component) else {
-		set_error(format!("source component not found: {}", align_meta.source_component));
+		set_error(format!(
+			"source component not found: {}",
+			align_meta.source_component
+		));
 		*out_len = 0;
 		return 0;
 	};
@@ -336,7 +374,10 @@ pub unsafe extern "C" fn montre_corpus_alignment_coverage(
 		return 0;
 	};
 	let Some(sent_spans) = c.spans().spans(&align_meta.source_layer) else {
-		set_error(format!("source span layer not found: {}", align_meta.source_layer));
+		set_error(format!(
+			"source span layer not found: {}",
+			align_meta.source_layer
+		));
 		*out_len = 0;
 		return 0;
 	};

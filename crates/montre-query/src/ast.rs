@@ -83,8 +83,14 @@ pub enum ConstraintValue {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GlobalConstraint {
-	Eq { left: LabelAttr, right: LabelAttr },
-	Ne { left: LabelAttr, right: LabelAttr },
+	Eq {
+		left: LabelAttr,
+		right: LabelAttr,
+	},
+	Ne {
+		left: LabelAttr,
+		right: LabelAttr,
+	},
 	Distance {
 		left: String,
 		right: String,
@@ -147,13 +153,11 @@ mod tests {
 
 	#[test]
 	fn build_simple_query() {
-		let query = Query::token(
-			TokenPattern::new().with_constraint(Constraint {
-				layer: "word".into(),
-				op: ConstraintOp::Eq,
-				value: ConstraintValue::Literal("house".into()),
-			}),
-		);
+		let query = Query::token(TokenPattern::new().with_constraint(Constraint {
+			layer: "word".into(),
+			op: ConstraintOp::Eq,
+			value: ConstraintValue::Literal("house".into()),
+		}));
 
 		match query {
 			Query::Token(pattern) => {
@@ -166,20 +170,16 @@ mod tests {
 
 	#[test]
 	fn build_sequence_query() {
-		let det = Query::token(
-			TokenPattern::new().with_constraint(Constraint {
-				layer: "pos".into(),
-				op: ConstraintOp::Eq,
-				value: ConstraintValue::Literal("DET".into()),
-			}),
-		);
-		let noun = Query::token(
-			TokenPattern::new().with_constraint(Constraint {
-				layer: "pos".into(),
-				op: ConstraintOp::Eq,
-				value: ConstraintValue::Literal("NOUN".into()),
-			}),
-		);
+		let det = Query::token(TokenPattern::new().with_constraint(Constraint {
+			layer: "pos".into(),
+			op: ConstraintOp::Eq,
+			value: ConstraintValue::Literal("DET".into()),
+		}));
+		let noun = Query::token(TokenPattern::new().with_constraint(Constraint {
+			layer: "pos".into(),
+			op: ConstraintOp::Eq,
+			value: ConstraintValue::Literal("NOUN".into()),
+		}));
 
 		let query = Query::sequence(vec![det, noun]);
 

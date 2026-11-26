@@ -3,8 +3,8 @@ use std::ptr;
 
 use montre_index::{Corpus, InvertedIndex, SpanIndex};
 
-use crate::error::{set_error, clear_error};
-use crate::strings::{to_cstring, borrow_cstr, export_array, export_string_array};
+use crate::error::{clear_error, set_error};
+use crate::strings::{borrow_cstr, export_array, export_string_array, to_cstring};
 
 #[no_mangle]
 pub unsafe extern "C" fn montre_corpus_open(path: *const c_char) -> *mut Corpus {
@@ -209,16 +209,22 @@ pub unsafe extern "C" fn montre_corpus_inverted_values(
 	out_len: *mut u64,
 ) -> *mut *mut c_char {
 	if corpus.is_null() {
-		if !out_len.is_null() { *out_len = 0; }
+		if !out_len.is_null() {
+			*out_len = 0;
+		}
 		return ptr::null_mut();
 	}
 	let c = &*corpus;
 	let Some(layer_str) = borrow_cstr(layer) else {
-		if !out_len.is_null() { *out_len = 0; }
+		if !out_len.is_null() {
+			*out_len = 0;
+		}
 		return ptr::null_mut();
 	};
 	let Some(values) = c.inverted().values(layer_str) else {
-		if !out_len.is_null() { *out_len = 0; }
+		if !out_len.is_null() {
+			*out_len = 0;
+		}
 		return ptr::null_mut();
 	};
 	export_string_array(&values, out_len)
@@ -299,7 +305,9 @@ pub unsafe extern "C" fn montre_corpus_inverted_counts(
 	out_len: *mut u64,
 ) -> i32 {
 	if corpus.is_null() || out_values.is_null() || out_counts.is_null() || out_len.is_null() {
-		if !out_len.is_null() { *out_len = 0; }
+		if !out_len.is_null() {
+			*out_len = 0;
+		}
 		return 0;
 	}
 	let c = &*corpus;
@@ -312,9 +320,10 @@ pub unsafe extern "C" fn montre_corpus_inverted_counts(
 		return 0;
 	};
 
-	let counts: Vec<u64> = values.iter().map(|v| {
-		c.inverted().get(layer_str, v).map_or(0, |b| b.len() as u64)
-	}).collect();
+	let counts: Vec<u64> = values
+		.iter()
+		.map(|v| c.inverted().get(layer_str, v).map_or(0, |b| b.len() as u64))
+		.collect();
 
 	*out_values = export_string_array(&values, out_len);
 	let mut count_len: u64 = 0;
@@ -351,9 +360,15 @@ pub unsafe extern "C" fn montre_corpus_mwt_at(
 	let c = &*corpus;
 	match c.mwt_covering(position) {
 		Some(mwt) => {
-			if !out_start.is_null() { *out_start = mwt.start; }
-			if !out_end.is_null() { *out_end = mwt.end; }
-			if !out_form.is_null() { *out_form = to_cstring(&mwt.form); }
+			if !out_start.is_null() {
+				*out_start = mwt.start;
+			}
+			if !out_end.is_null() {
+				*out_end = mwt.end;
+			}
+			if !out_form.is_null() {
+				*out_form = to_cstring(&mwt.form);
+			}
 			1
 		}
 		None => 0,
@@ -382,13 +397,15 @@ pub unsafe extern "C" fn montre_corpus_has_no_space_after(
 		return 0;
 	}
 	let c = &*corpus;
-	if c.has_no_space_after(position) { 1 } else { 0 }
+	if c.has_no_space_after(position) {
+		1
+	} else {
+		0
+	}
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn montre_corpus_empty_node_count(
-	corpus: *const Corpus,
-) -> u64 {
+pub unsafe extern "C" fn montre_corpus_empty_node_count(corpus: *const Corpus) -> u64 {
 	if corpus.is_null() {
 		return 0;
 	}
@@ -405,7 +422,8 @@ pub unsafe extern "C" fn montre_corpus_empty_node_count_in_sentence(
 		return 0;
 	}
 	let c = &*corpus;
-	c.empty_nodes().map_or(0, |s| s.in_sentence(sentence_index).len() as u64)
+	c.empty_nodes()
+		.map_or(0, |s| s.in_sentence(sentence_index).len() as u64)
 }
 
 #[no_mangle]

@@ -41,7 +41,10 @@ enum Commands {
 		#[arg(long, help = "Fail on first parse error instead of skipping")]
 		strict: bool,
 
-		#[arg(long, help = "Index individual morphological features as separate layers")]
+		#[arg(
+			long,
+			help = "Index individual morphological features as separate layers"
+		)]
 		decompose_feats: bool,
 	},
 
@@ -135,7 +138,7 @@ enum Commands {
 		#[arg(
 			long,
 			default_value = "600",
-			help = "Idle shutdown timeout in seconds (0 disables)",
+			help = "Idle shutdown timeout in seconds (0 disables)"
 		)]
 		idle_timeout: u64,
 
@@ -196,13 +199,14 @@ fn parse_limit(text: &str) -> std::result::Result<u64, String> {
 // a limit failure names the flag that raises it
 fn executed<T>(result: montre_query::Result<T>) -> Result<T> {
 	result.map_err(|error| {
-		let context = match &error {
-			QueryError::LimitExceeded { resource, .. } => {
-				let flag = format!("--max-{}", resource.replace(' ', "-"));
-				format!("Failed to execute query; raise the limit with {flag} <N> or {flag} unlimited")
-			}
-			_ => "Failed to execute query".to_string(),
-		};
+		let context =
+			match &error {
+				QueryError::LimitExceeded { resource, .. } => {
+					let flag = format!("--max-{}", resource.replace(' ', "-"));
+					format!("Failed to execute query; raise the limit with {flag} <N> or {flag} unlimited")
+				}
+				_ => "Failed to execute query".to_string(),
+			};
 		anyhow::Error::new(error).context(context)
 	})
 }
@@ -401,11 +405,7 @@ fn build_full_query(
 	Ok(full_query)
 }
 
-fn warn_document_collision(
-	resolved_names: &[String],
-	corpus: &Corpus,
-	no_component_filter: bool,
-) {
+fn warn_document_collision(resolved_names: &[String], corpus: &Corpus, no_component_filter: bool) {
 	if !no_component_filter || !corpus.is_multi_component() {
 		return;
 	}
@@ -414,9 +414,7 @@ fn warn_document_collision(
 		if indices.len() > 1 {
 			let comp_names: Vec<&str> = indices
 				.iter()
-				.filter_map(|&idx| {
-					corpus.component_for_document(idx).map(|c| c.name.as_str())
-				})
+				.filter_map(|&idx| corpus.component_for_document(idx).map(|c| c.name.as_str()))
 				.collect();
 			eprintln!(
 				"warning: document name '{}' matches {} documents across components {}; use --component to disambiguate",
@@ -455,8 +453,9 @@ fn cmd_query(
 
 	if count_only {
 		let exec_start = Instant::now();
-		let total =
-			executed(montre_query::executor::execute_count_with(&plan, &corpus, &limits))?;
+		let total = executed(montre_query::executor::execute_count_with(
+			&plan, &corpus, &limits,
+		))?;
 		let exec_time = exec_start.elapsed();
 		println!("{}", total);
 		eprintln!(
@@ -467,7 +466,9 @@ fn cmd_query(
 	}
 
 	let exec_start = Instant::now();
-	let results = executed(montre_query::executor::execute_with(&plan, &corpus, &limits))?;
+	let results = executed(montre_query::executor::execute_with(
+		&plan, &corpus, &limits,
+	))?;
 	let exec_time = exec_start.elapsed();
 
 	let total = results.len();
@@ -495,11 +496,7 @@ fn cmd_query(
 
 		println!(
 			"{:>12} {:>8}: {} >>> {} <<< {}",
-			doc_name,
-			hit.span.start,
-			left,
-			matched,
-			right
+			doc_name, hit.span.start, left, matched, right
 		);
 	}
 
@@ -529,7 +526,9 @@ fn cmd_count(
 	let parsed = montre_query::parse(&full_query)
 		.with_context(|| format!("Failed to parse query: {}", full_query))?;
 	let plan = montre_query::planner::plan(&parsed).with_context(|| "Failed to plan query")?;
-	let total = executed(montre_query::executor::execute_count_with(&plan, &corpus, &limits))?;
+	let total = executed(montre_query::executor::execute_count_with(
+		&plan, &corpus, &limits,
+	))?;
 	println!("{}", total);
 	Ok(())
 }
@@ -617,9 +616,10 @@ fn cmd_count_by_component(
 
 		let parsed = montre_query::parse(&full)
 			.with_context(|| format!("Failed to parse query: {}", full))?;
-		let plan =
-			montre_query::planner::plan(&parsed).with_context(|| "Failed to plan query")?;
-		let count = executed(montre_query::executor::execute_count_with(&plan, corpus, limits))?;
+		let plan = montre_query::planner::plan(&parsed).with_context(|| "Failed to plan query")?;
+		let count = executed(montre_query::executor::execute_count_with(
+			&plan, corpus, limits,
+		))?;
 
 		println!("{}\t{}", comp_name, count);
 	}
@@ -690,7 +690,11 @@ fn resolve_document_name(input: &str, doc_names: &[String]) -> Result<String> {
 		_ => anyhow::bail!(
 			"Document '{}' is ambiguous, matches: {}",
 			input,
-			stem_matches.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+			stem_matches
+				.iter()
+				.map(|s| s.as_str())
+				.collect::<Vec<_>>()
+				.join(", ")
 		),
 	}
 }
@@ -704,8 +708,11 @@ fn cmd_docs(corpus_path: PathBuf, component: Option<String>) -> Result<()> {
 	let range = match component {
 		Some(ref name) => {
 			let comp = corpus.component(name).with_context(|| {
-				let available: Vec<&str> =
-					corpus.components().iter().map(|c| c.name.as_str()).collect();
+				let available: Vec<&str> = corpus
+					.components()
+					.iter()
+					.map(|c| c.name.as_str())
+					.collect();
 				format!(
 					"Component '{}' not found. Available: {}",
 					name,
@@ -836,9 +843,9 @@ fn build_position_mask(
 	if !components.is_empty() {
 		let mut indices = Vec::new();
 		for comp_name in components {
-			let comp = corpus.component(comp_name).with_context(|| {
-				format!("Component '{}' not found", comp_name)
-			})?;
+			let comp = corpus
+				.component(comp_name)
+				.with_context(|| format!("Component '{}' not found", comp_name))?;
 			indices.extend(comp.document_range.0..comp.document_range.1);
 		}
 		doc_indices = Some(indices);

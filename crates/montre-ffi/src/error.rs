@@ -40,7 +40,8 @@ thread_local! {
 }
 
 fn set_error_of_kind(msg: String, kind: ErrorKind) {
-	let c = CString::new(msg).unwrap_or_else(|_| CString::new("(error contained null byte)").unwrap());
+	let c =
+		CString::new(msg).unwrap_or_else(|_| CString::new("(error contained null byte)").unwrap());
 	LAST_ERROR.with(|e| *e.borrow_mut() = Some(c));
 	LAST_ERROR_KIND.with(|k| k.set(kind));
 }
@@ -60,11 +61,9 @@ pub(crate) fn clear_error() {
 
 #[no_mangle]
 pub extern "C" fn montre_last_error() -> *const c_char {
-	LAST_ERROR.with(|e| {
-		match *e.borrow() {
-			Some(ref msg) => msg.as_ptr(),
-			None => ptr::null(),
-		}
+	LAST_ERROR.with(|e| match *e.borrow() {
+		Some(ref msg) => msg.as_ptr(),
+		None => ptr::null(),
 	})
 }
 

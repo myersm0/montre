@@ -65,7 +65,12 @@ impl SequenceStep {
 	}
 
 	pub fn repeated(node: PlanNode, min: u32, max: Option<u32>) -> Self {
-		Self { node, min, max, label: None }
+		Self {
+			node,
+			min,
+			max,
+			label: None,
+		}
 	}
 
 	// an unlabeled, unquantified parenthesized sequence, equivalent to its own steps
@@ -475,11 +480,13 @@ mod tests {
 	#[test]
 	fn plan_repetition() {
 		let query = Query::Repetition {
-			inner: Box::new(Query::Token(TokenPattern::new().with_constraint(Constraint {
-				layer: "pos".into(),
-				op: ConstraintOp::Eq,
-				value: ConstraintValue::Literal("ADJ".into()),
-			}))),
+			inner: Box::new(Query::Token(TokenPattern::new().with_constraint(
+				Constraint {
+					layer: "pos".into(),
+					op: ConstraintOp::Eq,
+					value: ConstraintValue::Literal("ADJ".into()),
+				},
+			))),
 			min: 1,
 			max: None,
 		};
@@ -498,11 +505,13 @@ mod tests {
 	#[test]
 	fn plan_within() {
 		let query = Query::Within {
-			inner: Box::new(Query::Token(TokenPattern::new().with_constraint(Constraint {
-				layer: "pos".into(),
-				op: ConstraintOp::Eq,
-				value: ConstraintValue::Literal("NOUN".into()),
-			}))),
+			inner: Box::new(Query::Token(TokenPattern::new().with_constraint(
+				Constraint {
+					layer: "pos".into(),
+					op: ConstraintOp::Eq,
+					value: ConstraintValue::Literal("NOUN".into()),
+				},
+			))),
 			span_layer: "s".into(),
 		};
 

@@ -8,7 +8,8 @@ use crate::protocol::{
 };
 
 pub(crate) fn handle_alignment_list(ctx: &RpcContext) -> Result<serde_json::Value, ProtocolError> {
-	let alignments: Vec<AlignmentInfo> = ctx.handle
+	let alignments: Vec<AlignmentInfo> = ctx
+		.handle
 		.corpus
 		.alignments()
 		.iter()
@@ -31,7 +32,10 @@ pub(crate) fn handle_alignment_project(
 	let parsed: AlignmentProjectParams = parse_params("alignment.project", params)?;
 
 	if parsed.source.start > parsed.source.end {
-		return Err(ProtocolError::new(-32602, "source.start must be <= source.end"));
+		return Err(ProtocolError::new(
+			-32602,
+			"source.start must be <= source.end",
+		));
 	}
 
 	let targets = project_alignment(&ctx.handle.corpus, &parsed.alignment_name, parsed.source)?;
@@ -51,18 +55,28 @@ pub(crate) fn project_alignment(
 		)
 	})?;
 
-	let source_comp = corpus.component(&alignment.source_component).ok_or_else(|| {
-		ProtocolError::new(
-			-32603,
-			format!("source component '{}' not found", alignment.source_component),
-		)
-	})?;
-	let target_comp = corpus.component(&alignment.target_component).ok_or_else(|| {
-		ProtocolError::new(
-			-32603,
-			format!("target component '{}' not found", alignment.target_component),
-		)
-	})?;
+	let source_comp = corpus
+		.component(&alignment.source_component)
+		.ok_or_else(|| {
+			ProtocolError::new(
+				-32603,
+				format!(
+					"source component '{}' not found",
+					alignment.source_component
+				),
+			)
+		})?;
+	let target_comp = corpus
+		.component(&alignment.target_component)
+		.ok_or_else(|| {
+			ProtocolError::new(
+				-32603,
+				format!(
+					"target component '{}' not found",
+					alignment.target_component
+				),
+			)
+		})?;
 
 	let doc = source.doc as usize;
 	let (src_first_doc, src_last_doc) = source_comp.document_range;
@@ -130,7 +144,6 @@ pub(crate) fn project_alignment(
 
 	Ok(targets)
 }
-
 
 #[cfg(test)]
 mod tests {

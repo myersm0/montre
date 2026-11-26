@@ -392,12 +392,19 @@ fn variants(steps: &[Step]) -> Vec<Variant> {
 			for (step, &count) in counts.iter().enumerate() {
 				if count > 0 {
 					let length = u64::from(count);
-					segments.push(Segment { step, offset, length });
+					segments.push(Segment {
+						step,
+						offset,
+						length,
+					});
 					offset += length;
 				}
 			}
 			segments.sort_by_key(|segment| start_counts[segment.step]);
-			(offset > 0).then_some(Variant { segments, width: offset })
+			(offset > 0).then_some(Variant {
+				segments,
+				width: offset,
+			})
 		})
 		.collect()
 }
@@ -738,9 +745,7 @@ impl<'c> Sequence<'c> {
 					left.compare_distinguishing(right, live)
 						.then_with(|| left.track.cmp(&right.track))
 				});
-				next.dedup_by(|later, earlier| {
-					later.compare_distinguishing(earlier, live).is_eq()
-				});
+				next.dedup_by(|later, earlier| later.compare_distinguishing(earlier, live).is_eq());
 			}
 			budget.release(self.cost(created - next.len() + active.len()));
 			active = next;
@@ -794,7 +799,9 @@ impl<'c> Sequence<'c> {
 					self.steps[step].start_positions(range, WINDOW_STARTS, &mut positions);
 				}
 				if offset > 0 {
-					positions.iter_mut().for_each(|position| *position -= offset);
+					positions
+						.iter_mut()
+						.for_each(|position| *position -= offset);
 				}
 				positions
 			})
@@ -820,10 +827,14 @@ impl<'c> Sequence<'c> {
 				starts
 					.into_iter()
 					.filter(|&start| {
-						variant.segments.iter().zip(&mut cursors).all(|(segment, cursor)| {
-							let step = &self.steps[segment.step];
-							step.covers(start + segment.offset, segment.length, limit, cursor)
-						})
+						variant
+							.segments
+							.iter()
+							.zip(&mut cursors)
+							.all(|(segment, cursor)| {
+								let step = &self.steps[segment.step];
+								step.covers(start + segment.offset, segment.length, limit, cursor)
+							})
 					})
 					.map(|start| (start, start + variant.width)),
 			);
@@ -912,7 +923,13 @@ mod tests {
 
 	fn spans(sequence: &Sequence, end: u64) -> Vec<(u64, u64)> {
 		sequence
-			.matches_in::<()>(Span::new(0, end), &|_, _| true, &|_, _| true, &unlimited(), Output::Final)
+			.matches_in::<()>(
+				Span::new(0, end),
+				&|_, _| true,
+				&|_, _| true,
+				&unlimited(),
+				Output::Final,
+			)
 			.unwrap()
 			.into_iter()
 			.map(|found| (found.start, found.end))
@@ -921,7 +938,13 @@ mod tests {
 
 	fn assignments(sequence: &Sequence, end: u64, holds: Holds) -> Vec<Match> {
 		sequence
-			.matches_in::<Slots>(Span::new(0, end), holds, &|_, _| true, &unlimited(), Output::Final)
+			.matches_in::<Slots>(
+				Span::new(0, end),
+				holds,
+				&|_, _| true,
+				&unlimited(),
+				Output::Final,
+			)
 			.unwrap()
 	}
 
@@ -971,8 +994,14 @@ mod tests {
 	#[test]
 	fn optional_first_step_matches_every_position_of_the_next() {
 		// positions 4, 5, 6 all satisfy the second step; none is preceded by the first
-		let sequence = unlabeled(vec![token_step(&[1], 0, 1), token_step(&[2, 4, 5, 6], 1, 1)]);
-		assert_eq!(spans(&sequence, 10), vec![(1, 3), (2, 3), (4, 5), (5, 6), (6, 7)]);
+		let sequence = unlabeled(vec![
+			token_step(&[1], 0, 1),
+			token_step(&[2, 4, 5, 6], 1, 1),
+		]);
+		assert_eq!(
+			spans(&sequence, 10),
+			vec![(1, 3), (2, 3), (4, 5), (5, 6), (6, 7)]
+		);
 	}
 
 	fn seed_starts(sequence: &Sequence, end: u64) -> Vec<u64> {
@@ -1017,7 +1046,10 @@ mod tests {
 	#[test]
 	fn fixed_width_matches_agree_with_labeled_extension() {
 		let positions = [0, 1, 2, 4, 5, 7, 8, 9];
-		let fixed = unlabeled(vec![token_step(&positions, 1, 1), token_step(&positions, 2, 2)]);
+		let fixed = unlabeled(vec![
+			token_step(&positions, 1, 1),
+			token_step(&positions, 2, 2),
+		]);
 		let extended = Sequence::new(
 			vec![labeled(&positions, 1, 1, 0), token_step(&positions, 2, 2)],
 			1,
@@ -1035,7 +1067,10 @@ mod tests {
 	}
 
 	fn distinct_spans(matches: Vec<Match>) -> Vec<(u64, u64)> {
-		let mut spans: Vec<(u64, u64)> = matches.iter().map(|found| (found.start, found.end)).collect();
+		let mut spans: Vec<(u64, u64)> = matches
+			.iter()
+			.map(|found| (found.start, found.end))
+			.collect();
 		spans.dedup();
 		spans
 	}
@@ -1044,8 +1079,14 @@ mod tests {
 	fn bitmaps_runs_and_variants_find_the_same_spans() {
 		let first = [0, 1, 2, 4, 5, 7, 8, 9, 12];
 		let second = [1, 2, 3, 5, 6, 9, 10, 11, 12, 13];
-		let shapes: [(u32, u32, u32, u32); 6] =
-			[(1, 1, 1, 1), (0, 1, 1, 1), (1, 3, 1, 1), (0, 2, 0, 2), (2, 2, 1, 2), (1, 1, 0, 3)];
+		let shapes: [(u32, u32, u32, u32); 6] = [
+			(1, 1, 1, 1),
+			(0, 1, 1, 1),
+			(1, 3, 1, 1),
+			(0, 2, 0, 2),
+			(2, 2, 1, 2),
+			(1, 1, 0, 3),
+		];
 		for (first_min, first_max, second_min, second_max) in shapes {
 			let by_runs = Sequence::new(
 				vec![
@@ -1075,9 +1116,15 @@ mod tests {
 			]);
 			assert!(!by_variants.variants.is_empty());
 			let expected = distinct_spans(assignments(&by_runs, 14, &|_, _| true));
-			assert_eq!(distinct_spans(assignments(&by_bitmaps, 14, &|_, _| true)), expected);
+			assert_eq!(
+				distinct_spans(assignments(&by_bitmaps, 14, &|_, _| true)),
+				expected
+			);
 			assert_eq!(spans(&by_variants, 14), expected);
-			assert_eq!(spans(&by_variants, 11), distinct_spans(assignments(&by_runs, 11, &|_, _| true)));
+			assert_eq!(
+				spans(&by_variants, 11),
+				distinct_spans(assignments(&by_runs, 11, &|_, _| true))
+			);
 		}
 	}
 
@@ -1157,7 +1204,10 @@ mod tests {
 			.filter(|start| (start + 3) % 2 == 0)
 			.map(|start| (start, start + 4))
 			.collect();
-		assert_eq!(distinct_spans(assignments(&sequence, length, &|_, _| true)), expected);
+		assert_eq!(
+			distinct_spans(assignments(&sequence, length, &|_, _| true)),
+			expected
+		);
 	}
 
 	#[test]
@@ -1183,7 +1233,11 @@ mod tests {
 		let steps = || vec![gap(), labeled(&[1, 2], 1, 1, 0), gap()];
 		let over_whole_range = |found: &&Match| found.start == 0 && found.end == 4;
 
-		let all = assignments(&Sequence::new(steps(), 1, &[], Bindings::All), 4, &|_, _| true);
+		let all = assignments(
+			&Sequence::new(steps(), 1, &[], Bindings::All),
+			4,
+			&|_, _| true,
+		);
 		assert_eq!(all.iter().filter(over_whole_range).count(), 2);
 
 		let canonical = assignments(
@@ -1205,8 +1259,15 @@ mod tests {
 			token_step(&everywhere, 0, 1),
 			labeled(&everywhere, 1, 1, 1),
 		];
-		let found = assignments(&Sequence::new(steps, 2, &[], Bindings::Canonical), 2, &|_, _| true);
-		let whole: Vec<&Match> = found.iter().filter(|found| found.end - found.start == 2).collect();
+		let found = assignments(
+			&Sequence::new(steps, 2, &[], Bindings::Canonical),
+			2,
+			&|_, _| true,
+		);
+		let whole: Vec<&Match> = found
+			.iter()
+			.filter(|found| found.end - found.start == 2)
+			.collect();
 		assert_eq!(whole.len(), 1);
 		assert_eq!(whole[0].captures, vec![(0, 1), (1, 2)]);
 	}
@@ -1215,7 +1276,12 @@ mod tests {
 	fn floating_pair(bindings: Bindings) -> Sequence<'static> {
 		let everywhere = [0, 1, 2, 3, 4];
 		let gap = || token_step(&everywhere, 0, 3);
-		let steps = vec![gap(), labeled(&everywhere, 1, 1, 0), gap(), labeled(&everywhere, 1, 1, 1)];
+		let steps = vec![
+			gap(),
+			labeled(&everywhere, 1, 1, 0),
+			gap(),
+			labeled(&everywhere, 1, 1, 1),
+		];
 		Sequence::new(steps, 2, &[vec![0, 1]], bindings)
 	}
 
@@ -1224,9 +1290,12 @@ mod tests {
 		// accept only a at position 2 together with b at position 4
 		let holds = |_: usize, slots: &[Slot]| slots[0] == (2, 3) && slots[1] == (4, 5);
 		let found = assignments(&floating_pair(Bindings::Canonical), 5, &holds);
-		let reported: Vec<(u64, u64)> = found.iter().map(|found| (found.start, found.end)).collect();
+		let reported: Vec<(u64, u64)> =
+			found.iter().map(|found| (found.start, found.end)).collect();
 		assert_eq!(reported, vec![(0, 5), (1, 5), (2, 5)]);
-		assert!(found.iter().all(|found| found.captures == vec![(2, 3), (4, 5)]));
+		assert!(found
+			.iter()
+			.all(|found| found.captures == vec![(2, 3), (4, 5)]));
 	}
 
 	#[test]
@@ -1236,7 +1305,8 @@ mod tests {
 		let steps = vec![labeled(&everywhere, 0, 1, 0), labeled(&everywhere, 1, 1, 1)];
 		let sequence = Sequence::new(steps, 2, &[vec![0, 1]], Bindings::Canonical);
 		let found = assignments(&sequence, 3, &|_, _| true);
-		let reported: Vec<(u64, u64)> = found.iter().map(|found| (found.start, found.end)).collect();
+		let reported: Vec<(u64, u64)> =
+			found.iter().map(|found| (found.start, found.end)).collect();
 		assert_eq!(reported, vec![(0, 2), (1, 3)]);
 	}
 
@@ -1244,7 +1314,13 @@ mod tests {
 	fn budget_is_returned_once_results_are_final() {
 		let budget = unlimited();
 		floating_pair(Bindings::Canonical)
-			.matches_in::<Slots>(Span::new(0, 5), &|_, _| true, &|_, _| true, &budget, Output::Final)
+			.matches_in::<Slots>(
+				Span::new(0, 5),
+				&|_, _| true,
+				&|_, _| true,
+				&budget,
+				Output::Final,
+			)
 			.unwrap();
 		assert_eq!(budget.held(), 0);
 	}
@@ -1316,9 +1392,18 @@ mod tests {
 		});
 		let inside = |start: u64, end: u64| start < 50 && end <= 50;
 		let found = wide_spans()
-			.matches_in::<()>(Span::new(0, 5000), &|_, _| true, &inside, &budget, Output::Final)
+			.matches_in::<()>(
+				Span::new(0, 5000),
+				&|_, _| true,
+				&inside,
+				&budget,
+				Output::Final,
+			)
 			.unwrap();
-		assert_eq!(found.len(), (1..=50).map(|length| 50 - length + 1).sum::<usize>());
+		assert_eq!(
+			found.len(),
+			(1..=50).map(|length| 50 - length + 1).sum::<usize>()
+		);
 
 		let tight = Budget::new(Limits {
 			max_results: 1_000,
@@ -1333,7 +1418,10 @@ mod tests {
 		);
 		assert!(matches!(
 			outcome,
-			Err(QueryError::LimitExceeded { resource: "results", limit: 1_000 })
+			Err(QueryError::LimitExceeded {
+				resource: "results",
+				limit: 1_000
+			})
 		));
 	}
 
@@ -1341,7 +1429,12 @@ mod tests {
 	fn repeated_group_enumeration_is_charged_and_returned() {
 		// a group matching one or two tokens anywhere, repeated up to 100 times
 		let table: Vec<Match> = (0..200)
-			.flat_map(|start| [Match::unlabeled(start, start + 1, 0), Match::unlabeled(start, start + 2, 0)])
+			.flat_map(|start| {
+				[
+					Match::unlabeled(start, start + 1, 0),
+					Match::unlabeled(start, start + 2, 0),
+				]
+			})
 			.filter(|found| found.end <= 200)
 			.collect();
 		let group = || Step {
@@ -1353,7 +1446,13 @@ mod tests {
 		};
 		let budget = unlimited();
 		let found = unlabeled(vec![group()])
-			.matches_in::<()>(Span::new(0, 200), &|_, _| true, &|_, _| true, &budget, Output::Final)
+			.matches_in::<()>(
+				Span::new(0, 200),
+				&|_, _| true,
+				&|_, _| true,
+				&budget,
+				Output::Final,
+			)
 			.unwrap();
 		assert!(!found.is_empty());
 		assert_eq!(budget.held(), 0);
@@ -1388,14 +1487,20 @@ mod tests {
 				max_intermediate_matches: 8,
 				..Limits::unlimited()
 			}),
-			Err(QueryError::LimitExceeded { resource: "intermediate matches", limit: 8 })
+			Err(QueryError::LimitExceeded {
+				resource: "intermediate matches",
+				limit: 8
+			})
 		));
 		assert!(matches!(
 			run(Limits {
 				max_expansions: 10,
 				..Limits::unlimited()
 			}),
-			Err(QueryError::LimitExceeded { resource: "expansions", limit: 10 })
+			Err(QueryError::LimitExceeded {
+				resource: "expansions",
+				limit: 10
+			})
 		));
 	}
 }

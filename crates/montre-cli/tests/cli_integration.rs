@@ -13,8 +13,7 @@ struct TestCorpora {
 }
 
 fn testdata() -> PathBuf {
-	PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-		.join("../../testdata")
+	PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata")
 }
 
 fn corpora() -> &'static TestCorpora {
@@ -299,7 +298,11 @@ fn vocab_bare_lists_values() {
 	assert!(lines.contains(&"VERB"));
 	assert!(lines.contains(&"ADJ"));
 	for line in &lines {
-		assert!(!line.contains('\t'), "bare vocab should not have counts: {}", line);
+		assert!(
+			!line.contains('\t'),
+			"bare vocab should not have counts: {}",
+			line
+		);
 	}
 }
 
@@ -539,7 +542,12 @@ fn result_limit_does_not_apply_to_a_plain_count_but_does_by_document() {
 		.success()
 		.stdout("177\n");
 	montre()
-		.args(["count", c.multi_path.to_str().unwrap(), AMBIGUOUS, "--by-document"])
+		.args([
+			"count",
+			c.multi_path.to_str().unwrap(),
+			AMBIGUOUS,
+			"--by-document",
+		])
 		.args(["--max-results", "10"])
 		.assert()
 		.code(1)
@@ -554,5 +562,7 @@ fn limit_must_be_a_number_or_unlimited() {
 		.args(["--max-results", "lots"])
 		.assert()
 		.code(2)
-		.stderr(predicate::str::contains("expected a whole number or 'unlimited'"));
+		.stderr(predicate::str::contains(
+			"expected a whole number or 'unlimited'",
+		));
 }

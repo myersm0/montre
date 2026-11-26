@@ -4,7 +4,7 @@ use std::path::Path;
 
 use memmap2::Mmap;
 
-use crate::{IndexError, Result, align_to_8};
+use crate::{align_to_8, IndexError, Result};
 
 const MAGIC: &[u8; 4] = b"MMWT";
 const FORMAT_VERSION: u32 = 1;
@@ -41,9 +41,10 @@ impl MappedMWTs {
 		}
 		let version = u32::from_ne_bytes(buf[4..8].try_into().unwrap());
 		if version != FORMAT_VERSION {
-			return Err(IndexError::Format(
-				format!("mwt format version {}, expected {}", version, FORMAT_VERSION),
-			));
+			return Err(IndexError::Format(format!(
+				"mwt format version {}, expected {}",
+				version, FORMAT_VERSION
+			)));
 		}
 		let bom = u32::from_ne_bytes(buf[8..12].try_into().unwrap());
 		if bom != BYTE_ORDER_MARK {
@@ -59,7 +60,12 @@ impl MappedMWTs {
 			return Err(IndexError::Format("mwt file truncated".into()));
 		}
 
-		Ok(Self { mmap, count, entries_start, pool_start })
+		Ok(Self {
+			mmap,
+			count,
+			entries_start,
+			pool_start,
+		})
 	}
 
 	pub fn len(&self) -> usize {
@@ -88,7 +94,9 @@ impl MappedMWTs {
 		let (start, end, form_offset, form_len, flags) = self.read_entry(index)?;
 		let buf = &self.mmap[..];
 		let s = self.pool_start + form_offset;
-		let form = std::str::from_utf8(&buf[s..s + form_len as usize]).ok()?.to_string();
+		let form = std::str::from_utf8(&buf[s..s + form_len as usize])
+			.ok()?
+			.to_string();
 		Some(MWTEntry {
 			start,
 			end,
@@ -142,7 +150,11 @@ impl MappedMWTs {
 				hi = mid;
 			}
 		}
-		if lo > 0 { Some(lo - 1) } else { None }
+		if lo > 0 {
+			Some(lo - 1)
+		} else {
+			None
+		}
 	}
 
 	fn lower_bound(&self, position: u64) -> Option<usize> {
@@ -161,7 +173,11 @@ impl MappedMWTs {
 				hi = mid;
 			}
 		}
-		if lo < n { Some(lo) } else { None }
+		if lo < n {
+			Some(lo)
+		} else {
+			None
+		}
 	}
 }
 
@@ -216,9 +232,24 @@ mod tests {
 		let path = dir.path().join("mwt.bin");
 
 		let entries = vec![
-			MWTEntry { start: 2, end: 4, form: "au".into(), no_space_after: false },
-			MWTEntry { start: 10, end: 12, form: "du".into(), no_space_after: true },
-			MWTEntry { start: 20, end: 22, form: "des".into(), no_space_after: false },
+			MWTEntry {
+				start: 2,
+				end: 4,
+				form: "au".into(),
+				no_space_after: false,
+			},
+			MWTEntry {
+				start: 10,
+				end: 12,
+				form: "du".into(),
+				no_space_after: true,
+			},
+			MWTEntry {
+				start: 20,
+				end: 22,
+				form: "des".into(),
+				no_space_after: false,
+			},
 		];
 
 		write_mwts(&entries, &path).unwrap();
@@ -243,8 +274,18 @@ mod tests {
 		let path = dir.path().join("mwt.bin");
 
 		let entries = vec![
-			MWTEntry { start: 5, end: 7, form: "au".into(), no_space_after: false },
-			MWTEntry { start: 15, end: 17, form: "du".into(), no_space_after: false },
+			MWTEntry {
+				start: 5,
+				end: 7,
+				form: "au".into(),
+				no_space_after: false,
+			},
+			MWTEntry {
+				start: 15,
+				end: 17,
+				form: "du".into(),
+				no_space_after: false,
+			},
 		];
 
 		write_mwts(&entries, &path).unwrap();
@@ -264,9 +305,24 @@ mod tests {
 		let path = dir.path().join("mwt.bin");
 
 		let entries = vec![
-			MWTEntry { start: 2, end: 4, form: "au".into(), no_space_after: false },
-			MWTEntry { start: 10, end: 12, form: "du".into(), no_space_after: false },
-			MWTEntry { start: 20, end: 22, form: "des".into(), no_space_after: false },
+			MWTEntry {
+				start: 2,
+				end: 4,
+				form: "au".into(),
+				no_space_after: false,
+			},
+			MWTEntry {
+				start: 10,
+				end: 12,
+				form: "du".into(),
+				no_space_after: false,
+			},
+			MWTEntry {
+				start: 20,
+				end: 22,
+				form: "des".into(),
+				no_space_after: false,
+			},
 		];
 
 		write_mwts(&entries, &path).unwrap();
@@ -299,9 +355,12 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("mwt.bin");
 
-		let entries = vec![
-			MWTEntry { start: 0, end: 2, form: "l'homme".into(), no_space_after: true },
-		];
+		let entries = vec![MWTEntry {
+			start: 0,
+			end: 2,
+			form: "l'homme".into(),
+			no_space_after: true,
+		}];
 
 		write_mwts(&entries, &path).unwrap();
 		let mapped = MappedMWTs::open(&path).unwrap();

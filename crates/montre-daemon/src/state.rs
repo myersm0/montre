@@ -9,8 +9,8 @@ use uuid::Uuid;
 use crate::handlers::alignment::project_alignment;
 use crate::protocol::error_codes;
 use crate::protocol::{
-	Coupler, CouplerId, CouplerKind, AlignmentSource, Capabilities, Interest, InterestKind, ProcessId,
-	ProcessInfo, ProtocolError, RegisterParams, RegisterReply, ResultForm, ResultHandle,
+	AlignmentSource, Capabilities, Coupler, CouplerId, CouplerKind, Interest, InterestKind,
+	ProcessId, ProcessInfo, ProtocolError, RegisterParams, RegisterReply, ResultForm, ResultHandle,
 	ResultMetadata, RosterFilter, ShutdownNotificationParams, ShutdownReason, Span, Topic,
 	PROTOCOL_VERSION,
 };
@@ -254,7 +254,8 @@ impl State {
 			hits: Arc::new(hits),
 			metadata,
 		});
-		self.handle.results
+		self.handle
+			.results
 			.write()
 			.expect("results lock poisoned")
 			.insert(handle.clone(), entry);
@@ -296,10 +297,7 @@ impl State {
 		};
 
 		let extra = std::iter::once((name.as_str(), &record));
-		let existing = self
-			.named_results
-			.iter()
-			.map(|(k, v)| (k.as_str(), v));
+		let existing = self.named_results.iter().map(|(k, v)| (k.as_str(), v));
 		storage::persist_named_results(
 			&self.handle.state_dir,
 			&self.handle.corpus_id,
@@ -308,7 +306,8 @@ impl State {
 		.map_err(persist_error)?;
 
 		let metadata = promoted.metadata.clone();
-		self.handle.results
+		self.handle
+			.results
 			.write()
 			.expect("results lock poisoned")
 			.insert(handle, promoted);
@@ -319,12 +318,16 @@ impl State {
 	}
 
 	fn materialize_result(&mut self, name: String) -> Result<ResultMetadata, ProtocolError> {
-		let handle = self.named_results.get(&name).map(|r| r.handle.clone()).ok_or_else(|| {
-			ProtocolError::new(
-				error_codes::NAMED_RESULT_NOT_FOUND,
-				format!("name '{}' not found", name),
-			)
-		})?;
+		let handle = self
+			.named_results
+			.get(&name)
+			.map(|r| r.handle.clone())
+			.ok_or_else(|| {
+				ProtocolError::new(
+					error_codes::NAMED_RESULT_NOT_FOUND,
+					format!("name '{}' not found", name),
+				)
+			})?;
 
 		let promoted = {
 			let table = self.handle.results.read().expect("results lock poisoned");
@@ -348,7 +351,8 @@ impl State {
 		};
 
 		let metadata = promoted.metadata.clone();
-		self.handle.results
+		self.handle
+			.results
 			.write()
 			.expect("results lock poisoned")
 			.insert(handle, promoted);
@@ -377,7 +381,8 @@ impl State {
 
 	fn install_replayed_result(&mut self, entry: Arc<ResultEntry>) {
 		let handle = entry.metadata.handle.clone();
-		self.handle.results
+		self.handle
+			.results
 			.write()
 			.expect("results lock poisoned")
 			.insert(handle, entry);
@@ -406,27 +411,28 @@ impl State {
 	}
 
 	fn delete_named(&mut self, name: String) -> Result<(), ProtocolError> {
-		let record_handle = self.named_results.get(&name).map(|r| r.handle.clone()).ok_or_else(|| {
-			ProtocolError::new(
-				error_codes::NAMED_RESULT_NOT_FOUND,
-				format!("name '{}' not found", name),
-			)
-		})?;
+		let record_handle = self
+			.named_results
+			.get(&name)
+			.map(|r| r.handle.clone())
+			.ok_or_else(|| {
+				ProtocolError::new(
+					error_codes::NAMED_RESULT_NOT_FOUND,
+					format!("name '{}' not found", name),
+				)
+			})?;
 
 		let surviving = self
 			.named_results
 			.iter()
 			.filter(|(key, _)| key.as_str() != name.as_str())
 			.map(|(k, v)| (k.as_str(), v));
-		storage::persist_named_results(
-			&self.handle.state_dir,
-			&self.handle.corpus_id,
-			surviving,
-		)
-		.map_err(persist_error)?;
+		storage::persist_named_results(&self.handle.state_dir, &self.handle.corpus_id, surviving)
+			.map_err(persist_error)?;
 
 		self.named_results.remove(&name);
-		self.handle.results
+		self.handle
+			.results
 			.write()
 			.expect("results lock poisoned")
 			.remove(&record_handle);
@@ -453,7 +459,10 @@ impl State {
 		if !coupler_kind_names().contains(&kind.type_name()) {
 			return Err(ProtocolError::new(
 				error_codes::COUPLER_KIND_UNSUPPORTED,
-				format!("coupler kind '{}' not supported by this daemon", kind.type_name()),
+				format!(
+					"coupler kind '{}' not supported by this daemon",
+					kind.type_name()
+				),
 			));
 		}
 		if !self.roster.contains_key(&master_id) {
@@ -532,9 +541,7 @@ impl State {
 		self.couplers
 			.remove(&coupler_id)
 			.map(|_| ())
-			.ok_or_else(|| {
-				ProtocolError::new(error_codes::COUPLER_NOT_FOUND, "coupler not found")
-			})
+			.ok_or_else(|| ProtocolError::new(error_codes::COUPLER_NOT_FOUND, "coupler not found"))
 	}
 
 	fn coupler_list(&self, filter: Option<ProcessId>) -> Vec<Coupler> {
@@ -571,18 +578,17 @@ impl State {
 		false
 	}
 
-	fn subscribe(
-		&mut self,
-		process_id: ProcessId,
-		topic: Topic,
-	) -> Result<(), ProtocolError> {
+	fn subscribe(&mut self, process_id: ProcessId, topic: Topic) -> Result<(), ProtocolError> {
 		if !self.roster.contains_key(&process_id) {
 			return Err(ProtocolError::new(
 				error_codes::PROCESS_NOT_FOUND,
 				"process not found",
 			));
 		}
-		self.subscriptions.entry(topic).or_default().insert(process_id);
+		self.subscriptions
+			.entry(topic)
+			.or_default()
+			.insert(process_id);
 		Ok(())
 	}
 
@@ -659,8 +665,12 @@ impl State {
 	}
 
 	fn check_idle_timeout(&self) {
-		let Some(timeout) = self.idle_timeout else { return };
-		let Some(emptied_at) = self.roster_emptied_at else { return };
+		let Some(timeout) = self.idle_timeout else {
+			return;
+		};
+		let Some(emptied_at) = self.roster_emptied_at else {
+			return;
+		};
 		let elapsed = emptied_at.elapsed();
 		if elapsed >= timeout {
 			tracing::info!(
@@ -687,12 +697,8 @@ impl State {
 			.map(|(pid, c)| (*pid, c.outbound.clone()))
 			.collect();
 		for (pid, outbound) in recipients {
-			let _ = send_outbound_with_timeout(
-				&outbound,
-				payload.clone(),
-				SHUTDOWN_NOTIFY_BUDGET,
-				pid,
-			);
+			let _ =
+				send_outbound_with_timeout(&outbound, payload.clone(), SHUTDOWN_NOTIFY_BUDGET, pid);
 		}
 	}
 }
@@ -791,9 +797,7 @@ fn transform_interest(
 			Interest::Position { doc, position } => {
 				widen_position_to_sentence(handle, *doc, *position)
 			}
-			Interest::Span { doc, start, .. } => {
-				widen_position_to_sentence(handle, *doc, *start)
-			}
+			Interest::Span { doc, start, .. } => widen_position_to_sentence(handle, *doc, *start),
 			_ => Vec::new(),
 		},
 		CouplerKind::Alignment { name } => {
@@ -802,17 +806,27 @@ fn transform_interest(
 					let Some(span) = sentence_to_span(handle, *doc, *sent) else {
 						return Vec::new();
 					};
-					AlignmentSource { doc: *doc, start: span.start, end: span.end }
+					AlignmentSource {
+						doc: *doc,
+						start: span.start,
+						end: span.end,
+					}
 				}
-				Interest::Span { doc, start, end } => {
-					AlignmentSource { doc: *doc, start: *start, end: *end }
-				}
+				Interest::Span { doc, start, end } => AlignmentSource {
+					doc: *doc,
+					start: *start,
+					end: *end,
+				},
 				_ => return Vec::new(),
 			};
 			match project_alignment(&handle.corpus, name, source) {
 				Ok(targets) => targets
 					.into_iter()
-					.map(|t| Interest::Span { doc: t.doc, start: t.start, end: t.end })
+					.map(|t| Interest::Span {
+						doc: t.doc,
+						start: t.start,
+						end: t.end,
+					})
 					.collect(),
 				Err(_) => Vec::new(),
 			}
@@ -820,8 +834,12 @@ fn transform_interest(
 		CouplerKind::KwicSelection => match interest {
 			Interest::Hit { result, hit_idx } => {
 				let table = handle.results.read().expect("results lock poisoned");
-				let Some(entry) = table.get(result) else { return Vec::new(); };
-				let Some(hit) = entry.hits.get(*hit_idx as usize) else { return Vec::new(); };
+				let Some(entry) = table.get(result) else {
+					return Vec::new();
+				};
+				let Some(hit) = entry.hits.get(*hit_idx as usize) else {
+					return Vec::new();
+				};
 				vec![Interest::Span {
 					doc: hit.document_index,
 					start: hit.span.start,
@@ -847,7 +865,10 @@ fn widen_position_to_sentence(handle: &CorpusHandle, doc: u32, position: u64) ->
 	let Some(first) = corpus.first_sentence_of_document(doc as usize) else {
 		return Vec::new();
 	};
-	vec![Interest::Sentence { doc, sent: (global_idx - first) as u32 }]
+	vec![Interest::Sentence {
+		doc,
+		sent: (global_idx - first) as u32,
+	}]
 }
 
 fn sentence_to_span(handle: &CorpusHandle, doc: u32, sent: u32) -> Option<Span> {
@@ -1036,20 +1057,31 @@ pub(crate) fn run(mut state: State, commands: Receiver<Command>) {
 		};
 
 		match command {
-			Command::Register { params, outbound, reply } => {
+			Command::Register {
+				params,
+				outbound,
+				reply,
+			} => {
 				let _ = reply.send(state.register(params, outbound));
 			}
 			Command::Unregister { process_id, reply } => {
 				state.unregister(process_id);
 				let _ = reply.send(());
 			}
-			Command::UpdateLabel { process_id, label, reply } => {
+			Command::UpdateLabel {
+				process_id,
+				label,
+				reply,
+			} => {
 				let _ = reply.send(state.update_label(process_id, label));
 			}
 			Command::Roster { filter, reply } => {
 				let _ = reply.send(state.roster_snapshot(filter));
 			}
-			Command::PublishInterest { process_id, interest } => {
+			Command::PublishInterest {
+				process_id,
+				interest,
+			} => {
 				state.publish_interest(process_id, interest);
 			}
 			#[cfg(test)]
@@ -1057,7 +1089,11 @@ pub(crate) fn run(mut state: State, commands: Receiver<Command>) {
 			Command::InsertResult { cql, hits, reply } => {
 				let _ = reply.send(state.insert_result(cql, hits));
 			}
-			Command::SaveResult { handle, name, reply } => {
+			Command::SaveResult {
+				handle,
+				name,
+				reply,
+			} => {
 				let _ = reply.send(state.save_result(handle, name));
 			}
 			Command::MaterializeResult { name, reply } => {
@@ -1080,7 +1116,12 @@ pub(crate) fn run(mut state: State, commands: Receiver<Command>) {
 				state.discard_handle(handle);
 				let _ = reply.send(());
 			}
-			Command::CouplerCreate { master_id, follower_id, kind, reply } => {
+			Command::CouplerCreate {
+				master_id,
+				follower_id,
+				kind,
+				reply,
+			} => {
 				let _ = reply.send(state.coupler_create(master_id, follower_id, kind));
 			}
 			Command::CouplerRemove { coupler_id, reply } => {
@@ -1089,10 +1130,18 @@ pub(crate) fn run(mut state: State, commands: Receiver<Command>) {
 			Command::CouplerList { process_id, reply } => {
 				let _ = reply.send(state.coupler_list(process_id));
 			}
-			Command::Subscribe { process_id, topic, reply } => {
+			Command::Subscribe {
+				process_id,
+				topic,
+				reply,
+			} => {
 				let _ = reply.send(state.subscribe(process_id, topic));
 			}
-			Command::Unsubscribe { process_id, topic, reply } => {
+			Command::Unsubscribe {
+				process_id,
+				topic,
+				reply,
+			} => {
 				state.unsubscribe(process_id, topic);
 				let _ = reply.send(());
 			}
@@ -1112,7 +1161,11 @@ mod tests {
 	use std::sync::mpsc::sync_channel;
 
 	fn make_state() -> State {
-		State::new(1, make_handle(), crate::shutdown::ShutdownCoordinator::dummy())
+		State::new(
+			1,
+			make_handle(),
+			crate::shutdown::ShutdownCoordinator::dummy(),
+		)
 	}
 
 	fn dummy_outbound() -> SyncSender<Outbound> {
@@ -1132,7 +1185,10 @@ mod tests {
 
 	fn register(state: &mut State) -> ProcessId {
 		state
-			.register(make_register_params(ProcessKind::External), dummy_outbound())
+			.register(
+				make_register_params(ProcessKind::External),
+				dummy_outbound(),
+			)
 			.unwrap()
 			.process_id
 	}
@@ -1142,7 +1198,11 @@ mod tests {
 			protocol_version: PROTOCOL_VERSION,
 			kind: ProcessKind::External,
 			label: None,
-			provides: vec![InterestKind::Position, InterestKind::Span, InterestKind::Sentence],
+			provides: vec![
+				InterestKind::Position,
+				InterestKind::Span,
+				InterestKind::Sentence,
+			],
 			consumes: vec![InterestKind::Sentence],
 		};
 		state.register(params, dummy_outbound()).unwrap().process_id
@@ -1152,7 +1212,10 @@ mod tests {
 	fn register_happy_path() {
 		let mut state = make_state();
 		let reply = state
-			.register(make_register_params(ProcessKind::External), dummy_outbound())
+			.register(
+				make_register_params(ProcessKind::External),
+				dummy_outbound(),
+			)
 			.unwrap();
 		assert_eq!(reply.process_id, 1);
 		assert_eq!(reply.daemon_epoch, 1);
@@ -1181,7 +1244,10 @@ mod tests {
 	fn register_capabilities_includes_all_coupler_kinds() {
 		let mut state = make_state();
 		let reply = state
-			.register(make_register_params(ProcessKind::External), dummy_outbound())
+			.register(
+				make_register_params(ProcessKind::External),
+				dummy_outbound(),
+			)
 			.unwrap();
 		for &name in coupler_kind_names() {
 			assert!(
@@ -1380,7 +1446,8 @@ mod tests {
 		let h = state.insert_result("foo".to_string(), vec![]).handle;
 		state.save_result(h.clone(), "named".to_string()).unwrap();
 
-		let created_at_before = state.handle
+		let created_at_before = state
+			.handle
 			.results
 			.read()
 			.unwrap()
@@ -1389,7 +1456,16 @@ mod tests {
 			.metadata
 			.created_at
 			.clone();
-		assert!(state.handle.results.read().unwrap().get(&h).unwrap().metadata.materialized_at.is_none());
+		assert!(state
+			.handle
+			.results
+			.read()
+			.unwrap()
+			.get(&h)
+			.unwrap()
+			.metadata
+			.materialized_at
+			.is_none());
 
 		let metadata = state.materialize_result("named".to_string()).unwrap();
 		assert_eq!(metadata.created_at, created_at_before);
@@ -1561,7 +1637,9 @@ mod tests {
 	#[test]
 	fn coupler_kind_compat_alignment_accepts_span_to_span() {
 		assert!(coupler_kind_compat(
-			&CouplerKind::Alignment { name: "labse".to_string() },
+			&CouplerKind::Alignment {
+				name: "labse".to_string()
+			},
 			&[InterestKind::Span],
 			&[InterestKind::Span],
 		));
@@ -1648,7 +1726,10 @@ mod tests {
 		let handle = make_handle();
 		let doc = find_doc(&handle.corpus, "la_maison");
 		let span = sentence_to_span(&handle, doc, 0).expect("sentence span");
-		let interest = Interest::Position { doc, position: span.start };
+		let interest = Interest::Position {
+			doc,
+			position: span.start,
+		};
 		let out = transform_interest(&handle, &interest, &CouplerKind::SentenceMirror);
 		assert_eq!(out.len(), 1);
 		match &out[0] {
@@ -1665,7 +1746,11 @@ mod tests {
 		let handle = make_handle();
 		let doc = find_doc(&handle.corpus, "la_maison");
 		let span = sentence_to_span(&handle, doc, 0).expect("sentence span");
-		let interest = Interest::Span { doc, start: span.start, end: span.end };
+		let interest = Interest::Span {
+			doc,
+			start: span.start,
+			end: span.end,
+		};
 		let out = transform_interest(&handle, &interest, &CouplerKind::SentenceMirror);
 		assert_eq!(out.len(), 1);
 		match &out[0] {
@@ -1681,7 +1766,10 @@ mod tests {
 	fn transform_sentence_mirror_position_outside_any_sentence_returns_empty() {
 		let handle = make_handle();
 		let doc = find_doc(&handle.corpus, "la_maison");
-		let interest = Interest::Position { doc, position: u64::MAX };
+		let interest = Interest::Position {
+			doc,
+			position: u64::MAX,
+		};
 		let out = transform_interest(&handle, &interest, &CouplerKind::SentenceMirror);
 		assert!(out.is_empty());
 	}
@@ -1689,7 +1777,10 @@ mod tests {
 	#[test]
 	fn transform_sentence_mirror_defensively_rejects_hit_input() {
 		let handle = make_handle();
-		let interest = Interest::Hit { result: "r-x".to_string(), hit_idx: 0 };
+		let interest = Interest::Hit {
+			result: "r-x".to_string(),
+			hit_idx: 0,
+		};
 		let out = transform_interest(&handle, &interest, &CouplerKind::SentenceMirror);
 		assert!(out.is_empty());
 	}
@@ -1699,8 +1790,13 @@ mod tests {
 		let handle = make_handle();
 		let source_doc = find_doc(&handle.corpus, "la_maison");
 		let target_doc = find_doc(&handle.corpus, "the_house");
-		let interest = Interest::Sentence { doc: source_doc, sent: 0 };
-		let kind = CouplerKind::Alignment { name: "sentence".to_string() };
+		let interest = Interest::Sentence {
+			doc: source_doc,
+			sent: 0,
+		};
+		let kind = CouplerKind::Alignment {
+			name: "sentence".to_string(),
+		};
 		let out = transform_interest(&handle, &interest, &kind);
 		assert!(!out.is_empty());
 		for derived in &out {
@@ -1720,8 +1816,14 @@ mod tests {
 		let source_doc = find_doc(&handle.corpus, "la_maison");
 		let target_doc = find_doc(&handle.corpus, "the_house");
 		let span = sentence_to_span(&handle, source_doc, 0).expect("sentence span");
-		let interest = Interest::Span { doc: source_doc, start: span.start, end: span.end };
-		let kind = CouplerKind::Alignment { name: "sentence".to_string() };
+		let interest = Interest::Span {
+			doc: source_doc,
+			start: span.start,
+			end: span.end,
+		};
+		let kind = CouplerKind::Alignment {
+			name: "sentence".to_string(),
+		};
 		let out = transform_interest(&handle, &interest, &kind);
 		assert!(!out.is_empty());
 		for derived in &out {
@@ -1736,8 +1838,14 @@ mod tests {
 	fn transform_alignment_unknown_name_returns_empty() {
 		let handle = make_handle();
 		let doc = find_doc(&handle.corpus, "la_maison");
-		let interest = Interest::Span { doc, start: 0, end: 5 };
-		let kind = CouplerKind::Alignment { name: "totally-not-an-alignment".to_string() };
+		let interest = Interest::Span {
+			doc,
+			start: 0,
+			end: 5,
+		};
+		let kind = CouplerKind::Alignment {
+			name: "totally-not-an-alignment".to_string(),
+		};
 		let out = transform_interest(&handle, &interest, &kind);
 		assert!(out.is_empty());
 	}
@@ -1747,7 +1855,9 @@ mod tests {
 		let handle = make_handle();
 		let doc = find_doc(&handle.corpus, "la_maison");
 		let interest = Interest::Position { doc, position: 0 };
-		let kind = CouplerKind::Alignment { name: "sentence".to_string() };
+		let kind = CouplerKind::Alignment {
+			name: "sentence".to_string(),
+		};
 		let out = transform_interest(&handle, &interest, &kind);
 		assert!(out.is_empty());
 	}
@@ -1762,8 +1872,13 @@ mod tests {
 			sentence_index: 0,
 			captures: vec![],
 		};
-		let result_handle = state.insert_result("test".to_string(), vec![executor_hit]).handle;
-		let interest = Interest::Hit { result: result_handle, hit_idx: 0 };
+		let result_handle = state
+			.insert_result("test".to_string(), vec![executor_hit])
+			.handle;
+		let interest = Interest::Hit {
+			result: result_handle,
+			hit_idx: 0,
+		};
 		let out = transform_interest(&state.handle, &interest, &CouplerKind::KwicSelection);
 		assert_eq!(out.len(), 1);
 		match &out[0] {
@@ -1779,7 +1894,10 @@ mod tests {
 	#[test]
 	fn transform_kwic_unknown_result_returns_empty() {
 		let handle = make_handle();
-		let interest = Interest::Hit { result: "r-bogus".to_string(), hit_idx: 0 };
+		let interest = Interest::Hit {
+			result: "r-bogus".to_string(),
+			hit_idx: 0,
+		};
 		let out = transform_interest(&handle, &interest, &CouplerKind::KwicSelection);
 		assert!(out.is_empty());
 	}
@@ -1788,7 +1906,10 @@ mod tests {
 	fn transform_kwic_hit_idx_out_of_range_returns_empty() {
 		let mut state = make_state();
 		let result_handle = state.insert_result("test".to_string(), vec![]).handle;
-		let interest = Interest::Hit { result: result_handle, hit_idx: 99 };
+		let interest = Interest::Hit {
+			result: result_handle,
+			hit_idx: 99,
+		};
 		let out = transform_interest(&state.handle, &interest, &CouplerKind::KwicSelection);
 		assert!(out.is_empty());
 	}
@@ -1805,7 +1926,9 @@ mod tests {
 		.is_empty());
 		assert!(transform_interest(
 			&handle,
-			&Interest::Results { handle: "r-x".to_string() },
+			&Interest::Results {
+				handle: "r-x".to_string()
+			},
 			&CouplerKind::NamedResultsSelection,
 		)
 		.is_empty());
@@ -1839,14 +1962,21 @@ mod tests {
 		let state_dir = temp.path().to_path_buf();
 
 		let mut first = state_sharing_dir(state_dir.clone());
-		let handle = first.insert_result("[pos=\"NOUN\"]".to_string(), vec![]).handle;
-		first.save_result(handle.clone(), "saved".to_string()).unwrap();
+		let handle = first
+			.insert_result("[pos=\"NOUN\"]".to_string(), vec![])
+			.handle;
+		first
+			.save_result(handle.clone(), "saved".to_string())
+			.unwrap();
 		drop(first);
 
 		let mut second = state_sharing_dir(state_dir);
 		second.replay_named_results().expect("replay");
 
-		let record = second.named_results.get("saved").expect("name present after replay");
+		let record = second
+			.named_results
+			.get("saved")
+			.expect("name present after replay");
 		assert_eq!(record.handle, handle);
 		assert_eq!(record.cql, "[pos=\"NOUN\"]");
 	}
@@ -1857,8 +1987,12 @@ mod tests {
 		let state_dir = temp.path().to_path_buf();
 
 		let mut first = state_sharing_dir(state_dir.clone());
-		let kept = first.insert_result("[pos=\"NOUN\"]".to_string(), vec![]).handle;
-		let doomed = first.insert_result("[pos=\"ADJ\"]".to_string(), vec![]).handle;
+		let kept = first
+			.insert_result("[pos=\"NOUN\"]".to_string(), vec![])
+			.handle;
+		let doomed = first
+			.insert_result("[pos=\"ADJ\"]".to_string(), vec![])
+			.handle;
 		first.save_result(kept, "kept".to_string()).unwrap();
 		first.save_result(doomed, "doomed".to_string()).unwrap();
 		first.delete_named("doomed".to_string()).unwrap();
@@ -1889,8 +2023,12 @@ mod tests {
 
 		let (tx_a, rx_a) = sync_channel::<Outbound>(16);
 		let (tx_b, rx_b) = sync_channel::<Outbound>(16);
-		state.register(make_register_params(ProcessKind::Reader), tx_a).unwrap();
-		state.register(make_register_params(ProcessKind::Kwic), tx_b).unwrap();
+		state
+			.register(make_register_params(ProcessKind::Reader), tx_a)
+			.unwrap();
+		state
+			.register(make_register_params(ProcessKind::Kwic), tx_b)
+			.unwrap();
 
 		state.initiate_shutdown(ShutdownReason::Requested);
 
@@ -1910,7 +2048,9 @@ mod tests {
 		let mut state = State::new(1, make_handle(), Arc::clone(&coordinator));
 
 		let (tx, rx) = sync_channel::<Outbound>(1);
-		state.register(make_register_params(ProcessKind::Reader), tx.clone()).unwrap();
+		state
+			.register(make_register_params(ProcessKind::Reader), tx.clone())
+			.unwrap();
 
 		tx.send(serde_json::json!({"filler": true}))
 			.expect("filler fits in the fresh empty channel");
@@ -1928,7 +2068,9 @@ mod tests {
 
 		let drained = drainer.join().expect("drainer join");
 		assert!(
-			drained.iter().any(|m| m["method"] == "notification.shutdown"),
+			drained
+				.iter()
+				.any(|m| m["method"] == "notification.shutdown"),
 			"shutdown notification must arrive after the channel drains; got {:?}",
 			drained,
 		);
@@ -1942,7 +2084,9 @@ mod tests {
 		let mut state = State::new(1, make_handle(), Arc::clone(&coordinator));
 
 		let (tx, rx) = sync_channel::<Outbound>(1);
-		state.register(make_register_params(ProcessKind::Reader), tx.clone()).unwrap();
+		state
+			.register(make_register_params(ProcessKind::Reader), tx.clone())
+			.unwrap();
 
 		tx.send(serde_json::json!({"filler": true}))
 			.expect("filler fits in the fresh empty channel");

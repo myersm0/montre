@@ -59,7 +59,16 @@ impl IndexSink {
 		let mut forward = InMemoryForward::new();
 		let mut layer_indices = Vec::new();
 
-		for &layer_name in &[layers::WORD, layers::LEMMA, layers::UPOS, layers::XPOS, layers::FEATS, layers::HEAD, layers::DEPREL, layers::DEPS] {
+		for &layer_name in &[
+			layers::WORD,
+			layers::LEMMA,
+			layers::UPOS,
+			layers::XPOS,
+			layers::FEATS,
+			layers::HEAD,
+			layers::DEPREL,
+			layers::DEPS,
+		] {
 			let idx = forward.add_layer(layer_name);
 			layer_indices.push((layer_name.to_string(), idx));
 		}
@@ -82,12 +91,20 @@ impl IndexSink {
 	}
 
 	pub fn new_without_forward() -> Self {
-		let layer_indices: Vec<(String, usize)> =
-			[layers::WORD, layers::LEMMA, layers::UPOS, layers::XPOS, layers::FEATS, layers::HEAD, layers::DEPREL, layers::DEPS]
-				.iter()
-				.enumerate()
-				.map(|(i, &name)| (name.to_string(), i))
-				.collect();
+		let layer_indices: Vec<(String, usize)> = [
+			layers::WORD,
+			layers::LEMMA,
+			layers::UPOS,
+			layers::XPOS,
+			layers::FEATS,
+			layers::HEAD,
+			layers::DEPREL,
+			layers::DEPS,
+		]
+		.iter()
+		.enumerate()
+		.map(|(i, &name)| (name.to_string(), i))
+		.collect();
 
 		Self {
 			inverted: InMemoryInverted::new(),
@@ -235,10 +252,11 @@ impl IndexSink {
 					});
 				}
 
-				self.spans.add_span("sentence", Span::new(sent_start, sent_end));
-				let id = sentence.sent_id.unwrap_or_else(|| {
-					format!("{}:{}", doc_name, sent_index_within_doc)
-				});
+				self.spans
+					.add_span("sentence", Span::new(sent_start, sent_end));
+				let id = sentence
+					.sent_id
+					.unwrap_or_else(|| format!("{}:{}", doc_name, sent_index_within_doc));
 				self.sentence_ids.push(id);
 				sent_index_within_doc += 1;
 			}
@@ -246,7 +264,8 @@ impl IndexSink {
 
 		let doc_end = self.current_position;
 		if doc_end > doc_start {
-			self.spans.add_span("document", Span::new(doc_start, doc_end));
+			self.spans
+				.add_span("document", Span::new(doc_start, doc_end));
 			self.document_names.push(doc_name.to_string());
 		}
 	}
@@ -279,7 +298,8 @@ impl IndexSink {
 		}
 
 		if let Some(ref mut fwd) = self.forward {
-			if let Some((_, layer_idx)) = self.layer_indices.iter().find(|(name, _)| name == layer) {
+			if let Some((_, layer_idx)) = self.layer_indices.iter().find(|(name, _)| name == layer)
+			{
 				fwd.set(*layer_idx, position, Value::from(value));
 			}
 		}
@@ -287,7 +307,8 @@ impl IndexSink {
 
 	fn add_token_int_annotation(&mut self, position: u64, layer: &str, value: i64) {
 		if let Some(ref mut fwd) = self.forward {
-			if let Some((_, layer_idx)) = self.layer_indices.iter().find(|(name, _)| name == layer) {
+			if let Some((_, layer_idx)) = self.layer_indices.iter().find(|(name, _)| name == layer)
+			{
 				fwd.set(*layer_idx, position, Value::Int(value));
 			}
 		}
@@ -307,8 +328,9 @@ impl IndexSink {
 		let meta_json = serde_json::to_string_pretty(&meta)?;
 		std::fs::write(path.join("corpus.json"), meta_json)?;
 
-		let inverted_bytes = bincode::serialize(&self.inverted)
-			.map_err(|e| crate::BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+		let inverted_bytes = bincode::serialize(&self.inverted).map_err(|e| {
+			crate::BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+		})?;
 		std::fs::write(path.join("inverted.bin"), &inverted_bytes)?;
 
 		if let Some(ref forward) = self.forward {
@@ -317,8 +339,9 @@ impl IndexSink {
 
 		montre_index::write_flat_spans(&self.spans, &path.join("spans.bin"))?;
 
-		let lexicon_bytes = bincode::serialize(&self.lexicon)
-			.map_err(|e| crate::BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+		let lexicon_bytes = bincode::serialize(&self.lexicon).map_err(|e| {
+			crate::BuildError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+		})?;
 		std::fs::write(path.join("lexicon.bin"), lexicon_bytes)?;
 
 		if !self.sentence_ids.is_empty() {
@@ -447,11 +470,17 @@ impl CorpusBuilder {
 		static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 		let build_id = COUNTER.fetch_add(1, Ordering::SeqCst);
-		let temp_dir = std::env::temp_dir().join(format!(
-			"montre_cb_{}_{}", std::process::id(), build_id
-		));
-		let mut streaming_forward = crate::streaming_forward::StreamingForwardWriter::new(&temp_dir)?;
-		let sink = build_from_directory_streaming(dir, decompose_feats, strict, &mut streaming_forward, 0)?;
+		let temp_dir =
+			std::env::temp_dir().join(format!("montre_cb_{}_{}", std::process::id(), build_id));
+		let mut streaming_forward =
+			crate::streaming_forward::StreamingForwardWriter::new(&temp_dir)?;
+		let sink = build_from_directory_streaming(
+			dir,
+			decompose_feats,
+			strict,
+			&mut streaming_forward,
+			0,
+		)?;
 		Ok(Self {
 			name: name.into(),
 			sink,
@@ -485,8 +514,19 @@ impl CorpusBuilder {
 			name: self.name,
 			version: montre_index::index_version,
 			token_count: self.sink.current_position,
-			layers: self.sink.layer_indices.iter().map(|(n, _)| n.clone()).collect(),
-			span_layers: self.sink.spans.layers().into_iter().map(String::from).collect(),
+			layers: self
+				.sink
+				.layer_indices
+				.iter()
+				.map(|(n, _)| n.clone())
+				.collect(),
+			span_layers: self
+				.sink
+				.spans
+				.layers()
+				.into_iter()
+				.map(String::from)
+				.collect(),
 			document_names: self.sink.document_names.clone(),
 			components: Vec::new(),
 			alignments: Vec::new(),
@@ -562,7 +602,9 @@ mod tests {
 	fn one_token_sink() -> IndexSink {
 		let conllu = "1\tWorld\tworld\tNOUN\tNN\t_\t0\troot\t_\t_\n";
 		let mut sink = IndexSink::new_without_forward();
-		let sentences = ConllUReader::new(Cursor::new(conllu)).read_sentences().unwrap();
+		let sentences = ConllUReader::new(Cursor::new(conllu))
+			.read_sentences()
+			.unwrap();
 		sink.add_document("doc.conllu", sentences);
 		sink
 	}
@@ -574,7 +616,11 @@ mod tests {
 		sink.current_position = last;
 		sink.merge_from(one_token_sink()).unwrap();
 		assert_eq!(sink.current_position, montre_index::max_token_count);
-		assert!(sink.inverted.get("word", "World").unwrap().contains(last as u32));
+		assert!(sink
+			.inverted
+			.get("word", "World")
+			.unwrap()
+			.contains(last as u32));
 		assert!(matches!(
 			sink.merge_from(one_token_sink()),
 			Err(BuildError::TooManyTokens(total)) if total == montre_index::max_token_count + 1
@@ -588,7 +634,10 @@ mod tests {
 		std::fs::write(&kept, b"").unwrap();
 		let mut builder = CorpusBuilder::new("oversized");
 		builder.sink.current_position = montre_index::max_token_count + 1;
-		assert!(matches!(builder.build(directory.path()), Err(BuildError::TooManyTokens(_))));
+		assert!(matches!(
+			builder.build(directory.path()),
+			Err(BuildError::TooManyTokens(_))
+		));
 		assert!(kept.exists());
 	}
 }

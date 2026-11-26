@@ -40,7 +40,11 @@ fn query_spans(corpus: &Corpus, query_str: &str) -> Vec<(u64, u64)> {
 	let parsed = montre_query::parse(query_str).unwrap();
 	let plan = montre_query::planner::plan(&parsed).unwrap();
 	let results = montre_query::executor::execute(&plan, corpus).unwrap();
-	results.hits().iter().map(|h| (h.span.start, h.span.end)).collect()
+	results
+		.hits()
+		.iter()
+		.map(|h| (h.span.start, h.span.end))
+		.collect()
 }
 
 fn query_count(corpus: &Corpus, query_str: &str) -> usize {
@@ -50,7 +54,10 @@ fn query_count(corpus: &Corpus, query_str: &str) -> usize {
 	results.len()
 }
 
-fn query_captures(corpus: &Corpus, query_str: &str) -> Vec<((u64, u64), Vec<(String, (u64, u64))>)> {
+fn query_captures(
+	corpus: &Corpus,
+	query_str: &str,
+) -> Vec<((u64, u64), Vec<(String, (u64, u64))>)> {
 	let parsed = montre_query::parse(query_str).unwrap();
 	let plan = montre_query::planner::plan(&parsed).unwrap();
 	let results = montre_query::executor::execute(&plan, corpus).unwrap();
@@ -597,7 +604,10 @@ fn alternation_optional_in_sequence() {
 	// DET at 6: next is ADJ(big), then ADJ(black) not NOUN. Optional takes 0 → DET+NOUN? pos 7 is ADJ not NOUN. No match.
 	// DET at 13: same issue.
 	// So actually no matches at all — all DET-NOUN pairs in this corpus have intervening modifiers.
-	let count = query_count(&corpus, r#"[pos="DET"] ([pos="ADJ"] | [pos="ADV"])? [pos="NOUN"]"#);
+	let count = query_count(
+		&corpus,
+		r#"[pos="DET"] ([pos="ADJ"] | [pos="ADV"])? [pos="NOUN"]"#,
+	);
 	assert_eq!(count, 0);
 }
 
@@ -610,7 +620,10 @@ fn alternation_star_in_sequence() {
 	// DET at 0 (end=1), star matches 1,2 (very,old), NOUN at 3 → (0,4)
 	// DET at 6 (end=7), star matches 7,8 (big,black), NOUN at 9 → (6,10)
 	// DET at 13 (end=14), star matches 14,15,16 (really,very,old), NOUN at 17 → (13,18)
-	let count = query_count(&corpus, r#"[pos="DET"] ([pos="ADJ"] | [pos="ADV"])* [pos="NOUN"]"#);
+	let count = query_count(
+		&corpus,
+		r#"[pos="DET"] ([pos="ADJ"] | [pos="ADV"])* [pos="NOUN"]"#,
+	);
 	assert_eq!(count, 3);
 }
 
@@ -636,8 +649,8 @@ fn build_parallel_corpus() -> Corpus {
 	use std::path::PathBuf;
 
 	let output = test_corpus_path();
-	let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-		.join("../../testdata/parallel/corpus.toml");
+	let manifest_path =
+		PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/parallel/corpus.toml");
 
 	MultiCorpusBuilder::from_manifest(&manifest_path)
 		.unwrap()
@@ -693,10 +706,7 @@ fn alignment_projection_multiple_hits() {
 	let fr_verbs = query_count(&corpus, r#"[pos="VERB"] within component:"fr""#);
 	assert_eq!(fr_verbs, 4);
 
-	let projected = query_spans(
-		&corpus,
-		r#"[pos="VERB"] within component:"fr" =sentence=>"#,
-	);
+	let projected = query_spans(&corpus, r#"[pos="VERB"] within component:"fr" =sentence=>"#);
 	// 4 source sentences → 4 target sentences (1:1 alignment)
 	assert_eq!(projected.len(), 4);
 }
@@ -869,10 +879,16 @@ fn capture_two_labels() {
 	assert_eq!(results.len(), 2);
 
 	assert_eq!(results[0].0, (2, 4));
-	assert_eq!(results[0].1, vec![("a".into(), (2, 3)), ("b".into(), (3, 4))]);
+	assert_eq!(
+		results[0].1,
+		vec![("a".into(), (2, 3)), ("b".into(), (3, 4))]
+	);
 
 	assert_eq!(results[1].0, (7, 9));
-	assert_eq!(results[1].1, vec![("a".into(), (7, 8)), ("b".into(), (8, 9))]);
+	assert_eq!(
+		results[1].1,
+		vec![("a".into(), (7, 8)), ("b".into(), (8, 9))]
+	);
 }
 
 #[test]
@@ -921,10 +937,16 @@ fn constraint_distance_filters() {
 	let corpus = build_corpus(SAMPLE);
 	// ADJ immediately followed by NOUN: distance is 0
 	// distance >= 0 keeps all
-	let all = query_count(&corpus, r#"a:[pos="ADJ"] b:[pos="NOUN"] :: distance(a,b) >= 0"#);
+	let all = query_count(
+		&corpus,
+		r#"a:[pos="ADJ"] b:[pos="NOUN"] :: distance(a,b) >= 0"#,
+	);
 	assert_eq!(all, 2);
 	// distance >= 1 eliminates adjacent (distance 0)
-	let filtered = query_count(&corpus, r#"a:[pos="ADJ"] b:[pos="NOUN"] :: distance(a,b) >= 1"#);
+	let filtered = query_count(
+		&corpus,
+		r#"a:[pos="ADJ"] b:[pos="NOUN"] :: distance(a,b) >= 1"#,
+	);
 	assert_eq!(filtered, 0);
 }
 
@@ -1091,10 +1113,7 @@ fn pos_alias_resolves_to_upos() {
 #[test]
 fn pos_alias_in_global_constraint() {
 	let corpus = build_corpus(SAMPLE);
-	let via_pos = query_count(
-		&corpus,
-		r#"a:[pos="ADJ"] b:[pos="NOUN"] :: a.pos != b.pos"#,
-	);
+	let via_pos = query_count(&corpus, r#"a:[pos="ADJ"] b:[pos="NOUN"] :: a.pos != b.pos"#);
 	let via_upos = query_count(
 		&corpus,
 		r#"a:[upos="ADJ"] b:[upos="NOUN"] :: a.upos != b.upos"#,
@@ -1149,7 +1168,10 @@ fn sentence_ids_mixed_presence() {
 #[test]
 fn sentence_ids_across_documents() {
 	let corpus = build_corpus_multi_doc(&[
-		("doc-a", "# sent_id = a-sent-1\n1\tHello\thello\tINTJ\tUH\t_\t0\troot\t_\t_\n"),
+		(
+			"doc-a",
+			"# sent_id = a-sent-1\n1\tHello\thello\tINTJ\tUH\t_\t0\troot\t_\t_\n",
+		),
 		("doc-b", "1\tWorld\tworld\tNOUN\tNN\t_\t0\troot\t_\t_\n"),
 	]);
 	assert_eq!(corpus.sentence_id_count(), 2);
@@ -1301,7 +1323,8 @@ fn deps_with_empty_node_references() {
 }
 
 #[test]
-fn document_navigation_helpers() {	let doc_a = "\
+fn document_navigation_helpers() {
+	let doc_a = "\
 1\tle\tle\tDET\t_\t_\t0\troot\t_\t_
 2\tchat\tchat\tNOUN\t_\t_\t0\troot\t_\t_
 
@@ -1403,9 +1426,18 @@ fn optional_first_element_matches_inside_a_run() {
 	let corpus = build_corpus(NOUN_RUN);
 	// every noun alone, plus "big house"; dog and the second cat directly follow a noun
 	let expected = vec![(1, 3), (2, 3), (5, 6), (6, 7), (7, 8)];
-	assert_eq!(query_spans(&corpus, r#"[pos="ADJ"]? [pos="NOUN"]"#), expected);
-	assert_eq!(query_spans(&corpus, r#"[pos="ADJ"]* [pos="NOUN"]"#), expected);
-	assert_eq!(query_spans(&corpus, r#"[pos="ADJ"]{0,1} [pos="NOUN"]"#), expected);
+	assert_eq!(
+		query_spans(&corpus, r#"[pos="ADJ"]? [pos="NOUN"]"#),
+		expected
+	);
+	assert_eq!(
+		query_spans(&corpus, r#"[pos="ADJ"]* [pos="NOUN"]"#),
+		expected
+	);
+	assert_eq!(
+		query_spans(&corpus, r#"[pos="ADJ"]{0,1} [pos="NOUN"]"#),
+		expected
+	);
 }
 
 #[test]
@@ -1426,7 +1458,10 @@ fn parenthesized_group_inside_a_sequence() {
 		vec![(0, 3)]
 	);
 	assert_eq!(
-		query_spans(&corpus, r#"([pos="DET"] [pos="ADJ"] | [pos="ADJ"]) [pos="NOUN"]"#),
+		query_spans(
+			&corpus,
+			r#"([pos="DET"] [pos="ADJ"] | [pos="ADJ"]) [pos="NOUN"]"#
+		),
 		vec![(0, 3), (1, 3)]
 	);
 	assert_eq!(
@@ -1448,7 +1483,10 @@ fn label_inside_a_group_is_captured() {
 	let captures = query_captures(&corpus, r#"(a:[pos="DET"] [pos="ADJ"]) b:[pos="NOUN"]"#);
 	assert_eq!(
 		captures,
-		vec![((0, 3), vec![("a".to_string(), (0, 1)), ("b".to_string(), (2, 3))])]
+		vec![(
+			(0, 3),
+			vec![("a".to_string(), (0, 1)), ("b".to_string(), (2, 3))]
+		)]
 	);
 }
 
@@ -1458,9 +1496,18 @@ fn constraint_holds_when_any_binding_satisfies_it() {
 	let query = r#"[]{0,2} a:[pos="NOUN"] []{0,2} b:[pos="NOUN"] :: a.lemma = b.lemma"#;
 	// only cat ... cat satisfies the constraint, reachable from three starts
 	let expected = vec![
-		((3, 8), vec![("a".to_string(), (5, 6)), ("b".to_string(), (7, 8))]),
-		((4, 8), vec![("a".to_string(), (5, 6)), ("b".to_string(), (7, 8))]),
-		((5, 8), vec![("a".to_string(), (5, 6)), ("b".to_string(), (7, 8))]),
+		(
+			(3, 8),
+			vec![("a".to_string(), (5, 6)), ("b".to_string(), (7, 8))],
+		),
+		(
+			(4, 8),
+			vec![("a".to_string(), (5, 6)), ("b".to_string(), (7, 8))],
+		),
+		(
+			(5, 8),
+			vec![("a".to_string(), (5, 6)), ("b".to_string(), (7, 8))],
+		),
 	];
 	for _ in 0..20 {
 		assert_eq!(query_captures(&corpus, query), expected);
@@ -1501,7 +1548,13 @@ fn unmatched_optional_label_is_unbound() {
 	let captures = query_captures(&corpus, r#"a:[pos="ADJ"]? b:[pos="VERB"]"#);
 	assert_eq!(captures, vec![((3, 4), vec![("b".to_string(), (3, 4))])]);
 	// a constraint over an unbound label does not hold
-	assert_eq!(query_count(&corpus, r#"a:[pos="ADJ"]? b:[pos="VERB"] :: a.pos != b.pos"#), 0);
+	assert_eq!(
+		query_count(
+			&corpus,
+			r#"a:[pos="ADJ"]? b:[pos="VERB"] :: a.pos != b.pos"#
+		),
+		0
+	);
 }
 
 #[test]
@@ -1556,7 +1609,9 @@ fn forward_only_layer_is_not_queryable() {
 fn forward_only_layer_is_not_queryable_on_a_corpus_that_does_not_record_them() {
 	use montre_query::QueryError;
 	let path = test_corpus_path();
-	let sentences = ConllUReader::new(Cursor::new(FRENCH_MWT)).read_sentences().unwrap();
+	let sentences = ConllUReader::new(Cursor::new(FRENCH_MWT))
+		.read_sentences()
+		.unwrap();
 	let mut builder = CorpusBuilder::new("test");
 	builder.add_document("test.conllu", sentences);
 	builder.build(&path).unwrap();
@@ -1564,7 +1619,10 @@ fn forward_only_layer_is_not_queryable_on_a_corpus_that_does_not_record_them() {
 	let meta_path = path.join("corpus.json");
 	let mut meta: serde_json::Value =
 		serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
-	meta.as_object_mut().unwrap().remove("forward_only_layers").unwrap();
+	meta.as_object_mut()
+		.unwrap()
+		.remove("forward_only_layers")
+		.unwrap();
 	std::fs::write(&meta_path, meta.to_string()).unwrap();
 
 	let corpus = montre_index::open(&path).unwrap();
@@ -1588,7 +1646,10 @@ fn bound_label_is_preferred_among_equal_spans() {
 	assert_eq!(
 		captures,
 		vec![
-			((0, 2), vec![("a".to_string(), (0, 1)), ("b".to_string(), (1, 2))]),
+			(
+				(0, 2),
+				vec![("a".to_string(), (0, 1)), ("b".to_string(), (1, 2))]
+			),
 			((1, 2), vec![("b".to_string(), (1, 2))]),
 		]
 	);
@@ -1631,7 +1692,10 @@ fn ambiguous_labels_under_a_constraint_stay_bounded() {
 	assert_eq!(captures.len(), expected);
 	assert_eq!(
 		captures[0],
-		((0, 2), vec![("a".to_string(), (0, 1)), ("b".to_string(), (1, 2))])
+		(
+			(0, 2),
+			vec![("a".to_string(), (0, 1)), ("b".to_string(), (1, 2))]
+		)
 	);
 }
 
@@ -1691,7 +1755,11 @@ fn spans_within(
 	let parsed = montre_query::parse(query_str).unwrap();
 	let plan = montre_query::planner::plan(&parsed).unwrap();
 	let results = montre_query::executor::execute_with(&plan, corpus, &limits)?;
-	Ok(results.hits().iter().map(|hit| (hit.span.start, hit.span.end)).collect())
+	Ok(results
+		.hits()
+		.iter()
+		.map(|hit| (hit.span.start, hit.span.end))
+		.collect())
 }
 
 const AMBIGUOUS: &str = r#"[]{0,20} a:[] []{0,20} b:[]"#;
@@ -1708,7 +1776,10 @@ fn constraint_inside_a_labeled_group_is_applied_while_the_group_runs() {
 	let plain = spans_within(&corpus, &format!("{AMBIGUOUS} {SAME_LEMMA}"), TIGHT).unwrap();
 	let grouped = spans_within(&corpus, &format!("g:({AMBIGUOUS}) {SAME_LEMMA}"), TIGHT).unwrap();
 	let once = spans_within(&corpus, &format!("({AMBIGUOUS}){{1}} {SAME_LEMMA}"), TIGHT).unwrap();
-	assert_eq!(plain.len(), (2..=42).map(|length| 600 - length + 1).sum::<usize>());
+	assert_eq!(
+		plain.len(),
+		(2..=42).map(|length| 600 - length + 1).sum::<usize>()
+	);
 	assert_eq!(grouped, plain);
 	assert_eq!(once, plain);
 }
@@ -1720,7 +1791,10 @@ fn enumeration_beyond_the_limit_is_an_error_not_a_partial_result() {
 	let repeated = format!("({AMBIGUOUS}){{1,2}} {SAME_LEMMA}");
 	assert!(matches!(
 		spans_within(&corpus, &repeated, TIGHT),
-		Err(QueryError::LimitExceeded { resource: "intermediate matches", limit: TIGHT })
+		Err(QueryError::LimitExceeded {
+			resource: "intermediate matches",
+			limit: TIGHT
+		})
 	));
 	// nor can an alternation of sequences
 	let alternation = format!("({AMBIGUOUS} | c:[] d:[]) {SAME_LEMMA}");
@@ -1732,7 +1806,10 @@ fn enumeration_beyond_the_limit_is_an_error_not_a_partial_result() {
 	let narrow = r#"([]{0,3} a:[] []{0,3} b:[]){1,2} :: a.lemma = b.lemma"#;
 	let spans = spans_within(&corpus, narrow, u64::MAX).unwrap();
 	// one or two repetitions of 2 to 8 tokens each
-	assert_eq!(spans.len(), (2..=16).map(|length| 600 - length + 1).sum::<usize>());
+	assert_eq!(
+		spans.len(),
+		(2..=16).map(|length| 600 - length + 1).sum::<usize>()
+	);
 }
 
 #[test]
@@ -1746,18 +1823,26 @@ fn work_limit_is_an_error() {
 	let plan = montre_query::planner::plan(&parsed).unwrap();
 	assert!(matches!(
 		montre_query::executor::execute_with(&plan, &corpus, &limits),
-		Err(QueryError::LimitExceeded { resource: "expansions", limit: 1_000 })
+		Err(QueryError::LimitExceeded {
+			resource: "expansions",
+			limit: 1_000
+		})
 	));
 	assert!(matches!(
 		montre_query::executor::execute_count_with(&plan, &corpus, &limits),
-		Err(QueryError::LimitExceeded { resource: "expansions", limit: 1_000 })
+		Err(QueryError::LimitExceeded {
+			resource: "expansions",
+			limit: 1_000
+		})
 	));
 }
 
 #[test]
 fn skipped_optional_labels_do_not_multiply_assignments() {
 	let corpus = uniform_corpus();
-	let labels = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "m", "n", "o", "q", "r"];
+	let labels = [
+		"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "m", "n", "o", "q", "r",
+	];
 	let optional: Vec<String> = labels.iter().map(|label| format!("{label}:[]?")).collect();
 	let constraints: Vec<String> = labels
 		.iter()
@@ -1775,17 +1860,26 @@ fn skipped_optional_label_ends_the_match_only_once_it_cannot_be_bound() {
 	let corpus = uniform_corpus();
 	// a is skipped or bound once: only the bound path can satisfy the constraint
 	let spans = query_spans(&corpus, r#"a:[]? []{0,10} b:[] :: a.lemma = b.lemma"#);
-	assert_eq!(spans.len(), (2..=12).map(|length| 600 - length + 1).sum::<usize>());
+	assert_eq!(
+		spans.len(),
+		(2..=12).map(|length| 600 - length + 1).sum::<usize>()
+	);
 	// a skipped in the first repetition may still be bound in the second
 	let captures = query_captures(&corpus, r#"(a:[]?){2} b:[] :: a.lemma = b.lemma"#);
 	assert_eq!(captures.len(), 599 + 598);
 	assert_eq!(
 		captures[0],
-		((0, 2), vec![("a".to_string(), (0, 1)), ("b".to_string(), (1, 2))])
+		(
+			(0, 2),
+			vec![("a".to_string(), (0, 1)), ("b".to_string(), (1, 2))]
+		)
 	);
 	assert_eq!(
 		captures[1],
-		((0, 3), vec![("a".to_string(), (1, 2)), ("b".to_string(), (2, 3))])
+		(
+			(0, 3),
+			vec![("a".to_string(), (1, 2)), ("b".to_string(), (2, 3))]
+		)
 	);
 }
 
@@ -1847,11 +1941,17 @@ fn group_table_larger_than_the_limit_is_refused() {
 	assert!(expected > 40_000);
 	assert!(matches!(
 		montre_query::executor::execute_with(&plan, &corpus, &limits),
-		Err(QueryError::LimitExceeded { resource: "intermediate matches", limit: 40_000 })
+		Err(QueryError::LimitExceeded {
+			resource: "intermediate matches",
+			limit: 40_000
+		})
 	));
 	assert!(matches!(
 		montre_query::executor::execute_count_with(&plan, &corpus, &limits),
-		Err(QueryError::LimitExceeded { resource: "intermediate matches", limit: 40_000 })
+		Err(QueryError::LimitExceeded {
+			resource: "intermediate matches",
+			limit: 40_000
+		})
 	));
 	let unlimited = Limits::unlimited();
 	let hits = montre_query::executor::execute_with(&plan, &corpus, &unlimited).unwrap();
@@ -1900,7 +2000,11 @@ fn constrained_and_filtered_counts_do_not_build_their_matches() {
 		r#"[]{1,100} within doc:"test.conllu""#,
 		r#"[]{1,100} within component:"test""#,
 	] {
-		assert_eq!(count_within(&corpus, query, &limits).unwrap(), all_spans, "{query}");
+		assert_eq!(
+			count_within(&corpus, query, &limits).unwrap(),
+			all_spans,
+			"{query}"
+		);
 	}
 }
 
@@ -1919,23 +2023,35 @@ fn result_limit_counts_hits_after_filtering() {
 	assert_eq!(run(r#"[pos="NOUN"]"#, &limited(4)).unwrap(), 4);
 	assert!(matches!(
 		run(r#"[pos="NOUN"]"#, &limited(3)),
-		Err(QueryError::LimitExceeded { resource: "results", limit: 3 })
+		Err(QueryError::LimitExceeded {
+			resource: "results",
+			limit: 3
+		})
 	));
 	// 26 spans of one to four tokens, 20 of them inside a sentence: the limit
 	// applies to the hits, not to what the filter drops
 	assert_eq!(run(r#"[]{1,4} within s"#, &limited(20)).unwrap(), 20);
 	assert!(matches!(
 		run(r#"[]{1,4}"#, &limited(20)),
-		Err(QueryError::LimitExceeded { resource: "results", limit: 20 })
+		Err(QueryError::LimitExceeded {
+			resource: "results",
+			limit: 20
+		})
 	));
 	// counting is not limited by the result limit
-	assert_eq!(count_within(&corpus, r#"[]{1,4}"#, &limited(1)).unwrap(), 26);
+	assert_eq!(
+		count_within(&corpus, r#"[]{1,4}"#, &limited(1)).unwrap(),
+		26
+	);
 	// an alternation of sequences is built as a buffer, then its hits are counted
 	let alternation = r#"[pos="DET"] [pos="ADJ"] | [pos="VERB"] [] | [pos="NOUN"]"#;
 	assert_eq!(run(alternation, &limited(6)).unwrap(), 6);
 	assert!(matches!(
 		run(alternation, &limited(5)),
-		Err(QueryError::LimitExceeded { resource: "results", limit: 5 })
+		Err(QueryError::LimitExceeded {
+			resource: "results",
+			limit: 5
+		})
 	));
 }
 
@@ -1949,5 +2065,8 @@ fn constraint_under_a_filter_inside_a_group_still_applies() {
 	assert_eq!(query_spans(&corpus, always), vec![(0, 3)]);
 	let parsed = montre_query::parse(never).unwrap();
 	let plan = montre_query::planner::plan(&parsed).unwrap();
-	assert_eq!(montre_query::executor::execute_count(&plan, &corpus).unwrap(), 0);
+	assert_eq!(
+		montre_query::executor::execute_count(&plan, &corpus).unwrap(),
+		0
+	);
 }

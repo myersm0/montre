@@ -3,21 +3,26 @@ use std::os::raw::c_char;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use montre_ffi::error::*;
-use montre_ffi::strings::*;
-use montre_ffi::corpus::*;
-use montre_ffi::tokens::*;
-use montre_ffi::query::*;
-use montre_ffi::spans::*;
 use montre_ffi::alignment::*;
 use montre_ffi::build::*;
+use montre_ffi::corpus::*;
+use montre_ffi::error::*;
+use montre_ffi::query::*;
+use montre_ffi::spans::*;
+use montre_ffi::strings::*;
+use montre_ffi::tokens::*;
 use montre_ffi::HitList;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 fn temp_path(prefix: &str) -> PathBuf {
 	let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-	std::env::temp_dir().join(format!("montre_ffi_test_{}_{}_{}", std::process::id(), prefix, id))
+	std::env::temp_dir().join(format!(
+		"montre_ffi_test_{}_{}_{}",
+		std::process::id(),
+		prefix,
+		id
+	))
 }
 
 fn cstr(s: &str) -> CString {
@@ -139,9 +144,7 @@ fn single_component_lifecycle() {
 		let output = cstr(output_dir.to_str().unwrap());
 
 		// build
-		let rc = montre_build_directory(
-			name.as_ptr(), input.as_ptr(), output.as_ptr(), 1, 0,
-		);
+		let rc = montre_build_directory(name.as_ptr(), input.as_ptr(), output.as_ptr(), 1, 0);
 		assert_eq!(rc, 1, "build failed: {:?}", read_last_error());
 
 		// open
@@ -207,7 +210,11 @@ fn single_component_lifecycle() {
 
 		// span_containing with null out-params (just need the index)
 		let idx = montre_corpus_span_containing(
-			corpus, sent.as_ptr(), 0, std::ptr::null_mut(), std::ptr::null_mut(),
+			corpus,
+			sent.as_ptr(),
+			0,
+			std::ptr::null_mut(),
+			std::ptr::null_mut(),
 		);
 		assert_eq!(idx, 0);
 
@@ -277,8 +284,14 @@ fn single_component_lifecycle() {
 		let mut offsets: *mut u64 = std::ptr::null_mut();
 		let mut ctx_len: u64 = 0;
 		montre_context_tokens(
-			single_hits, corpus, 1, word.as_ptr(),
-			&mut positions, &mut tokens, &mut offsets, &mut ctx_len,
+			single_hits,
+			corpus,
+			1,
+			word.as_ptr(),
+			&mut positions,
+			&mut tokens,
+			&mut offsets,
+			&mut ctx_len,
 		);
 		// window=1 around "chat" (pos 1): positions 0,1,2 = "Le","chat","dort"
 		assert_eq!(ctx_len, 3);
@@ -447,7 +460,7 @@ fn multi_component_lifecycle() {
 		let edges = montre_corpus_alignment_edges(corpus, align.as_ptr(), &mut edge_count);
 		assert!(!edges.is_null());
 		assert_eq!(edge_count, 2); // 2 sentence pairs
-		// each edge is [src_doc, src_sent, tgt_doc, tgt_sent]
+							 // each edge is [src_doc, src_sent, tgt_doc, tgt_sent]
 		let e0_src_doc = *edges.add(0);
 		let e0_src_sent = *edges.add(1);
 		let e0_tgt_doc = *edges.add(2);
@@ -471,10 +484,18 @@ fn multi_component_lifecycle() {
 		let mut no_align: u64 = 0;
 		let mut projected: u64 = 0;
 		let target_hits = montre_project(
-			corpus, fr_hits, align.as_ptr(),
-			&mut unmapped, &mut no_align, &mut projected,
+			corpus,
+			fr_hits,
+			align.as_ptr(),
+			&mut unmapped,
+			&mut no_align,
+			&mut projected,
 		);
-		assert!(!target_hits.is_null(), "projection failed: {:?}", read_last_error());
+		assert!(
+			!target_hits.is_null(),
+			"projection failed: {:?}",
+			read_last_error()
+		);
 		assert_eq!(projected, 1);
 		assert_eq!(unmapped, 0);
 		assert_eq!(montre_hitlist_len(target_hits), 1);
@@ -490,8 +511,16 @@ fn multi_component_lifecycle() {
 		// projected hits should have UNPOPULATED context before populate_context
 		let doc_idx = montre_hit_document_index(target_hits, 0);
 		let sent_idx = montre_hit_sentence_index(target_hits, 0);
-		assert_eq!(doc_idx, u32::MAX, "projected hit should have UNPOPULATED document_index");
-		assert_eq!(sent_idx, u32::MAX, "projected hit should have UNPOPULATED sentence_index");
+		assert_eq!(
+			doc_idx,
+			u32::MAX,
+			"projected hit should have UNPOPULATED document_index"
+		);
+		assert_eq!(
+			sent_idx,
+			u32::MAX,
+			"projected hit should have UNPOPULATED sentence_index"
+		);
 
 		// populate_context fills in real indices
 		montre_hitlist_populate_context(target_hits, corpus);
@@ -504,24 +533,31 @@ fn multi_component_lifecycle() {
 		// components are sorted: en=0, fr=1
 		let mut span_start: u64 = 0;
 		let mut span_end: u64 = 0;
-		let global_sent = montre_corpus_sentence_span(
-			corpus, 1, 0, 0, &mut span_start, &mut span_end,
-		);
+		let global_sent =
+			montre_corpus_sentence_span(corpus, 1, 0, 0, &mut span_start, &mut span_end);
 		assert!(global_sent >= 0, "sentence_span failed");
 		assert_eq!(span_end - span_start, 4); // "Le chat dort ." = 4 tokens
 
 		// sentence_span: fr doc 0, sentence 1
-		let global_sent_1 = montre_corpus_sentence_span(
-			corpus, 1, 0, 1, &mut span_start, &mut span_end,
-		);
+		let global_sent_1 =
+			montre_corpus_sentence_span(corpus, 1, 0, 1, &mut span_start, &mut span_end);
 		assert!(global_sent_1 >= 0);
 		assert_eq!(span_end - span_start, 5); // "La vieille maison dort ." = 5 tokens
 		assert_ne!(global_sent, global_sent_1);
 
 		// sentence_span: out of bounds
-		assert_eq!(montre_corpus_sentence_span(corpus, 1, 0, 99, &mut span_start, &mut span_end), -1);
-		assert_eq!(montre_corpus_sentence_span(corpus, 99, 0, 0, &mut span_start, &mut span_end), -1);
-		assert_eq!(montre_corpus_sentence_span(corpus, 1, 99, 0, &mut span_start, &mut span_end), -1);
+		assert_eq!(
+			montre_corpus_sentence_span(corpus, 1, 0, 99, &mut span_start, &mut span_end),
+			-1
+		);
+		assert_eq!(
+			montre_corpus_sentence_span(corpus, 99, 0, 0, &mut span_start, &mut span_end),
+			-1
+		);
+		assert_eq!(
+			montre_corpus_sentence_span(corpus, 1, 99, 0, &mut span_start, &mut span_end),
+			-1
+		);
 
 		// alignment_coverage: fr side of "sentence" alignment
 		let mut cov_doc_indices: *mut u32 = std::ptr::null_mut();
@@ -529,8 +565,12 @@ fn multi_component_lifecycle() {
 		let mut cov_total: *mut u32 = std::ptr::null_mut();
 		let mut cov_len: u64 = 0;
 		let rc = montre_corpus_alignment_coverage(
-			corpus, align.as_ptr(),
-			&mut cov_doc_indices, &mut cov_aligned, &mut cov_total, &mut cov_len,
+			corpus,
+			align.as_ptr(),
+			&mut cov_doc_indices,
+			&mut cov_aligned,
+			&mut cov_total,
+			&mut cov_len,
 		);
 		assert_eq!(rc, 1, "alignment_coverage failed: {:?}", read_last_error());
 		assert_eq!(cov_len, 1); // 1 document in fr component
@@ -573,9 +613,10 @@ fn error_handling() {
 		assert_eq!(montre_query_count(std::ptr::null(), std::ptr::null()), -1);
 
 		// build with null args
-		assert_eq!(montre_build_directory(
-			std::ptr::null(), std::ptr::null(), std::ptr::null(), 0, 0,
-		), 0);
+		assert_eq!(
+			montre_build_directory(std::ptr::null(), std::ptr::null(), std::ptr::null(), 0, 0,),
+			0
+		);
 	}
 }
 
@@ -604,7 +645,9 @@ unsafe fn open_single_component() -> *mut montre_index::Corpus {
 
 unsafe fn starts(hits: *mut HitList) -> Vec<u64> {
 	assert!(!hits.is_null(), "query failed: {:?}", read_last_error());
-	let starts = (0..montre_hitlist_len(hits)).map(|i| montre_hit_start(hits, i)).collect();
+	let starts = (0..montre_hitlist_len(hits))
+		.map(|i| montre_hit_start(hits, i))
+		.collect();
 	montre_hitlist_free(hits);
 	starts
 }
@@ -617,7 +660,11 @@ fn default_limits_are_the_engine_defaults() {
 		assert_eq!(intermediate, 10_000_000);
 		assert_eq!(expansions, u64::MAX);
 		assert_eq!(results, u64::MAX);
-		montre_default_limits(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+		montre_default_limits(
+			std::ptr::null_mut(),
+			std::ptr::null_mut(),
+			std::ptr::null_mut(),
+		);
 	}
 }
 
@@ -639,7 +686,9 @@ fn query_over_a_limit_sets_the_limit_kind() {
 			-1
 		);
 		assert_eq!(montre_last_error_kind(), KIND_LIMIT_EXCEEDED);
-		assert!(read_last_error().unwrap().contains("limit of 5 intermediate matches"));
+		assert!(read_last_error()
+			.unwrap()
+			.contains("limit of 5 intermediate matches"));
 
 		let refused = montre_query_with_limits(corpus, ambiguous.as_ptr(), unlimited, unlimited, 2);
 		assert!(refused.is_null());
@@ -673,7 +722,13 @@ fn query_over_a_limit_sets_the_limit_kind() {
 		let expected = starts(montre_query(corpus, ambiguous.as_ptr()));
 		assert_eq!(expected.len() as i64, total);
 		assert_eq!(
-			starts(montre_query_with_limits(corpus, ambiguous.as_ptr(), unlimited, unlimited, unlimited)),
+			starts(montre_query_with_limits(
+				corpus,
+				ambiguous.as_ptr(),
+				unlimited,
+				unlimited,
+				unlimited
+			)),
 			expected
 		);
 		assert_eq!(montre_last_error_kind(), KIND_NONE);
@@ -703,7 +758,10 @@ fn query_over_a_limit_sets_the_limit_kind() {
 			),
 			total
 		);
-		assert_eq!(montre_query_count_in_component(corpus, ambiguous.as_ptr(), component.as_ptr()), total);
+		assert_eq!(
+			montre_query_count_in_component(corpus, ambiguous.as_ptr(), component.as_ptr()),
+			total
+		);
 
 		montre_corpus_close(corpus);
 	}
@@ -733,7 +791,10 @@ fn other_errors_have_their_own_kinds() {
 
 		let any = cstr("[]");
 		let nowhere = cstr("nowhere");
-		assert_eq!(montre_query_count_in_component(corpus, any.as_ptr(), nowhere.as_ptr()), -1);
+		assert_eq!(
+			montre_query_count_in_component(corpus, any.as_ptr(), nowhere.as_ptr()),
+			-1
+		);
 		assert_eq!(montre_last_error_kind(), KIND_QUERY_INVALID);
 
 		assert_eq!(montre_query_count(std::ptr::null(), any.as_ptr()), -1);

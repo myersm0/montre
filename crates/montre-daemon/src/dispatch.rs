@@ -7,12 +7,10 @@ use std::thread;
 
 use crate::handlers::{alignment, corpus, coupler, daemon, query, session, subscription, text};
 use crate::protocol::error_codes;
-use crate::protocol::{
-	ProcessId, ProtocolError, PublishInterestParams, RegisterParams,
-};
+use crate::protocol::{ProcessId, ProtocolError, PublishInterestParams, RegisterParams};
+use crate::shutdown::ShutdownCoordinator;
 use crate::state::{Command, Outbound};
 use crate::CorpusHandle;
-use crate::shutdown::ShutdownCoordinator;
 
 pub(crate) const MAX_PAYLOAD_SIZE: usize = 16 * 1024 * 1024;
 pub(crate) const OUTBOUND_QUEUE_DEPTH: usize = 256;
@@ -38,7 +36,11 @@ pub(crate) fn write_frame<W: Write>(writer: &mut W, payload: &[u8]) -> io::Resul
 	if payload.len() > MAX_PAYLOAD_SIZE {
 		return Err(io::Error::new(
 			io::ErrorKind::InvalidInput,
-			format!("payload size {} exceeds maximum {}", payload.len(), MAX_PAYLOAD_SIZE),
+			format!(
+				"payload size {} exceeds maximum {}",
+				payload.len(),
+				MAX_PAYLOAD_SIZE
+			),
 		));
 	}
 	let len = u32::try_from(payload.len()).expect("checked above");
@@ -90,7 +92,10 @@ pub(crate) fn parse_inbound(payload: &[u8]) -> Result<Inbound, ProtocolError> {
 	}
 }
 
-pub(crate) fn build_response(id: serde_json::Value, result: serde_json::Value) -> serde_json::Value {
+pub(crate) fn build_response(
+	id: serde_json::Value,
+	result: serde_json::Value,
+) -> serde_json::Value {
 	serde_json::json!({
 		"jsonrpc": "2.0",
 		"id": id,
@@ -120,8 +125,8 @@ pub(crate) fn parse_params<T: serde::de::DeserializeOwned>(
 	method: &str,
 	params: Option<serde_json::Value>,
 ) -> Result<T, ProtocolError> {
-	let raw = params
-		.ok_or_else(|| ProtocolError::new(-32602, format!("{} requires params", method)))?;
+	let raw =
+		params.ok_or_else(|| ProtocolError::new(-32602, format!("{} requires params", method)))?;
 	serde_json::from_value(raw)
 		.map_err(|e| ProtocolError::new(-32602, format!("invalid params: {}", e)))
 }
@@ -200,11 +205,7 @@ pub(crate) fn run_listener(
 	Ok(())
 }
 
-fn run_connection(
-	stream: UnixStream,
-	state_tx: Sender<Command>,
-	handle: Arc<CorpusHandle>,
-) {
+fn run_connection(stream: UnixStream, state_tx: Sender<Command>, handle: Arc<CorpusHandle>) {
 	let read_stream = match stream.try_clone() {
 		Ok(s) => s,
 		Err(e) => {
@@ -412,11 +413,7 @@ pub(crate) fn dispatch_request(
 	}
 }
 
-fn dispatch_notification(
-	method: &str,
-	params: Option<serde_json::Value>,
-	ctx: &RpcContext,
-) {
+fn dispatch_notification(method: &str, params: Option<serde_json::Value>, ctx: &RpcContext) {
 	let Some(process_id) = ctx.process_id else {
 		tracing::warn!(method = method, "notification before registration; ignored");
 		return;
@@ -436,10 +433,16 @@ fn dispatch_notification(
 			};
 			if ctx
 				.state_tx
-				.send(Command::PublishInterest { process_id, interest: parsed.interest })
+				.send(Command::PublishInterest {
+					process_id,
+					interest: parsed.interest,
+				})
 				.is_err()
 			{
-				tracing::warn!(method = method, "state dispatch failed; notification dropped");
+				tracing::warn!(
+					method = method,
+					"state dispatch failed; notification dropped"
+				);
 			}
 		}
 		_ => {
@@ -494,8 +497,8 @@ pub(crate) mod test_support {
 		let (_keep, path, canonical) = FIXTURE.get_or_init(|| {
 			let temp = TempDir::new().expect("tempdir");
 			let out = temp.path().join("corpus");
-			let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
-				.join("../../testdata/parallel/corpus.toml");
+			let manifest =
+				Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/parallel/corpus.toml");
 			montre_build::MultiCorpusBuilder::from_manifest(&manifest)
 				.expect("manifest load")
 				.build(&out)
@@ -561,7 +564,11 @@ pub(crate) mod test_support {
 		F: FnOnce(&mut RpcContext),
 	{
 		let handle = make_handle();
-		let st = state::State::new(1, Arc::clone(&handle), crate::shutdown::ShutdownCoordinator::dummy());
+		let st = state::State::new(
+			1,
+			Arc::clone(&handle),
+			crate::shutdown::ShutdownCoordinator::dummy(),
+		);
 		let (state_tx, state_rx) = channel();
 		let state_handle = thread::spawn(move || state::run(st, state_rx));
 		{
@@ -578,7 +585,11 @@ pub(crate) mod test_support {
 		F: FnOnce(Sender<Command>, Arc<CorpusHandle>),
 	{
 		let handle = make_handle();
-		let st = state::State::new(1, Arc::clone(&handle), crate::shutdown::ShutdownCoordinator::dummy());
+		let st = state::State::new(
+			1,
+			Arc::clone(&handle),
+			crate::shutdown::ShutdownCoordinator::dummy(),
+		);
 		let (state_tx, state_rx) = channel();
 		let state_handle = thread::spawn(move || state::run(st, state_rx));
 		body(state_tx.clone(), handle);
@@ -755,10 +766,7 @@ mod tests {
 
 	#[test]
 	fn build_error_response_omits_data_when_none() {
-		let response = build_error_response(
-			serde_json::json!(7),
-			ProtocolError::new(1234, "boom"),
-		);
+		let response = build_error_response(serde_json::json!(7), ProtocolError::new(1234, "boom"));
 		assert_eq!(response["error"]["code"], 1234);
 		assert_eq!(response["error"]["message"], "boom");
 		assert!(response["error"].get("data").is_none());
@@ -776,7 +784,11 @@ mod tests {
 	#[test]
 	fn dispatch_register_round_trip() {
 		let handle = make_handle();
-		let st = state::State::new(7, Arc::clone(&handle), crate::shutdown::ShutdownCoordinator::dummy());
+		let st = state::State::new(
+			7,
+			Arc::clone(&handle),
+			crate::shutdown::ShutdownCoordinator::dummy(),
+		);
 		let (state_tx, state_rx) = channel();
 		let state_handle = thread::spawn(move || state::run(st, state_rx));
 
@@ -802,7 +814,11 @@ mod tests {
 	#[test]
 	fn dispatch_rejects_pre_register_methods() {
 		let handle = make_handle();
-		let st = state::State::new(1, Arc::clone(&handle), crate::shutdown::ShutdownCoordinator::dummy());
+		let st = state::State::new(
+			1,
+			Arc::clone(&handle),
+			crate::shutdown::ShutdownCoordinator::dummy(),
+		);
 		let (state_tx, state_rx) = channel();
 		let state_handle = thread::spawn(move || state::run(st, state_rx));
 
@@ -821,7 +837,11 @@ mod tests {
 	#[test]
 	fn dispatch_unknown_method_returns_method_not_found() {
 		let handle = make_handle();
-		let st = state::State::new(1, Arc::clone(&handle), crate::shutdown::ShutdownCoordinator::dummy());
+		let st = state::State::new(
+			1,
+			Arc::clone(&handle),
+			crate::shutdown::ShutdownCoordinator::dummy(),
+		);
 		let (state_tx, state_rx) = channel();
 		let state_handle = thread::spawn(move || state::run(st, state_rx));
 
@@ -846,7 +866,11 @@ mod tests {
 	#[test]
 	fn dispatch_rejects_register_after_unregister() {
 		let handle = make_handle();
-		let st = state::State::new(1, Arc::clone(&handle), crate::shutdown::ShutdownCoordinator::dummy());
+		let st = state::State::new(
+			1,
+			Arc::clone(&handle),
+			crate::shutdown::ShutdownCoordinator::dummy(),
+		);
 		let (state_tx, state_rx) = channel();
 		let state_handle = thread::spawn(move || state::run(st, state_rx));
 
@@ -864,13 +888,22 @@ mod tests {
 			assert!(ctx.ever_registered);
 
 			dispatch_request("session.unregister", None, &mut ctx).expect("unregister");
-			assert!(ctx.process_id.is_none(), "unregister should clear process_id");
-			assert!(ctx.ever_registered, "ever_registered must remain set after unregister");
+			assert!(
+				ctx.process_id.is_none(),
+				"unregister should clear process_id"
+			);
+			assert!(
+				ctx.ever_registered,
+				"ever_registered must remain set after unregister"
+			);
 
 			let err = dispatch_request("session.register", Some(params), &mut ctx)
 				.expect_err("second register should be rejected");
 			assert_eq!(err.code, -32600);
-			assert!(ctx.process_id.is_none(), "rejected register must not allocate a new process_id");
+			assert!(
+				ctx.process_id.is_none(),
+				"rejected register must not allocate a new process_id"
+			);
 		}
 
 		drop(state_tx);
@@ -889,7 +922,10 @@ mod tests {
 		});
 		dispatch_notification("session.publish_interest", Some(params), &ctx);
 
-		assert!(state_rx.try_recv().is_err(), "no command should reach state when unregistered");
+		assert!(
+			state_rx.try_recv().is_err(),
+			"no command should reach state when unregistered"
+		);
 	}
 
 	#[test]
@@ -902,7 +938,10 @@ mod tests {
 
 		dispatch_notification("session.totally_bogus", Some(serde_json::json!({})), &ctx);
 
-		assert!(state_rx.try_recv().is_err(), "no command should be dispatched for unknown method");
+		assert!(
+			state_rx.try_recv().is_err(),
+			"no command should be dispatched for unknown method"
+		);
 	}
 
 	#[test]
@@ -939,10 +978,8 @@ mod tests {
 				.expect("coupler.create");
 			let coupler_id = reply["coupler_id"].as_u64().expect("coupler_id");
 
-			let source_doc = crate::dispatch::test_support::find_doc_index(
-				&handle.corpus,
-				"la_maison",
-			);
+			let source_doc =
+				crate::dispatch::test_support::find_doc_index(&handle.corpus, "la_maison");
 			let sent_params = serde_json::json!({ "doc": source_doc, "sent": 0 });
 			let sent_reply = dispatch_request("text.sentence", Some(sent_params), &mut master_ctx)
 				.expect("text.sentence");
@@ -951,7 +988,11 @@ mod tests {
 			let publish_params = serde_json::json!({
 				"interest": { "type": "position", "doc": source_doc, "position": position }
 			});
-			dispatch_notification("session.publish_interest", Some(publish_params), &master_ctx);
+			dispatch_notification(
+				"session.publish_interest",
+				Some(publish_params),
+				&master_ctx,
+			);
 
 			let payload = follower_outbound
 				.recv_timeout(Duration::from_millis(500))
@@ -999,14 +1040,10 @@ mod tests {
 				.expect("coupler.create");
 			let coupler_id = reply["coupler_id"].as_u64().expect("coupler_id");
 
-			let source_doc = crate::dispatch::test_support::find_doc_index(
-				&handle.corpus,
-				"la_maison",
-			);
-			let target_doc = crate::dispatch::test_support::find_doc_index(
-				&handle.corpus,
-				"the_house",
-			);
+			let source_doc =
+				crate::dispatch::test_support::find_doc_index(&handle.corpus, "la_maison");
+			let target_doc =
+				crate::dispatch::test_support::find_doc_index(&handle.corpus, "the_house");
 
 			let sent_params = serde_json::json!({ "doc": source_doc, "sent": 0 });
 			let sent_reply = dispatch_request("text.sentence", Some(sent_params), &mut master_ctx)
@@ -1025,12 +1062,19 @@ mod tests {
 				.as_array()
 				.expect("targets array")
 				.len();
-			assert!(expected_count > 0, "test corpus must align this sentence to at least one target");
+			assert!(
+				expected_count > 0,
+				"test corpus must align this sentence to at least one target"
+			);
 
 			let publish_params = serde_json::json!({
 				"interest": { "type": "sentence", "doc": source_doc, "sent": 0 }
 			});
-			dispatch_notification("session.publish_interest", Some(publish_params), &master_ctx);
+			dispatch_notification(
+				"session.publish_interest",
+				Some(publish_params),
+				&master_ctx,
+			);
 
 			let mut received = Vec::new();
 			let first = follower_outbound
@@ -1089,17 +1133,21 @@ mod tests {
 			dispatch_request("coupler.create", Some(coupler_params), &mut master_ctx)
 				.expect("coupler.create");
 
-			let source_doc = crate::dispatch::test_support::find_doc_index(
-				&handle.corpus,
-				"la_maison",
-			);
+			let source_doc =
+				crate::dispatch::test_support::find_doc_index(&handle.corpus, "la_maison");
 			let publish_params = serde_json::json!({
 				"interest": { "type": "position", "doc": source_doc, "position": 0 }
 			});
-			dispatch_notification("session.publish_interest", Some(publish_params), &master_ctx);
+			dispatch_notification(
+				"session.publish_interest",
+				Some(publish_params),
+				&master_ctx,
+			);
 
 			assert!(
-				follower_outbound.recv_timeout(Duration::from_millis(100)).is_err(),
+				follower_outbound
+					.recv_timeout(Duration::from_millis(100))
+					.is_err(),
 				"follower must not receive a coupler_update for an undeclared interest kind",
 			);
 

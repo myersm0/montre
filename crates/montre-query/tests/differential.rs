@@ -31,7 +31,7 @@ use montre_query::ast::{
 	CmpOp, Constraint, ConstraintOp, ConstraintValue, GlobalConstraint, Query,
 };
 use proptest::prelude::*;
-use proptest::test_runner::{TestRunner, contextualize_config};
+use proptest::test_runner::{contextualize_config, TestRunner};
 
 type Binding = BTreeMap<String, (u64, u64)>;
 type Outcome = (u64, Binding);
@@ -76,9 +76,9 @@ impl Reference<'_> {
 					reached = reached
 						.iter()
 						.flat_map(|(position, binding)| {
-							self.outcomes(part, *position, limit).into_iter().map(
-								|(end, added)| (end, merged(binding, &added)),
-							)
+							self.outcomes(part, *position, limit)
+								.into_iter()
+								.map(|(end, added)| (end, merged(binding, &added)))
 						})
 						.collect();
 				}
@@ -90,7 +90,9 @@ impl Reference<'_> {
 					Query::Capture { name, inner } => (Some(name), inner.as_ref()),
 					other => (None, other),
 				};
-				let most = max.map_or(limit - start + 1, u64::from).min(limit - start + 1);
+				let most = max
+					.map_or(limit - start + 1, u64::from)
+					.min(limit - start + 1);
 				let mut results = BTreeSet::new();
 				let mut frontier: BTreeSet<Outcome> = BTreeSet::from([(start, Binding::new())]);
 				if *min == 0 {
@@ -183,34 +185,43 @@ impl Reference<'_> {
 		};
 		match constraint {
 			GlobalConstraint::Eq { left, right } => {
-				match (attribute(&left.label, &left.attr), attribute(&right.label, &right.attr)) {
+				match (
+					attribute(&left.label, &left.attr),
+					attribute(&right.label, &right.attr),
+				) {
 					(Some(left), Some(right)) => left == right,
 					_ => false,
 				}
 			}
 			GlobalConstraint::Ne { left, right } => {
-				match (attribute(&left.label, &left.attr), attribute(&right.label, &right.attr)) {
+				match (
+					attribute(&left.label, &left.attr),
+					attribute(&right.label, &right.attr),
+				) {
 					(Some(left), Some(right)) => left != right,
 					_ => false,
 				}
 			}
-			GlobalConstraint::Distance { left, right, op, value } => {
-				match (binding.get(left), binding.get(right)) {
-					(Some(left), Some(right)) => {
-						let distance = right.0.saturating_sub(left.1);
-						let target = u64::from(*value);
-						match op {
-							CmpOp::Ge => distance >= target,
-							CmpOp::Gt => distance > target,
-							CmpOp::Le => distance <= target,
-							CmpOp::Lt => distance < target,
-							CmpOp::Eq => distance == target,
-							CmpOp::Ne => distance != target,
-						}
+			GlobalConstraint::Distance {
+				left,
+				right,
+				op,
+				value,
+			} => match (binding.get(left), binding.get(right)) {
+				(Some(left), Some(right)) => {
+					let distance = right.0.saturating_sub(left.1);
+					let target = u64::from(*value);
+					match op {
+						CmpOp::Ge => distance >= target,
+						CmpOp::Gt => distance > target,
+						CmpOp::Le => distance <= target,
+						CmpOp::Lt => distance < target,
+						CmpOp::Eq => distance == target,
+						CmpOp::Ne => distance != target,
 					}
-					_ => false,
 				}
-			}
+				_ => false,
+			},
 		}
 	}
 }
@@ -238,7 +249,9 @@ fn labels_in_query_order(query: &Query, labels: &mut Vec<String>) {
 			labels_in_query_order(inner, labels);
 		}
 		Query::Sequence(parts) | Query::Or(parts) => {
-			parts.iter().for_each(|part| labels_in_query_order(part, labels));
+			parts
+				.iter()
+				.for_each(|part| labels_in_query_order(part, labels));
 		}
 		Query::Repetition { inner, .. }
 		| Query::Within { inner, .. }
@@ -313,7 +326,9 @@ fn build(shape: &CorpusShape) -> Corpus {
 				rows + "\n"
 			})
 			.collect();
-		let sentences = ConllUReader::new(Cursor::new(conllu)).read_sentences().unwrap();
+		let sentences = ConllUReader::new(Cursor::new(conllu))
+			.read_sentences()
+			.unwrap();
 		builder.add_document(format!("d{index}"), sentences);
 	}
 	builder.build(&path).unwrap();
@@ -611,7 +626,12 @@ fn check(corpus: &Corpus, text: &str) -> Result<(), TestCaseError> {
 		);
 	}
 
-	prop_assert_eq!(&executed(corpus, &query), &reported, "repeat run of {}", text);
+	prop_assert_eq!(
+		&executed(corpus, &query),
+		&reported,
+		"repeat run of {}",
+		text
+	);
 
 	let plan = montre_query::planner::plan(&query).unwrap();
 	let counted = montre_query::executor::execute_count(&plan, corpus).unwrap();
@@ -669,7 +689,12 @@ fn check_within_filters(corpus: &Corpus, shape: &QueryShape) -> Result<(), TestC
 		restricted_text,
 		text
 	);
-	prop_assert_eq!(counted(corpus, &restricted), expected.len(), "count for {}", restricted_text);
+	prop_assert_eq!(
+		counted(corpus, &restricted),
+		expected.len(),
+		"count for {}",
+		restricted_text
+	);
 	Ok(())
 }
 

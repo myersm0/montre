@@ -42,9 +42,10 @@ impl MappedSpans {
 
 		let version = u32::from_ne_bytes(buf[4..8].try_into().unwrap());
 		if version != FORMAT_VERSION {
-			return Err(IndexError::Format(
-				format!("spans format version {}, expected {}", version, FORMAT_VERSION),
-			));
+			return Err(IndexError::Format(format!(
+				"spans format version {}, expected {}",
+				version, FORMAT_VERSION
+			)));
 		}
 
 		let bom = u32::from_ne_bytes(buf[8..12].try_into().unwrap());
@@ -89,10 +90,17 @@ impl MappedSpans {
 				return Err(IndexError::Format("misaligned span data".into()));
 			}
 
-			layers.push(LayerDirectory { name, data_offset, span_count });
+			layers.push(LayerDirectory {
+				name,
+				data_offset,
+				span_count,
+			});
 		}
 
-		Ok(Self { _mmap: mmap, layers })
+		Ok(Self {
+			_mmap: mmap,
+			layers,
+		})
 	}
 
 	fn layer_spans(&self, entry: &LayerDirectory) -> &[Span] {
@@ -327,10 +335,7 @@ mod tests {
 			store.spans("sentence").unwrap(),
 			original.spans("sentence").unwrap(),
 		);
-		assert_eq!(
-			store.containing("sentence", 5),
-			Some(&Span::new(5, 12)),
-		);
+		assert_eq!(store.containing("sentence", 5), Some(&Span::new(5, 12)),);
 	}
 
 	#[test]
@@ -355,8 +360,8 @@ mod tests {
 #[cfg(test)]
 mod proptests {
 	use super::*;
-	use proptest::prelude::*;
 	use proptest::collection::vec as pvec;
+	use proptest::prelude::*;
 
 	fn sorted_spans_strategy() -> impl Strategy<Value = Vec<Span>> {
 		pvec(1u64..100, 0..20).prop_map(|lengths| {

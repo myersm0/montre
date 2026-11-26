@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
-use montre_core::{Span, UnitId, span_containing};
+use montre_core::{span_containing, Span, UnitId};
 use montre_index::{ComponentMeta, Corpus, ForwardIndex, InvertedIndex, SpanIndex};
 use rayon::prelude::*;
 use roaring::RoaringBitmap;
@@ -10,8 +10,8 @@ use crate::ast::{CmpOp, GlobalConstraint, LabelAttr};
 use crate::budget::{Budget, Ledger, Limits, Output};
 use crate::planner::{PlanNode, QueryPlan, SequenceStep};
 use crate::sequence::{
-	Bindings, Keep, LabelId, Match, Matcher, Run, Sequence, Slot, Slots, Step, CHARGE_STRIDE,
-	MAX_QUANTIFIER, SHORT_REPETITION, UNBOUND, runs_from_bitmap,
+	runs_from_bitmap, Bindings, Keep, LabelId, Match, Matcher, Run, Sequence, Slot, Slots, Step,
+	CHARGE_STRIDE, MAX_QUANTIFIER, SHORT_REPETITION, UNBOUND,
 };
 use crate::validate::validate;
 use crate::{QueryError, Result};
@@ -200,7 +200,13 @@ impl<'a> Context<'a> {
 		}
 
 		if let PlanNode::SequenceScan { steps } = core {
-			return self.sequence_matches(steps, Bindings::Canonical, &checks, Output::Final, &keep);
+			return self.sequence_matches(
+				steps,
+				Bindings::Canonical,
+				&checks,
+				Output::Final,
+				&keep,
+			);
 		}
 
 		let built = Ledger::new(&self.budget);
@@ -215,7 +221,9 @@ impl<'a> Context<'a> {
 		let token_count = self.corpus.token_count() as usize;
 		match root {
 			PlanNode::ScanLiteral { layer, value } => {
-				return Ok(inverted.get(layer, value).map_or(0, |bitmap| bitmap.len() as usize));
+				return Ok(inverted
+					.get(layer, value)
+					.map_or(0, |bitmap| bitmap.len() as usize));
 			}
 			PlanNode::ScanAll => return Ok(token_count),
 			PlanNode::Difference { base, subtract } => {
@@ -262,7 +270,10 @@ impl<'a> Context<'a> {
 
 		let built = Ledger::new(&self.budget);
 		let found = self.matches(core, Bindings::Canonical, &[], &built)?;
-		Ok(found.iter().filter(|found| keep(found.start, found.end)).count())
+		Ok(found
+			.iter()
+			.filter(|found| keep(found.start, found.end))
+			.count())
 	}
 
 	// Split off the span, component and document filters above `root`, and a
@@ -282,7 +293,10 @@ impl<'a> Context<'a> {
 				PlanNode::FilterByComponent { inner, components } => {
 					let document_count = self.documents().len();
 					let mut allowed = vec![false; document_count];
-					for component in components.iter().filter_map(|name| self.corpus.component(name)) {
+					for component in components
+						.iter()
+						.filter_map(|name| self.corpus.component(name))
+					{
 						let (first, end) = component.document_range;
 						allowed[first.min(document_count)..end.min(document_count)].fill(true);
 					}
@@ -299,7 +313,9 @@ impl<'a> Context<'a> {
 					filters.push(Filter::Documents(allowed));
 					core = inner;
 				}
-				PlanNode::GlobalConstraintFilter { inner, constraints } if applies_checks(inner) => {
+				PlanNode::GlobalConstraintFilter { inner, constraints }
+					if applies_checks(inner) =>
+				{
 					checks = self.compile(constraints);
 					core = inner;
 				}
@@ -352,9 +368,13 @@ impl<'a> Context<'a> {
 				Ok(deduplicated(matches, bindings))
 			}
 
-			PlanNode::SequenceScan { steps } => {
-				self.sequence_matches(steps, bindings, checks, Output::Buffered(ledger), &|_, _| true)
-			}
+			PlanNode::SequenceScan { steps } => self.sequence_matches(
+				steps,
+				bindings,
+				checks,
+				Output::Buffered(ledger),
+				&|_, _| true,
+			),
 
 			PlanNode::FilterBySpan { .. }
 			| PlanNode::FilterByComponent { .. }
@@ -364,14 +384,22 @@ impl<'a> Context<'a> {
 				let checks: Vec<Check> = checks.iter().cloned().chain(own).collect();
 				let keep = |start: u64, end: u64| self.accepts(&filters, start, end);
 				if let PlanNode::SequenceScan { steps } = core {
-					return self.sequence_matches(steps, bindings, &checks, Output::Buffered(ledger), &keep);
+					return self.sequence_matches(
+						steps,
+						bindings,
+						&checks,
+						Output::Buffered(ledger),
+						&keep,
+					);
 				}
 				let mut matches = self.matches(core, bindings, &checks, ledger)?;
 				matches.retain(|found| keep(found.start, found.end));
 				Ok(matches)
 			}
 
-			PlanNode::ProjectAlignment { inner, alignment } => self.projected(inner, alignment, ledger),
+			PlanNode::ProjectAlignment { inner, alignment } => {
+				self.projected(inner, alignment, ledger)
+			}
 
 			PlanNode::GlobalConstraintFilter { inner, constraints } => {
 				let own = self.compile(constraints);
@@ -407,7 +435,9 @@ impl<'a> Context<'a> {
 
 			PlanNode::ScanRegex { layer, pattern } => {
 				let regex = regex::Regex::new(pattern)?;
-				Ok(Cow::Owned(inverted.positions_where(layer, move |value| regex.is_match(value))))
+				Ok(Cow::Owned(inverted.positions_where(layer, move |value| {
+					regex.is_match(value)
+				})))
 			}
 
 			PlanNode::ScanAll => {
@@ -502,7 +532,10 @@ impl<'a> Context<'a> {
 	fn declared_by(&self, step: &SequenceStep) -> Vec<LabelId> {
 		let mut names: Vec<String> = step.label.iter().cloned().collect();
 		step.node.collect_labels(&mut names);
-		names.iter().filter_map(|name| self.label_id(name)).collect()
+		names
+			.iter()
+			.filter_map(|name| self.label_id(name))
+			.collect()
 	}
 
 	// The sub-matches of a group step. A constraint whose labels all lie inside
@@ -518,7 +551,10 @@ impl<'a> Context<'a> {
 		// the step's own label spans the whole group and is bound outside it
 		let mut names = Vec::new();
 		step.node.collect_labels(&mut names);
-		let inside: Vec<LabelId> = names.iter().filter_map(|name| self.label_id(name)).collect();
+		let inside: Vec<LabelId> = names
+			.iter()
+			.filter_map(|name| self.label_id(name))
+			.collect();
 		let unrepeated = step.min == 1 && step.max == Some(1);
 		let settled_inside = |check: &Check| {
 			unrepeated
@@ -570,7 +606,8 @@ impl<'a> Context<'a> {
 
 	// targets are charged to `ledger` as they are found
 	fn projected(&self, inner: &PlanNode, alignment: &str, ledger: &Ledger) -> Result<Vec<Match>> {
-		let missing = |what: &str, name: &str| QueryError::Execution(format!("{what} not found: {name}"));
+		let missing =
+			|what: &str, name: &str| QueryError::Execution(format!("{what} not found: {name}"));
 		let corpus = self.corpus;
 		let edges = corpus
 			.alignment_edges(alignment)
@@ -616,7 +653,11 @@ impl<'a> Context<'a> {
 					target_units,
 					target_component,
 				) {
-					projected.push(Match::unlabeled(target.start, target.end, self.labels.len()));
+					projected.push(Match::unlabeled(
+						target.start,
+						target.end,
+						self.labels.len(),
+					));
 				}
 				if projected.len() - charged >= CHARGE_STRIDE {
 					ledger.hold(self.cost(projected.len() - charged))?;
@@ -647,7 +688,12 @@ impl<'a> Context<'a> {
 					right: attribute(right),
 					equal: false,
 				},
-				GlobalConstraint::Distance { left, right, op, value } => Check::Distance {
+				GlobalConstraint::Distance {
+					left,
+					right,
+					op,
+					value,
+				} => Check::Distance {
 					left: self.label_id(left),
 					right: self.label_id(right),
 					op: *op,
@@ -672,7 +718,12 @@ impl<'a> Context<'a> {
 				(Some(left), Some(right)) => (left == right) == *equal,
 				_ => false,
 			},
-			Check::Distance { left, right, op, value } => match (bound(left), bound(right)) {
+			Check::Distance {
+				left,
+				right,
+				op,
+				value,
+			} => match (bound(left), bound(right)) {
 				(Some(left), Some(right)) => compare(right.0.saturating_sub(left.1), *op, *value),
 				_ => false,
 			},
@@ -755,14 +806,13 @@ fn fits_within_one(spans: &[Span], start: u64, end: u64) -> Option<usize> {
 }
 
 fn runs_in_parallel(steps: &[SequenceStep], ranges: &[Span]) -> bool {
-	ranges.len() > 1
-		&& steps.iter().any(|step| {
-			step.min != 1
-				|| step.max != Some(1)
-				|| !step.node.is_token_level()
-				|| matches!(step.node, PlanNode::ScanAll)
-				|| matches!(&step.node, PlanNode::Difference { base, .. } if matches!(**base, PlanNode::ScanAll))
-		})
+	ranges.len() > 1 && steps.iter().any(|step| {
+		step.min != 1
+			|| step.max != Some(1)
+			|| !step.node.is_token_level()
+			|| matches!(step.node, PlanNode::ScanAll)
+			|| matches!(&step.node, PlanNode::Difference { base, .. } if matches!(**base, PlanNode::ScanAll))
+	})
 }
 
 pub fn build_edge_map(edges: &[(UnitId, UnitId)]) -> HashMap<(u32, u32), Vec<(u32, u32)>> {
@@ -841,10 +891,7 @@ mod tests {
 
 	#[test]
 	fn results_iterator() {
-		let hits = vec![
-			Hit::new(Span::new(0, 1)),
-			Hit::new(Span::new(5, 6)),
-		];
+		let hits = vec![Hit::new(Span::new(0, 1)), Hit::new(Span::new(5, 6))];
 
 		let results = Results::new(hits);
 		assert_eq!(results.len(), 2);

@@ -67,8 +67,7 @@ mod tests {
 	fn subscribe_known_topic_succeeds() {
 		with_registered_context(|ctx| {
 			let params = serde_json::json!({ "topic": "roster_changed" });
-			let result =
-				dispatch_request("subscription.subscribe", Some(params), ctx).unwrap();
+			let result = dispatch_request("subscription.subscribe", Some(params), ctx).unwrap();
 			let reply: OkReply = serde_json::from_value(result).unwrap();
 			assert!(reply.ok);
 		});
@@ -78,8 +77,7 @@ mod tests {
 	fn subscribe_named_results_topic_succeeds() {
 		with_registered_context(|ctx| {
 			let params = serde_json::json!({ "topic": "named_results_changed" });
-			let result =
-				dispatch_request("subscription.subscribe", Some(params), ctx).unwrap();
+			let result = dispatch_request("subscription.subscribe", Some(params), ctx).unwrap();
 			let reply: OkReply = serde_json::from_value(result).unwrap();
 			assert!(reply.ok);
 		});
@@ -89,8 +87,7 @@ mod tests {
 	fn subscribe_unknown_topic_returns_1600() {
 		with_registered_context(|ctx| {
 			let params = serde_json::json!({ "topic": "totally_unknown" });
-			let err =
-				dispatch_request("subscription.subscribe", Some(params), ctx).unwrap_err();
+			let err = dispatch_request("subscription.subscribe", Some(params), ctx).unwrap_err();
 			assert_eq!(err.code, error_codes::UNKNOWN_TOPIC);
 		});
 	}
@@ -109,8 +106,7 @@ mod tests {
 			let params = serde_json::json!({ "topic": "roster_changed" });
 			dispatch_request("subscription.subscribe", Some(params.clone()), ctx).unwrap();
 
-			let result =
-				dispatch_request("subscription.unsubscribe", Some(params), ctx).unwrap();
+			let result = dispatch_request("subscription.unsubscribe", Some(params), ctx).unwrap();
 			let reply: OkReply = serde_json::from_value(result).unwrap();
 			assert!(reply.ok);
 		});
@@ -120,8 +116,7 @@ mod tests {
 	fn unsubscribe_unknown_topic_returns_1600() {
 		with_registered_context(|ctx| {
 			let params = serde_json::json!({ "topic": "absolutely_made_up" });
-			let err =
-				dispatch_request("subscription.unsubscribe", Some(params), ctx).unwrap_err();
+			let err = dispatch_request("subscription.unsubscribe", Some(params), ctx).unwrap_err();
 			assert_eq!(err.code, error_codes::UNKNOWN_TOPIC);
 		});
 	}
@@ -130,8 +125,7 @@ mod tests {
 	fn unsubscribe_never_subscribed_is_no_op() {
 		with_registered_context(|ctx| {
 			let params = serde_json::json!({ "topic": "roster_changed" });
-			let result =
-				dispatch_request("subscription.unsubscribe", Some(params), ctx).unwrap();
+			let result = dispatch_request("subscription.unsubscribe", Some(params), ctx).unwrap();
 			let reply: OkReply = serde_json::from_value(result).unwrap();
 			assert!(reply.ok);
 		});
@@ -167,13 +161,8 @@ mod tests {
 			)
 			.expect("second subscribe is idempotent");
 
-			let (_trigger_ctx, _trigger_outbound) = register_context(
-				state_tx,
-				handle,
-				ProcessKind::External,
-				&[],
-				&[],
-			);
+			let (_trigger_ctx, _trigger_outbound) =
+				register_context(state_tx, handle, ProcessKind::External, &[], &[]);
 
 			let first = subscriber_outbound
 				.recv_timeout(Duration::from_millis(500))

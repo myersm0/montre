@@ -2,14 +2,14 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use montre_daemon::protocol::*;
 use montre_daemon::client::{DaemonClientError, NotificationEnvelope, RosterEvent};
+use montre_daemon::protocol::*;
 use montre_daemon::{serve, DaemonClient, ServeOptions};
 use tempfile::TempDir;
 
 fn build_test_corpus(out: &Path) {
-	let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
-		.join("../../testdata/parallel/corpus.toml");
+	let manifest =
+		Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/parallel/corpus.toml");
 	montre_build::MultiCorpusBuilder::from_manifest(&manifest)
 		.expect("manifest load")
 		.build(out)
@@ -36,7 +36,10 @@ fn boot_daemon() -> Fixture {
 		let _ = serve(options);
 	});
 	wait_for_socket_path(&socket, Duration::from_secs(5));
-	Fixture { _temp: temp, socket }
+	Fixture {
+		_temp: temp,
+		socket,
+	}
 }
 
 fn wait_for_socket_path(path: &Path, timeout: Duration) {
@@ -78,7 +81,11 @@ fn client_register_and_corpus_info() {
 	assert_eq!(reply.process_id, 1);
 	assert_eq!(reply.protocol_version, PROTOCOL_VERSION);
 	assert_eq!(reply.daemon_epoch, 1);
-	assert!(reply.capabilities.coupler_kinds.iter().any(|k| k == "sentence_mirror"));
+	assert!(reply
+		.capabilities
+		.coupler_kinds
+		.iter()
+		.any(|k| k == "sentence_mirror"));
 
 	let info = client.corpus_info().expect("corpus info");
 	assert_eq!(info.name, "test-parallel");
@@ -91,7 +98,9 @@ fn client_query_execute_hits_metadata_and_discard() {
 	register(&mut client);
 
 	let executed = client
-		.query_execute(QueryExecuteParams { cql: "[pos=\"NOUN\"]".to_string() })
+		.query_execute(QueryExecuteParams {
+			cql: "[pos=\"NOUN\"]".to_string(),
+		})
 		.expect("query execute");
 	assert!(executed.handle.starts_with("r-"));
 	assert!(executed.hit_count > 0);
@@ -108,13 +117,17 @@ fn client_query_execute_hits_metadata_and_discard() {
 	assert!(page.hits.iter().all(|h| h.document_index != u32::MAX));
 
 	let metadata = client
-		.query_metadata(QueryMetadataParams { handle: executed.handle.clone() })
+		.query_metadata(QueryMetadataParams {
+			handle: executed.handle.clone(),
+		})
 		.expect("query metadata");
 	assert_eq!(metadata.handle, executed.handle);
 	assert_eq!(metadata.hit_count, executed.hit_count);
 
 	let discarded = client
-		.query_discard(QueryDiscardParams { handle: metadata.handle })
+		.query_discard(QueryDiscardParams {
+			handle: metadata.handle,
+		})
 		.expect("query discard");
 	assert!(discarded.ok);
 }
@@ -134,12 +147,18 @@ fn client_text_and_annotation_methods() {
 		.expect("la_maison doc");
 
 	let sentence = client
-		.text_sentence(TextSentenceParams { doc: doc.index, sent: 0 })
+		.text_sentence(TextSentenceParams {
+			doc: doc.index,
+			sent: 0,
+		})
 		.expect("text sentence");
 	assert!(sentence.surface.contains("La"));
 
 	let surface = client
-		.text_surface(TextSurfaceParams { start: sentence.span.start, end: sentence.span.end })
+		.text_surface(TextSurfaceParams {
+			start: sentence.span.start,
+			end: sentence.span.end,
+		})
 		.expect("text surface");
 	assert_eq!(surface.surface, sentence.surface);
 
@@ -160,7 +179,9 @@ fn client_protocol_errors_are_typed() {
 	register(&mut client);
 
 	let err = client
-		.query_execute(QueryExecuteParams { cql: "[pos=\"NOUN\"".to_string() })
+		.query_execute(QueryExecuteParams {
+			cql: "[pos=\"NOUN\"".to_string(),
+		})
 		.unwrap_err();
 	match err {
 		DaemonClientError::Protocol(protocol) => {
@@ -176,7 +197,9 @@ fn client_receives_roster_notifications() {
 	let mut watcher = DaemonClient::connect(&fx.socket).expect("watcher connect");
 	register(&mut watcher);
 	watcher
-		.subscription_subscribe(SubscriptionParams { topic: "roster_changed".to_string() })
+		.subscription_subscribe(SubscriptionParams {
+			topic: "roster_changed".to_string(),
+		})
 		.expect("subscribe");
 
 	let mut second = DaemonClient::connect(&fx.socket).expect("second connect");
@@ -239,7 +262,10 @@ fn client_publish_interest_drives_coupler_notification() {
 		.recv_timeout(Duration::from_secs(2))
 		.expect("coupler notification");
 	match note {
-		NotificationEnvelope::CouplerUpdate { coupler_id, interest } => {
+		NotificationEnvelope::CouplerUpdate {
+			coupler_id,
+			interest,
+		} => {
 			assert_eq!(coupler_id, coupler.coupler_id);
 			assert!(matches!(interest, Interest::Sentence { doc: 0, sent: 0 }));
 		}
@@ -262,7 +288,10 @@ fn client_text_surface_with_token_spans_round_trip() {
 		.expect("la_maison doc");
 
 	let sentence = client
-		.text_sentence(TextSentenceParams { doc: doc.index, sent: 0 })
+		.text_sentence(TextSentenceParams {
+			doc: doc.index,
+			sent: 0,
+		})
 		.expect("text sentence");
 
 	let reply = client
@@ -287,7 +316,9 @@ fn client_daemon_shutdown_returns_ok_and_broadcasts_notification() {
 	register(&mut client);
 
 	let reply = client
-		.daemon_shutdown(DaemonShutdownParams { reason: Some(ShutdownReason::Requested) })
+		.daemon_shutdown(DaemonShutdownParams {
+			reason: Some(ShutdownReason::Requested),
+		})
 		.expect("daemon shutdown");
 	assert!(reply.ok);
 
