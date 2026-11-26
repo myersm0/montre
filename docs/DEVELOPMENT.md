@@ -994,7 +994,9 @@ A rework of sequence execution and name validation, checked by a differential te
 
 **Limits**
 
-- `montre_query::Limits` holds three ceilings, and `execute_with` / `execute_count_with` take one. `execute` and `execute_count` use `Limits::default()`, so the CLI, the FFI and Python bindings are covered without changes. The daemon uses its own `DEFAULT_LIMITS`, below.
+- `montre_query::Limits` holds three ceilings, and `execute_with` / `execute_count_with` take one. `execute` and `execute_count` use `Limits::default()`, so the FFI functions without limits and the Python bindings are covered without changes. The daemon uses its own `DEFAULT_LIMITS`, below.
+- The CLI's `query` and `count` take `--max-intermediate-matches`, `--max-expansions` and `--max-results`, each a whole number or `unlimited`; unset, a ceiling keeps the engine default. A query over a limit exits with status 1 and an error that names the resource, the limit and the flag that raises it. `--max-results` is separate from `query --limit`, which only shortens what is printed, and applies to `count` only with `--by-document`, the one count that builds hits.
+- The FFI has `_with_limits` variants of `montre_query`, `montre_query_count` and their component-scoped forms, and `montre_default_limits`. `montre_last_error_kind` reports limit failures as kind 4, distinct from parse errors (2), queries the corpus cannot answer (3) and everything else (1).
 - `max_intermediate_matches` (default 10 million, roughly 1.2 GB at the limit) counts the intermediate matches a query holds at once, across every thread and nested group. A match counts once for up to three labels in the query and more beyond that.
 - `max_expansions` (default unlimited) counts the partial matches and group continuations a query creates in total: a ceiling on work rather than memory. On a laptop the engine does about 16 million a second on an ambiguous pattern.
 - `max_results` (default unlimited) counts the hits a query returns, as they are produced and after span, component and document filters, so a filter that discards most matches does not trip it. A count builds no hits and is not subject to it.
@@ -1022,7 +1024,7 @@ So `max_intermediate_matches` governs the engine's working storage, and `max_res
 
 **Daemon limits**
 
-- `montre_daemon::DEFAULT_LIMITS` applies to `query.execute`, `query.execute_count` and the replay of saved queries: 10 million intermediate matches, a billion expansions (about a minute of matching on a laptop), and 5 million hits (about 240 MB before captures). `ServeOptions::limits` sets other values; `montre serve` has no flags for them yet.
+- `montre_daemon::DEFAULT_LIMITS` applies to `query.execute`, `query.execute_count` and the replay of saved queries: 10 million intermediate matches, a billion expansions (about a minute of matching on a laptop), and 5 million hits (about 240 MB before captures). `ServeOptions::limits` sets other values, and `montre serve` takes the same three flags as `query` and `count`; unset, a ceiling keeps the daemon default.
 - A refused query returns error `1102` (execution error), with a message naming the resource and the limit.
 
 A label around a single quantified element, as in `a:([]{1,100})`, is planned as that element labeled and needs no group table.

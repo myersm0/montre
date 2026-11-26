@@ -76,7 +76,14 @@ let results: Results = executor::execute(&plan, &corpus)?;
 
 // 3b. Execute: count only (avoids Hit allocation for simple plans)
 let count: usize = executor::execute_count(&plan, &corpus)?;
+
+// 3c. Either, under explicit limits instead of Limits::default()
+let limits = montre_query::Limits { max_results: 100_000, ..Default::default() };
+let results = executor::execute_with(&plan, &corpus, &limits)?;
+let count = executor::execute_count_with(&plan, &corpus, &limits)?;
 ```
+
+`Limits` has three ceilings: `max_intermediate_matches` (default 10 million), `max_expansions` and `max_results` (both unlimited by default; `u64::MAX` means no limit, and `Limits::unlimited()` sets all three so). A count builds no hits and is not subject to `max_results`. A query that exceeds a ceiling fails with `QueryError::LimitExceeded`, never with a partial result.
 
 ### Working with results
 
@@ -356,7 +363,13 @@ IndexError::VersionMismatch { expected, found }
 QueryError::Parse { position, message }
 QueryError::Regex(regex::Error)
 QueryError::UnknownLayer(String)
+QueryError::UnindexedLayer(String)
+QueryError::UnknownSpanLayer(String)
+QueryError::UnknownComponent(String)
+QueryError::UnknownDocument(String)
 QueryError::UnknownLabel(String)
+QueryError::QuantifierTooLarge { bound, limit }
+QueryError::LimitExceeded { resource, limit }
 QueryError::Execution(String)
 
 // montre_build::BuildError
@@ -395,12 +408,23 @@ Thread-local last-error pattern. Functions that can fail return null pointers (f
 
 ```c
 const char *montre_last_error(void);      // NULL if no error
+int32_t     montre_last_error_kind(void); // 0 if no error
 void montre_string_free(char *s);
 void montre_string_array_free(char **arr, uint64_t len);
 void montre_i32_array_free(int32_t *arr, uint64_t len);
 void montre_u32_array_free(uint32_t *arr, uint64_t len);
 void montre_u64_array_free(uint64_t *arr, uint64_t len);
 ```
+
+`montre_last_error_kind` classifies the error `montre_last_error` describes, so a binding can raise a typed error without parsing the message. The message is unchanged by it. The values are stable:
+
+| Kind | Value | Raised for |
+|---|---|---|
+| none | 0 | no error recorded |
+| other | 1 | null arguments, I/O and index errors, build errors, internal execution errors |
+| query parse | 2 | CQL syntax errors and invalid regular expressions (`QueryError::Parse`, `QueryError::Regex`) |
+| query invalid | 3 | a well-formed query the corpus cannot answer: an unknown or unindexed layer, span layer, component, document or label, or a quantifier bound above 100 |
+| limit exceeded | 4 | `QueryError::LimitExceeded`: the query needs more than one of its limits allows |
 
 ### Corpus
 
@@ -467,7 +491,23 @@ uint64_t montre_hit_end(const void *hits, uint64_t index);
 uint32_t montre_hit_document_index(const void *hits, uint64_t index);
 uint32_t montre_hit_sentence_index(const void *hits, uint64_t index);
 void     montre_hitlist_populate_context(void *hits, const void *corpus);
+
+// The same, under explicit limits. UINT64_MAX means no limit.
+void    *montre_query_with_limits(const void *corpus, const char *cql,
+             uint64_t max_intermediate_matches, uint64_t max_expansions, uint64_t max_results);
+void    *montre_query_in_component_with_limits(const void *corpus, const char *cql, const char *component,
+             uint64_t max_intermediate_matches, uint64_t max_expansions, uint64_t max_results);
+int64_t  montre_query_count_with_limits(const void *corpus, const char *cql,
+             uint64_t max_intermediate_matches, uint64_t max_expansions, uint64_t max_results);
+int64_t  montre_query_count_in_component_with_limits(const void *corpus, const char *cql, const char *component,
+             uint64_t max_intermediate_matches, uint64_t max_expansions, uint64_t max_results);
+
+// The limits the functions above without them use. Each out-parameter is nullable.
+void     montre_default_limits(uint64_t *out_max_intermediate_matches,
+             uint64_t *out_max_expansions, uint64_t *out_max_results);
 ```
+
+The functions without limits use the engine's defaults (`Limits::default()`: 10 million intermediate matches, no limit on expansions or results). The `_with_limits` variants mirror `execute_with` and `execute_count_with`; as there, a count is not subject to `max_results`. A query over a limit returns NULL or -1, with `montre_last_error_kind` set to 4 and a message naming the resource and the limit.
 
 A hit list holds one hit per distinct matching span, sorted by start, then end, so index `i` is the `i`-th span in that order. The bulk arrays below are in the same order. `montre_query_count` and `montre_query_count_in_component` return the number of spans `montre_query` would list. `montre_project` returns the distinct target units, sorted the same way.
 

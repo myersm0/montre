@@ -467,3 +467,92 @@ fn query_count_only_unchanged() {
 		.success()
 		.stdout(predicate::str::starts_with("12\n"));
 }
+
+// ── limits ──
+
+const AMBIGUOUS: &str = "[]{1,3}";
+
+#[test]
+fn count_over_a_tight_limit_fails_and_names_the_flag() {
+	let c = corpora();
+	montre()
+		.args(["count", c.multi_path.to_str().unwrap(), AMBIGUOUS])
+		.args(["--max-intermediate-matches", "5"])
+		.assert()
+		.code(1)
+		.stdout("")
+		.stderr(predicate::str::contains("limit of 5 intermediate matches"))
+		.stderr(predicate::str::contains(
+			"--max-intermediate-matches <N> or --max-intermediate-matches unlimited",
+		));
+}
+
+#[test]
+fn count_passes_once_the_limit_is_raised() {
+	let c = corpora();
+	for raised in ["1000", "unlimited"] {
+		montre()
+			.args(["count", c.multi_path.to_str().unwrap(), AMBIGUOUS])
+			.args(["--max-intermediate-matches", raised])
+			.assert()
+			.success()
+			.stdout("177\n");
+	}
+}
+
+#[test]
+fn query_over_a_result_limit_fails_and_passes_once_raised() {
+	let c = corpora();
+	montre()
+		.args(["query", c.multi_path.to_str().unwrap(), AMBIGUOUS])
+		.args(["--max-results", "10"])
+		.assert()
+		.code(1)
+		.stderr(predicate::str::contains("limit of 10 results"))
+		.stderr(predicate::str::contains("--max-results unlimited"));
+	montre()
+		.args(["query", c.multi_path.to_str().unwrap(), AMBIGUOUS])
+		.args(["--max-results", "177"])
+		.assert()
+		.success()
+		.stdout(predicate::str::starts_with("Found 177 matches"));
+}
+
+#[test]
+fn expansion_limit_applies_to_count() {
+	let c = corpora();
+	montre()
+		.args(["count", c.multi_path.to_str().unwrap(), AMBIGUOUS])
+		.args(["--max-expansions", "10"])
+		.assert()
+		.code(1)
+		.stderr(predicate::str::contains("--max-expansions unlimited"));
+}
+
+#[test]
+fn result_limit_does_not_apply_to_a_plain_count_but_does_by_document() {
+	let c = corpora();
+	montre()
+		.args(["count", c.multi_path.to_str().unwrap(), AMBIGUOUS])
+		.args(["--max-results", "10"])
+		.assert()
+		.success()
+		.stdout("177\n");
+	montre()
+		.args(["count", c.multi_path.to_str().unwrap(), AMBIGUOUS, "--by-document"])
+		.args(["--max-results", "10"])
+		.assert()
+		.code(1)
+		.stderr(predicate::str::contains("limit of 10 results"));
+}
+
+#[test]
+fn limit_must_be_a_number_or_unlimited() {
+	let c = corpora();
+	montre()
+		.args(["count", c.multi_path.to_str().unwrap(), AMBIGUOUS])
+		.args(["--max-results", "lots"])
+		.assert()
+		.code(2)
+		.stderr(predicate::str::contains("expected a whole number or 'unlimited'"));
+}

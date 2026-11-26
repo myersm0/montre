@@ -580,6 +580,180 @@ fn error_handling() {
 }
 
 // ===========================================================================
+// Limits and error kinds
+// ===========================================================================
+
+const KIND_NONE: i32 = 0;
+const KIND_OTHER: i32 = 1;
+const KIND_QUERY_PARSE: i32 = 2;
+const KIND_QUERY_INVALID: i32 = 3;
+const KIND_LIMIT_EXCEEDED: i32 = 4;
+
+unsafe fn open_single_component() -> *mut montre_index::Corpus {
+	let input_dir = write_single_component_dir();
+	let output_dir = temp_path("corpus_limits");
+	let name = cstr("test_single");
+	let input = cstr(input_dir.to_str().unwrap());
+	let output = cstr(output_dir.to_str().unwrap());
+	let rc = montre_build_directory(name.as_ptr(), input.as_ptr(), output.as_ptr(), 1, 0);
+	assert_eq!(rc, 1, "build failed: {:?}", read_last_error());
+	let corpus = montre_corpus_open(output.as_ptr());
+	assert!(!corpus.is_null(), "open failed: {:?}", read_last_error());
+	corpus
+}
+
+unsafe fn starts(hits: *mut HitList) -> Vec<u64> {
+	assert!(!hits.is_null(), "query failed: {:?}", read_last_error());
+	let starts = (0..montre_hitlist_len(hits)).map(|i| montre_hit_start(hits, i)).collect();
+	montre_hitlist_free(hits);
+	starts
+}
+
+#[test]
+fn default_limits_are_the_engine_defaults() {
+	unsafe {
+		let (mut intermediate, mut expansions, mut results) = (0, 0, 0);
+		montre_default_limits(&mut intermediate, &mut expansions, &mut results);
+		assert_eq!(intermediate, 10_000_000);
+		assert_eq!(expansions, u64::MAX);
+		assert_eq!(results, u64::MAX);
+		montre_default_limits(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+	}
+}
+
+#[test]
+fn query_over_a_limit_sets_the_limit_kind() {
+	unsafe {
+		let corpus = open_single_component();
+		let ambiguous = cstr("[]{1,3}");
+		let component = cstr("test_single");
+		let unlimited = u64::MAX;
+
+		let total = montre_query_count(corpus, ambiguous.as_ptr());
+		assert_eq!(montre_last_error_kind(), KIND_NONE);
+		assert!(read_last_error().is_none());
+		assert!(total > 5);
+
+		assert_eq!(
+			montre_query_count_with_limits(corpus, ambiguous.as_ptr(), 5, unlimited, unlimited),
+			-1
+		);
+		assert_eq!(montre_last_error_kind(), KIND_LIMIT_EXCEEDED);
+		assert!(read_last_error().unwrap().contains("limit of 5 intermediate matches"));
+
+		let refused = montre_query_with_limits(corpus, ambiguous.as_ptr(), unlimited, unlimited, 2);
+		assert!(refused.is_null());
+		assert_eq!(montre_last_error_kind(), KIND_LIMIT_EXCEEDED);
+		assert!(read_last_error().unwrap().contains("limit of 2 results"));
+
+		let refused = montre_query_in_component_with_limits(
+			corpus,
+			ambiguous.as_ptr(),
+			component.as_ptr(),
+			unlimited,
+			3,
+			unlimited,
+		);
+		assert!(refused.is_null());
+		assert_eq!(montre_last_error_kind(), KIND_LIMIT_EXCEEDED);
+		assert_eq!(
+			montre_query_count_in_component_with_limits(
+				corpus,
+				ambiguous.as_ptr(),
+				component.as_ptr(),
+				5,
+				unlimited,
+				unlimited,
+			),
+			-1
+		);
+		assert_eq!(montre_last_error_kind(), KIND_LIMIT_EXCEEDED);
+
+		// raised, the same query gives what the functions without limits give
+		let expected = starts(montre_query(corpus, ambiguous.as_ptr()));
+		assert_eq!(expected.len() as i64, total);
+		assert_eq!(
+			starts(montre_query_with_limits(corpus, ambiguous.as_ptr(), unlimited, unlimited, unlimited)),
+			expected
+		);
+		assert_eq!(montre_last_error_kind(), KIND_NONE);
+		assert_eq!(
+			starts(montre_query_in_component_with_limits(
+				corpus,
+				ambiguous.as_ptr(),
+				component.as_ptr(),
+				unlimited,
+				unlimited,
+				unlimited,
+			)),
+			expected
+		);
+		assert_eq!(
+			montre_query_count_with_limits(corpus, ambiguous.as_ptr(), 1000, 1000, 0),
+			total
+		);
+		assert_eq!(
+			montre_query_count_in_component_with_limits(
+				corpus,
+				ambiguous.as_ptr(),
+				component.as_ptr(),
+				unlimited,
+				unlimited,
+				unlimited,
+			),
+			total
+		);
+		assert_eq!(montre_query_count_in_component(corpus, ambiguous.as_ptr(), component.as_ptr()), total);
+
+		montre_corpus_close(corpus);
+	}
+}
+
+#[test]
+fn other_errors_have_their_own_kinds() {
+	unsafe {
+		let corpus = open_single_component();
+
+		let modifier = cstr("(?by n) []");
+		assert_eq!(montre_query_count(corpus, modifier.as_ptr()), -1);
+		assert_eq!(montre_last_error_kind(), KIND_QUERY_PARSE);
+		assert_eq!(
+			read_last_error().unwrap(),
+			"Parse error at position 0: Unsupported query modifier '(?by n)'"
+		);
+
+		let regex = cstr("[word=/(/]");
+		assert!(montre_query(corpus, regex.as_ptr()).is_null());
+		assert_eq!(montre_last_error_kind(), KIND_QUERY_PARSE);
+
+		let unknown = cstr(r#"[nosuchlayer="x"]"#);
+		assert!(montre_query(corpus, unknown.as_ptr()).is_null());
+		assert_eq!(montre_last_error_kind(), KIND_QUERY_INVALID);
+		assert_eq!(read_last_error().unwrap(), "Unknown layer: nosuchlayer");
+
+		let any = cstr("[]");
+		let nowhere = cstr("nowhere");
+		assert_eq!(montre_query_count_in_component(corpus, any.as_ptr(), nowhere.as_ptr()), -1);
+		assert_eq!(montre_last_error_kind(), KIND_QUERY_INVALID);
+
+		assert_eq!(montre_query_count(std::ptr::null(), any.as_ptr()), -1);
+		assert_eq!(montre_last_error_kind(), KIND_OTHER);
+		assert_eq!(read_last_error().unwrap(), "null corpus");
+		assert!(montre_query_in_component(corpus, any.as_ptr(), std::ptr::null()).is_null());
+		assert_eq!(read_last_error().unwrap(), "null component name");
+
+		let bad_path = cstr("/nonexistent/corpus");
+		assert!(montre_corpus_open(bad_path.as_ptr()).is_null());
+		assert_eq!(montre_last_error_kind(), KIND_OTHER);
+
+		assert_eq!(montre_query_count(corpus, any.as_ptr()), 9);
+		assert_eq!(montre_last_error_kind(), KIND_NONE);
+
+		montre_corpus_close(corpus);
+	}
+}
+
+// ===========================================================================
 // Helpers
 // ===========================================================================
 
