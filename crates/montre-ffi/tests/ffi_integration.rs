@@ -459,8 +459,8 @@ fn multi_component_lifecycle() {
 		let mut edge_count: u64 = 0;
 		let edges = montre_corpus_alignment_edges(corpus, align.as_ptr(), &mut edge_count);
 		assert!(!edges.is_null());
-		assert_eq!(edge_count, 2); // 2 sentence pairs
-							 // each edge is [src_doc, src_sent, tgt_doc, tgt_sent]
+		// 2 sentence pairs, each edge [src_doc, src_sent, tgt_doc, tgt_sent]
+		assert_eq!(edge_count, 2);
 		let e0_src_doc = *edges.add(0);
 		let e0_src_sent = *edges.add(1);
 		let e0_tgt_doc = *edges.add(2);
