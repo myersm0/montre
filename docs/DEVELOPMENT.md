@@ -1017,7 +1017,7 @@ What is counted as intermediate:
 What is not counted as intermediate:
 
 - The hits of a result produced batch by batch. Those fall under `max_results`. Without one, a query with a very large result uses memory in proportion: `a:[]{1,100}` over one 200,000-token document is 20 million hits and about 5.7 GB, where its count takes 33 MB.
-- The list of start positions of one document, 8 bytes per candidate position.
+- The candidate start positions of a sequence. They are gathered a window at a time, not a document at a time: each step that supplies start positions contributes at most 2¹⁴ (16,384) of them to a window, 8 bytes each, and the window ends where the first such step reaches that number. So the buffer is bounded by the window, whatever the size of the document.
 - Allocator overhead, vector capacity and sort scratch space. The limits are counts, not byte figures.
 
 So `max_intermediate_matches` governs the engine's working storage, and `max_results` the size of what it hands back. Whether a process such as the daemon stays within its memory also depends on how many results it keeps and how many queries it runs at once; neither is limited here.
@@ -1095,7 +1095,7 @@ Quantifier queries and `ScanAll`-in-first-position use document-parallel executi
 
 | Benchmark | Time | Notes |
 |---|---|---|
-| `corpus_open` (1.5M token Maupassant) | 20ms | forward + spans memory-mapped; inverted + lexicon bincode-deserialized |
+| `corpus_open` (1.5M token Maupassant) | 20ms | forward + spans memory-mapped; inverted index memory-mapped and bincode-deserialized from the mapping, bitmaps in parallel; lexicon not loaded |
 | `corpus_open` (1.5M + 10M token Maupassant + ELTeC-fra) | 116ms | same; remaining time is inverted index deserialization |
 | `corpus_open` (pre-mmap, v0.3, 1.5M token Maupassant) | 285ms | all four indexes bincode-deserialized with rayon |
 
