@@ -1162,7 +1162,11 @@ JSON and XML are source formats only. Montre's internal representation remains t
 cargo test --workspace        # all crates
 cargo test -p montre-query    # single crate
 cargo test -p montre-query --test executor_integration   # integration tests
+cargo fmt --all --check       # formatting, as CI checks it
+cargo clippy --workspace --all-targets
 ```
+
+CI runs the tests on Linux and macOS, and checks formatting with rustfmt (hard tabs, from `rustfmt.toml`). It runs clippy too but does not yet fail on its warnings.
 
 The test suite has 180+ tests across all crates. The integration test suite (`crates/montre-query/tests/executor_integration.rs`) covers end-to-end query execution including sequences, quantifiers, alternation edge cases, within constraints, multi-document queries, alignment projection, feats decomposition, labeled captures, global constraint evaluation, the Results API, head layer round-trip, UPOS/XPOS layer verification, `pos` alias resolution, sentence ID preservation with fallback generation, MWT surface text reconstruction, SpaceAfter handling, deps forward-only verification, and empty node preservation.
 

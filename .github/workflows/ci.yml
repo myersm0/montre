@@ -8,8 +8,23 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt --all --check
+      # reported, not yet enforced
+      - run: cargo clippy --workspace --all-targets
