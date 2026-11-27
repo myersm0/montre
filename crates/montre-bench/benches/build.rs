@@ -1,5 +1,5 @@
-use std::io::BufReader;
 use std::fs::File;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -101,7 +101,9 @@ fn bench_build_single_component(c: &mut Criterion) {
 }
 
 fn bench_build_multi_component(c: &mut Criterion) {
-	let Some(manifest) = manifest_path() else { return };
+	let Some(manifest) = manifest_path() else {
+		return;
+	};
 
 	c.bench_function("build_multi_component", |b| {
 		b.iter(|| {

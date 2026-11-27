@@ -2,18 +2,20 @@ use montre_index::{Corpus, InvertedIndex};
 
 use crate::dispatch::{parse_params, parse_params_or_default, serialize_reply, RpcContext};
 use crate::protocol::{
-	CorpusDocumentsParams, CorpusDocumentsReply, CorpusInfo, CorpusLayerInfoParams,
-	DocumentEntry, LayerInfo, LayerKind, ProtocolError,
+	CorpusDocumentsParams, CorpusDocumentsReply, CorpusInfo, CorpusLayerInfoParams, DocumentEntry,
+	LayerInfo, LayerKind, ProtocolError,
 };
 
 pub(crate) fn handle_corpus_info(ctx: &RpcContext) -> Result<serde_json::Value, ProtocolError> {
-	let components = ctx.handle
+	let components = ctx
+		.handle
 		.corpus
 		.components()
 		.iter()
 		.map(|c| c.name.clone())
 		.collect();
-	let alignments = ctx.handle
+	let alignments = ctx
+		.handle
 		.corpus
 		.alignments()
 		.iter()
@@ -66,7 +68,8 @@ pub(crate) fn handle_corpus_documents(
 }
 
 pub(crate) fn document_component(ctx: &RpcContext, document_index: usize) -> String {
-	ctx.handle.corpus
+	ctx.handle
+		.corpus
 		.component_for_document(document_index)
 		.map(|c| c.name.clone())
 		.unwrap_or_else(|| ctx.handle.corpus.name().to_string())
@@ -88,9 +91,8 @@ pub(crate) fn handle_corpus_layer_info(
 ) -> Result<serde_json::Value, ProtocolError> {
 	let parsed: CorpusLayerInfoParams = parse_params("corpus.layer_info", params)?;
 
-	let (kind, value_count) = classify_layer(&ctx.handle.corpus, &parsed.layer).ok_or_else(|| {
-		ProtocolError::new(-32602, format!("unknown layer '{}'", parsed.layer))
-	})?;
+	let (kind, value_count) = classify_layer(&ctx.handle.corpus, &parsed.layer)
+		.ok_or_else(|| ProtocolError::new(-32602, format!("unknown layer '{}'", parsed.layer)))?;
 
 	serialize_reply(LayerInfo {
 		name: parsed.layer,
@@ -124,7 +126,10 @@ mod tests {
 
 			assert_eq!(info.name, "test-parallel");
 			assert_eq!(info.corpus_id, ctx.handle.corpus_id);
-			assert_eq!(info.canonical_path, ctx.handle.canonical_path.display().to_string());
+			assert_eq!(
+				info.canonical_path,
+				ctx.handle.canonical_path.display().to_string()
+			);
 
 			let mut components = info.components.clone();
 			components.sort();

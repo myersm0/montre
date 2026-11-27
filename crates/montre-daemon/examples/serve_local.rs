@@ -12,14 +12,19 @@ fn print_usage() {
 	eprintln!();
 	eprintln!("example:");
 	eprintln!("    cargo run --example serve_local -p montre-daemon -- ./my-corpus");
-	eprintln!("    cargo run --example serve_local -p montre-daemon -- ./my-corpus --idle-timeout 0");
+	eprintln!(
+		"    cargo run --example serve_local -p montre-daemon -- ./my-corpus --idle-timeout 0"
+	);
 }
 
 fn parse_args() -> (PathBuf, PathBuf, Option<Duration>) {
 	let mut args = std::env::args().skip(1);
 	let corpus_path = match args.next() {
 		Some(a) if !a.starts_with("--") => PathBuf::from(a),
-		_ => { print_usage(); process::exit(1); }
+		_ => {
+			print_usage();
+			process::exit(1);
+		}
 	};
 
 	let mut socket_path = PathBuf::from("/tmp/montre-daemon.sock");
@@ -35,12 +40,10 @@ fn parse_args() -> (PathBuf, PathBuf, Option<Duration>) {
 				socket_path = PathBuf::from(path);
 			}
 			"--idle-timeout" => {
-				let secs: u64 = args.next()
-					.and_then(|s| s.parse().ok())
-					.unwrap_or_else(|| {
-						eprintln!("--idle-timeout requires an integer (seconds)");
-						process::exit(1);
-					});
+				let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+					eprintln!("--idle-timeout requires an integer (seconds)");
+					process::exit(1);
+				});
 				idle_timeout = Some(Duration::from_secs(secs));
 			}
 			_ => {

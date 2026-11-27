@@ -62,7 +62,10 @@ impl Budget {
 	/// Count hits produced for the result.
 	pub(crate) fn report(&self, hits: usize) -> Result<()> {
 		let hits = hits as u64;
-		let reported = self.reported.fetch_add(hits, Ordering::Relaxed).saturating_add(hits);
+		let reported = self
+			.reported
+			.fetch_add(hits, Ordering::Relaxed)
+			.saturating_add(hits);
 		if reported > self.limits.max_results {
 			return Err(QueryError::LimitExceeded {
 				resource: "results",
@@ -73,7 +76,10 @@ impl Budget {
 	}
 
 	pub(crate) fn hold(&self, amount: u64) -> Result<()> {
-		let held = self.held.fetch_add(amount, Ordering::Relaxed).saturating_add(amount);
+		let held = self
+			.held
+			.fetch_add(amount, Ordering::Relaxed)
+			.saturating_add(amount);
 		if held > self.limits.max_intermediate_matches {
 			return Err(QueryError::LimitExceeded {
 				resource: "intermediate matches",

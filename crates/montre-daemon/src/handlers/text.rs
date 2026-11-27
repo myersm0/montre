@@ -149,8 +149,8 @@ pub(crate) fn handle_text_sentence(
 ) -> Result<serde_json::Value, ProtocolError> {
 	let parsed: TextSentenceParams = parse_params("text.sentence", params)?;
 
-	let (global_idx, span) =
-		sentence_span_in_doc(&ctx.handle.corpus, parsed.doc, parsed.sent).ok_or_else(|| {
+	let (global_idx, span) = sentence_span_in_doc(&ctx.handle.corpus, parsed.doc, parsed.sent)
+		.ok_or_else(|| {
 			ProtocolError::new(
 				-32602,
 				format!(
@@ -162,7 +162,8 @@ pub(crate) fn handle_text_sentence(
 
 	serialize_reply(TextSentenceReply {
 		surface: ctx.handle.corpus.surface_text(span.start, span.end),
-		sentence_id: ctx.handle
+		sentence_id: ctx
+			.handle
 			.corpus
 			.sentence_id(global_idx)
 			.map(String::from)
@@ -189,11 +190,13 @@ pub(crate) fn handle_text_sentences(
 		));
 	}
 
-	let first = ctx.handle
+	let first = ctx
+		.handle
 		.corpus
 		.first_sentence_of_document(doc_idx)
 		.ok_or_else(|| ProtocolError::new(-32602, "document has no sentences"))?;
-	let last = ctx.handle
+	let last = ctx
+		.handle
 		.corpus
 		.last_sentence_of_document(doc_idx)
 		.ok_or_else(|| ProtocolError::new(-32602, "document has no sentences"))?;
@@ -201,7 +204,8 @@ pub(crate) fn handle_text_sentences(
 	let sent_start = parsed.sent_start.min(doc_sentence_count);
 	let sent_end = parsed.sent_end.min(doc_sentence_count);
 
-	let sentence_spans = ctx.handle
+	let sentence_spans = ctx
+		.handle
 		.corpus
 		.spans()
 		.spans("sentence")
@@ -217,7 +221,8 @@ pub(crate) fn handle_text_sentences(
 		sentences.push(SentenceEntry {
 			sent,
 			surface: ctx.handle.corpus.surface_text(span.start, span.end),
-			sentence_id: ctx.handle
+			sentence_id: ctx
+				.handle
 				.corpus
 				.sentence_id(global_idx)
 				.map(String::from)
@@ -238,10 +243,14 @@ pub(crate) fn handle_text_document(
 	let doc_idx = parsed.doc as usize;
 	let names = ctx.handle.corpus.document_names();
 	let name = names.get(doc_idx).cloned().ok_or_else(|| {
-		ProtocolError::new(-32602, format!("document index {} out of range", parsed.doc))
+		ProtocolError::new(
+			-32602,
+			format!("document index {} out of range", parsed.doc),
+		)
 	})?;
 
-	let document_spans = ctx.handle
+	let document_spans = ctx
+		.handle
 		.corpus
 		.spans()
 		.spans("document")
@@ -313,7 +322,6 @@ pub(crate) fn handle_text_annotations_range(
 
 	serialize_reply(TextAnnotationsRangeReply { rows })
 }
-
 
 #[cfg(test)]
 mod tests {

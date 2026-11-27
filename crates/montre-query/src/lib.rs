@@ -1,14 +1,14 @@
 pub mod ast;
-pub mod parser;
-pub mod planner;
 mod budget;
 pub mod executor;
+pub mod parser;
+pub mod planner;
 mod sequence;
 mod validate;
 
 use thiserror::Error;
 
-pub use ast::Query;
+pub use ast::{wrap_in_components, wrap_in_documents, Query};
 pub use budget::Limits;
 pub use executor::Results;
 
@@ -37,6 +37,12 @@ pub enum QueryError {
 
 	#[error("Unknown label: {0}")]
 	UnknownLabel(String),
+
+	#[error("Unknown alignment: {0}")]
+	UnknownAlignment(String),
+
+	#[error("Layer '{0}' does not hold strings and cannot be compared in a constraint")]
+	UncomparableLayer(String),
 
 	#[error("Quantifier bound {bound} exceeds the supported maximum of {limit}")]
 	QuantifierTooLarge { bound: u32, limit: u32 },

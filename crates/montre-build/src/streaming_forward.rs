@@ -66,7 +66,11 @@ impl StreamingForwardWriter {
 
 	pub fn finalize(&mut self, output_path: &Path) -> std::io::Result<()> {
 		for (_, layer_file) in &mut self.layers {
-			pad_absent(&mut layer_file.writer, layer_file.positions_written, self.token_count)?;
+			pad_absent(
+				&mut layer_file.writer,
+				layer_file.positions_written,
+				self.token_count,
+			)?;
 			layer_file.writer.flush()?;
 		}
 
@@ -84,12 +88,18 @@ impl StreamingForwardWriter {
 		forward_flat::write_mfwd(&layer_builds, self.token_count, output_path)
 	}
 
-	fn get_or_create_layer(&mut self, name: &str, is_numeric: bool) -> std::io::Result<&mut LayerFile> {
+	fn get_or_create_layer(
+		&mut self,
+		name: &str,
+		is_numeric: bool,
+	) -> std::io::Result<&mut LayerFile> {
 		if let Some(&idx) = self.layer_index.get(name) {
 			return Ok(&mut self.layers[idx].1);
 		}
 
-		let path = self.temp_dir.join(format!("layer_{}.tmp", self.layers.len()));
+		let path = self
+			.temp_dir
+			.join(format!("layer_{}.tmp", self.layers.len()));
 		let file = File::create(&path)?;
 		let writer = BufWriter::with_capacity(256 * 1024, file);
 		let layer_file = LayerFile {
@@ -158,9 +168,8 @@ fn read_temp_layer(path: &Path, token_count: u64) -> std::io::Result<Vec<Value>>
 				let len = u16::from_le_bytes(len_buf) as usize;
 				let mut buf = vec![0u8; len];
 				reader.read_exact(&mut buf)?;
-				let s = std::str::from_utf8(&buf).map_err(|e| {
-					std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-				})?;
+				let s = std::str::from_utf8(&buf)
+					.map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 				values.push(Value::from(s));
 			}
 			TAG_INT => {

@@ -32,7 +32,10 @@ pub(crate) fn validate(node: &PlanNode, corpus: &Corpus) -> Result<()> {
 			validate(inner, corpus)
 		}
 		PlanNode::FilterByComponent { inner, components } => {
-			if let Some(name) = components.iter().find(|name| corpus.component(name).is_none()) {
+			if let Some(name) = components
+				.iter()
+				.find(|name| corpus.component(name).is_none())
+			{
 				return Err(QueryError::UnknownComponent(name.clone()));
 			}
 			validate(inner, corpus)
@@ -48,9 +51,7 @@ pub(crate) fn validate(node: &PlanNode, corpus: &Corpus) -> Result<()> {
 		}
 		PlanNode::ProjectAlignment { inner, alignment } => {
 			if corpus.alignment_meta(alignment).is_none() {
-				return Err(QueryError::Execution(format!(
-					"Alignment not found: {alignment}"
-				)));
+				return Err(QueryError::UnknownAlignment(alignment.clone()));
 			}
 			validate(inner, corpus)
 		}
@@ -83,9 +84,7 @@ fn token_layer(layer: &str, corpus: &Corpus) -> Result<()> {
 fn compared_layer(layer: &str, corpus: &Corpus) -> Result<()> {
 	match corpus.layer_kind(layer) {
 		Some(LayerKind::String) => Ok(()),
-		Some(_) => Err(QueryError::Execution(format!(
-			"Layer '{layer}' does not hold strings and cannot be compared in a constraint"
-		))),
+		Some(_) => Err(QueryError::UncomparableLayer(layer.to_string())),
 		None if corpus.layers().iter().any(|known| known == layer) => Ok(()),
 		None => Err(QueryError::UnknownLayer(layer.to_string())),
 	}

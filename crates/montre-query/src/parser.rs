@@ -1,6 +1,6 @@
 use crate::ast::{
-	CmpOp, Constraint, ConstraintOp, ConstraintValue, GlobalConstraint, LabelAttr,
-	Query, TokenPattern,
+	CmpOp, Constraint, ConstraintOp, ConstraintValue, GlobalConstraint, LabelAttr, Query,
+	TokenPattern,
 };
 use crate::{QueryError, Result};
 
@@ -32,6 +32,7 @@ use crate::{QueryError, Result};
 
 pub fn parse(input: &str) -> Result<Query> {
 	let mut parser = Parser::new(input);
+	parser.reject_query_modifier()?;
 	let query = parser.parse_query()?;
 	parser.skip_whitespace();
 	if parser.pos < parser.input.len() {
@@ -174,6 +175,34 @@ impl<'a> Parser<'a> {
 		} else {
 			false
 		}
+	}
+
+	/// `(?…)` at the start of a query is reserved for match modes
+	fn reject_query_modifier(&mut self) -> Result<()> {
+		self.skip_whitespace();
+		if !self.remaining().starts_with("(?") {
+			return Ok(());
+		}
+		let start = self.pos;
+		let mut depth = 0usize;
+		for (offset, c) in self.remaining().char_indices() {
+			match c {
+				'(' => depth += 1,
+				')' => depth -= 1,
+				_ => continue,
+			}
+			if depth == 0 {
+				let modifier = &self.input[start..start + offset + 1];
+				return Err(QueryError::Parse {
+					position: start,
+					message: format!("Unsupported query modifier '{}'", modifier),
+				});
+			}
+		}
+		Err(QueryError::Parse {
+			position: start,
+			message: "Unterminated query modifier: '(?' has no matching ')'".into(),
+		})
 	}
 
 	fn parse_query(&mut self) -> Result<Query> {
@@ -346,7 +375,12 @@ impl<'a> Parser<'a> {
 		let op = self.parse_cmp_op()?;
 		self.skip_whitespace();
 		let value = self.parse_number()?;
-		Ok(GlobalConstraint::Distance { left, right, op, value })
+		Ok(GlobalConstraint::Distance {
+			left,
+			right,
+			op,
+			value,
+		})
 	}
 
 	fn parse_compare_constraint(&mut self) -> Result<GlobalConstraint> {
@@ -453,7 +487,10 @@ impl<'a> Parser<'a> {
 			Some('w') => {
 				let r = self.remaining();
 				r.starts_with("within")
-					&& r[6..].chars().next().map_or(true, |c| !c.is_alphanumeric() && c != '_')
+					&& r[6..]
+						.chars()
+						.next()
+						.map_or(true, |c| !c.is_alphanumeric() && c != '_')
 			}
 			Some('=') if !self.remaining().starts_with("==") => true,
 			_ => false,
@@ -497,12 +534,25 @@ impl<'a> Parser<'a> {
 			self.pos = save;
 			return Err(QueryError::Parse {
 				position: self.pos,
-				message: format!("Unexpected identifier '{}' (did you mean a label like '{}:[...]'?)", name, name),
+				message: format!(
+					"Unexpected identifier '{}' (did you mean a label like '{}:[...]'?)",
+					name, name
+				),
 			});
 		}
 		self.pos += 1;
 
-		const RESERVED: &[&str] = &["doc", "document", "s", "sent", "sentence", "p", "para", "paragraph", "component"];
+		const RESERVED: &[&str] = &[
+			"doc",
+			"document",
+			"s",
+			"sent",
+			"sentence",
+			"p",
+			"para",
+			"paragraph",
+			"component",
+		];
 		if RESERVED.contains(&name.as_str()) {
 			return Err(QueryError::Parse {
 				position: save,
@@ -734,13 +784,13 @@ impl<'a> Parser<'a> {
 			if c == '"' {
 				let word = self.input[start..self.pos].to_string();
 				self.pos += 1;
-				return Ok(Query::token(
-					TokenPattern::new().with_constraint(Constraint {
+				return Ok(Query::token(TokenPattern::new().with_constraint(
+					Constraint {
 						layer: "word".into(),
 						op: ConstraintOp::Eq,
 						value: ConstraintValue::Literal(word),
-					}),
-				));
+					},
+				)));
 			} else if c == '\\' {
 				self.pos += 1;
 				if self.peek_char().is_some() {
@@ -1246,7 +1296,12 @@ mod tests {
 			Query::Constrained { constraints, .. } => {
 				assert_eq!(constraints.len(), 1);
 				match &constraints[0] {
-					GlobalConstraint::Distance { left, right, op, value } => {
+					GlobalConstraint::Distance {
+						left,
+						right,
+						op,
+						value,
+					} => {
 						assert_eq!(left, "a");
 						assert_eq!(right, "b");
 						assert_eq!(*op, CmpOp::Ge);
@@ -1274,7 +1329,8 @@ mod tests {
 
 	#[test]
 	fn parse_global_constraint_after_within() {
-		let query = parse(r#"a:[pos="NOUN"] b:[pos="NOUN"] within s :: a.lemma = b.lemma"#).unwrap();
+		let query =
+			parse(r#"a:[pos="NOUN"] b:[pos="NOUN"] within s :: a.lemma = b.lemma"#).unwrap();
 		match query {
 			Query::Constrained { inner, constraints } => {
 				assert!(matches!(*inner, Query::Within { .. }));
@@ -1287,5 +1343,75 @@ mod tests {
 	#[test]
 	fn parse_global_constraint_bare_fails() {
 		assert!(parse(r#":: a.lemma = b.lemma"#).is_err());
+	}
+
+	fn parse_error(input: &str) -> (usize, String) {
+		match parse(input) {
+			Err(QueryError::Parse { position, message }) => (position, message),
+			other => panic!("expected a parse error for {input:?}, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn query_modifier_is_reserved() {
+		let (position, message) = parse_error(r#"(?maximal) [pos="NOUN"]"#);
+		assert_eq!(position, 0);
+		assert_eq!(message, "Unsupported query modifier '(?maximal)'");
+	}
+
+	#[test]
+	fn query_modifier_with_argument_is_reserved() {
+		let (position, message) = parse_error(r#"  (?by n) [pos="ADJ"]* n:[pos="NOUN"]"#);
+		assert_eq!(position, 2);
+		assert_eq!(message, "Unsupported query modifier '(?by n)'");
+	}
+
+	#[test]
+	fn query_modifier_alone_is_reserved() {
+		let (_, message) = parse_error("(?)");
+		assert_eq!(message, "Unsupported query modifier '(?)'");
+	}
+
+	#[test]
+	fn query_modifier_quotes_up_to_matching_paren() {
+		let (_, message) = parse_error(r#"(?by (a b)) [pos="NOUN"]"#);
+		assert_eq!(message, "Unsupported query modifier '(?by (a b))'");
+	}
+
+	#[test]
+	fn unterminated_query_modifier_fails() {
+		let (position, message) = parse_error(r#"(?by n [pos="NOUN"]"#);
+		assert_eq!(position, 0);
+		assert!(message.starts_with("Unterminated query modifier"));
+	}
+
+	#[test]
+	fn question_mark_group_elsewhere_keeps_generic_error() {
+		let (position, message) = parse_error(r#"[pos="DET"] (?x) [pos="NOUN"]"#);
+		assert_eq!(position, 13);
+		assert_eq!(message, "Unexpected character: '?'");
+		let (position, message) = parse_error(r#"((?x) [pos="NOUN"])"#);
+		assert_eq!(position, 2);
+		assert_eq!(message, "Unexpected character: '?'");
+	}
+
+	#[test]
+	fn regex_flag_inside_slashes_still_parses() {
+		let query = parse(r#"[word=/(?i)chat/]"#).unwrap();
+		match query {
+			Query::Token(pattern) => {
+				assert_eq!(
+					pattern.constraints[0].value,
+					ConstraintValue::Regex("(?i)chat".into())
+				);
+			}
+			_ => panic!("Expected Token query"),
+		}
+		assert!(parse(r#"[pos="DET"] [word=/(?i)chat/] within s"#).is_ok());
+	}
+
+	#[test]
+	fn group_at_start_still_parses() {
+		assert!(parse(r#"([pos="ADJ"] | [pos="ADV"]) [pos="NOUN"]"#).is_ok());
 	}
 }

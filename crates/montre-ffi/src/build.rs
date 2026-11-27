@@ -1,6 +1,6 @@
 use std::os::raw::c_char;
 
-use crate::error::{set_error, clear_error};
+use crate::error::{clear_error, set_error};
 use crate::strings::borrow_cstr;
 
 /// Build a single-component corpus from a directory of CoNLL-U files.

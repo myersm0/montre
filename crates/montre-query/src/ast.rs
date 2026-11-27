@@ -83,8 +83,14 @@ pub enum ConstraintValue {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GlobalConstraint {
-	Eq { left: LabelAttr, right: LabelAttr },
-	Ne { left: LabelAttr, right: LabelAttr },
+	Eq {
+		left: LabelAttr,
+		right: LabelAttr,
+	},
+	Ne {
+		left: LabelAttr,
+		right: LabelAttr,
+	},
 	Distance {
 		left: String,
 		right: String,
@@ -141,19 +147,39 @@ impl Query {
 	}
 }
 
+/// Restricts `query` to the named components, as `within component:…` does.
+/// A constraint clause stays outermost, where the parser puts it.
+pub fn wrap_in_components(query: Query, components: Vec<String>) -> Query {
+	wrap_inside_constraints(query, |inner| Query::WithinComponent { inner, components })
+}
+
+/// Restricts `query` to the named documents, as `within doc:…` does. A
+/// constraint clause stays outermost, where the parser puts it.
+pub fn wrap_in_documents(query: Query, documents: Vec<String>) -> Query {
+	wrap_inside_constraints(query, |inner| Query::WithinDocument { inner, documents })
+}
+
+fn wrap_inside_constraints(query: Query, wrap: impl FnOnce(Box<Query>) -> Query) -> Query {
+	match query {
+		Query::Constrained { inner, constraints } => Query::Constrained {
+			inner: Box::new(wrap(inner)),
+			constraints,
+		},
+		other => wrap(Box::new(other)),
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
 
 	#[test]
 	fn build_simple_query() {
-		let query = Query::token(
-			TokenPattern::new().with_constraint(Constraint {
-				layer: "word".into(),
-				op: ConstraintOp::Eq,
-				value: ConstraintValue::Literal("house".into()),
-			}),
-		);
+		let query = Query::token(TokenPattern::new().with_constraint(Constraint {
+			layer: "word".into(),
+			op: ConstraintOp::Eq,
+			value: ConstraintValue::Literal("house".into()),
+		}));
 
 		match query {
 			Query::Token(pattern) => {
@@ -166,26 +192,47 @@ mod tests {
 
 	#[test]
 	fn build_sequence_query() {
-		let det = Query::token(
-			TokenPattern::new().with_constraint(Constraint {
-				layer: "pos".into(),
-				op: ConstraintOp::Eq,
-				value: ConstraintValue::Literal("DET".into()),
-			}),
-		);
-		let noun = Query::token(
-			TokenPattern::new().with_constraint(Constraint {
-				layer: "pos".into(),
-				op: ConstraintOp::Eq,
-				value: ConstraintValue::Literal("NOUN".into()),
-			}),
-		);
+		let det = Query::token(TokenPattern::new().with_constraint(Constraint {
+			layer: "pos".into(),
+			op: ConstraintOp::Eq,
+			value: ConstraintValue::Literal("DET".into()),
+		}));
+		let noun = Query::token(TokenPattern::new().with_constraint(Constraint {
+			layer: "pos".into(),
+			op: ConstraintOp::Eq,
+			value: ConstraintValue::Literal("NOUN".into()),
+		}));
 
 		let query = Query::sequence(vec![det, noun]);
 
 		match query {
 			Query::Sequence(parts) => assert_eq!(parts.len(), 2),
 			_ => panic!("Expected Sequence"),
+		}
+	}
+
+	#[test]
+	fn restrictions_match_the_parsed_within_clauses() {
+		let cases = [
+			(
+				r#"[pos="NOUN"]"#,
+				r#"[pos="NOUN"] within component:fr,en within doc:"a""#,
+			),
+			(
+				r#"a:[] b:[] :: a.lemma = b.lemma"#,
+				r#"a:[] b:[] within component:fr,en within doc:"a" :: a.lemma = b.lemma"#,
+			),
+			(
+				r#"[lemma="maison"] =labse=>"#,
+				r#"[lemma="maison"] =labse=> within component:fr,en within doc:"a""#,
+			),
+		];
+		for (query, restricted) in cases {
+			let wrapped = wrap_in_documents(
+				wrap_in_components(crate::parse(query).unwrap(), vec!["fr".into(), "en".into()]),
+				vec!["a".into()],
+			);
+			assert_eq!(wrapped, crate::parse(restricted).unwrap(), "{query}");
 		}
 	}
 }

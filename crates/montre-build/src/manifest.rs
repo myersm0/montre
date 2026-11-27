@@ -136,7 +136,10 @@ edges = "alignments/labse.tsv"
 		assert!(manifest.components.contains_key("en"));
 
 		assert_eq!(manifest.components["fr"].language, Some("fr".to_string()));
-		assert_eq!(manifest.components["en"].path, PathBuf::from("data/en/conllu"));
+		assert_eq!(
+			manifest.components["en"].path,
+			PathBuf::from("data/en/conllu")
+		);
 
 		assert_eq!(manifest.alignments.len(), 1);
 		assert!(manifest.alignments.contains_key("labse"));

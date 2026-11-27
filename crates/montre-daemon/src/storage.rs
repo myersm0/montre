@@ -135,9 +135,8 @@ where
 			name: Some(name.to_string()),
 			form: ResultForm::QueryBacked,
 		};
-		let line = serde_json::to_string(&metadata).map_err(|error| {
-			io::Error::new(io::ErrorKind::InvalidData, error)
-		})?;
+		let line = serde_json::to_string(&metadata)
+			.map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
 		content.push_str(&line);
 		content.push('\n');
 	}
@@ -171,10 +170,7 @@ pub(crate) fn load_named_results(
 			}
 		};
 		let Some(name) = metadata.name else {
-			tracing::warn!(
-				line = index + 1,
-				"skipping named-results line with no name",
-			);
+			tracing::warn!(line = index + 1, "skipping named-results line with no name",);
 			continue;
 		};
 		out.insert(
@@ -235,8 +231,8 @@ mod tests {
 	fn acquire_daemon_lock_blocks_while_held() {
 		let temp = TempDir::new().expect("tempdir");
 		let first = acquire_daemon_lock(temp.path()).expect("first");
-		let error = acquire_daemon_lock(temp.path())
-			.expect_err("second should fail while first held");
+		let error =
+			acquire_daemon_lock(temp.path()).expect_err("second should fail while first held");
 		assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
 		drop(first);
 	}
@@ -355,12 +351,8 @@ mod tests {
 		let temp = TempDir::new().expect("tempdir");
 		let alpha = record("r-alpha", "[pos=\"NOUN\"]", 100);
 		persist_named_results(temp.path(), "corpus-id", vec![("alpha", &alpha)]).unwrap();
-		persist_named_results::<std::iter::Empty<_>>(
-			temp.path(),
-			"corpus-id",
-			std::iter::empty(),
-		)
-		.unwrap();
+		persist_named_results::<std::iter::Empty<_>>(temp.path(), "corpus-id", std::iter::empty())
+			.unwrap();
 		let loaded = load_named_results(temp.path()).unwrap();
 		assert!(loaded.is_empty());
 	}
@@ -380,7 +372,11 @@ mod tests {
 			form: ResultForm::QueryBacked,
 		})
 		.unwrap();
-		let content = format!("{}\n{{not valid json\n\n{}\n", good, good.replace("good", "good2"));
+		let content = format!(
+			"{}\n{{not valid json\n\n{}\n",
+			good,
+			good.replace("good", "good2")
+		);
 		std::fs::write(&path, content).unwrap();
 		let loaded = load_named_results(temp.path()).unwrap();
 		assert_eq!(loaded.len(), 2);
@@ -439,7 +435,11 @@ mod tests {
 		std::fs::write(&path, content).unwrap();
 
 		let loaded = load_named_results(temp.path()).expect("load");
-		assert_eq!(loaded.len(), 1, "good prefix record should load, truncated last line skipped");
+		assert_eq!(
+			loaded.len(),
+			1,
+			"good prefix record should load, truncated last line skipped"
+		);
 		assert!(loaded.contains_key("alpha"));
 	}
 
@@ -453,7 +453,11 @@ mod tests {
 		std::fs::write(&temporary_path, b"completely different garbage").unwrap();
 
 		let loaded = load_named_results(temp.path()).expect("load");
-		assert_eq!(loaded.len(), 1, "canonical content should load; orphan .tmp ignored");
+		assert_eq!(
+			loaded.len(),
+			1,
+			"canonical content should load; orphan .tmp ignored"
+		);
 		assert!(loaded.contains_key("alpha"));
 	}
 }

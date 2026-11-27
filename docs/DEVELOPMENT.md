@@ -966,7 +966,12 @@ A rework of sequence execution and name validation, checked by a differential te
 **Match semantics**
 
 - A match is a non-empty span of tokens inside one document. Sequences cross sentence boundaries unless `within s` is given; they never cross document boundaries.
+- A query reports every distinct span that satisfies it, including nested and overlapping ones, and a count counts those spans. On *big red house*, `[pos="ADJ"]* [pos="NOUN"]` gives three hits. This is a deliberate definition of a match, not an artifact of the executor: it was decided in November 2026, against rules that select among overlapping spans, such as CWB's default matching strategy.
 - Results are sorted by (start, end) and hold one hit per distinct span.
+- Restricting a query only removes matching spans. A restricted query's matches are exactly the unrestricted query's matches that satisfy the restriction, with one difference between the two kinds of restriction:
+  - `within`, component and document filters test only the outer span. A filtered query's hits are exactly the unfiltered query's hits that pass the filter, captures included.
+  - A global constraint can change which capture assignment a span reports, because constraints are existential over assignments. So the guarantee is on spans: the spans of a constrained query are a subset of the spans of the same query without the constraint, and a surviving hit may report different captures. On `x y x noun`, `a:[]{1,2} b:[]{1,2} [pos="NOUN"]` reports (0,4) with `a` on *x*; adding `:: a.word = b.word` keeps (0,4) but reports `a` on *x y*.
+- Why every span: it keeps every restriction a filter, so count(Q with C) / count(Q) is always a proportion of spans, which no rule that selects among overlapping spans preserves. Choosing a unit of observation (one hit per noun, maximal spans) is planned as an explicit modifier in the query string, so that a saved query carries its own semantics; a query beginning with `(?…)` is reserved for these and is a parse error until then.
 - A parenthesized group is a sub-pattern of any length: `([pos="DET"] [pos="ADJ"] | [pos="ADJ"]) [pos="NOUN"]`, `([pos="NOUN"] [pos="ADP"])+`. Alternation between multi-token sequences keeps whole spans.
 - A label binds to the span its element matched. A label on a quantified element covers the whole repetition; labels inside a repeated group take the values of the last repetition that matched something. An optional element that matched nothing leaves its label unbound (no zero-width capture).
 - When several capture assignments produce the same span, the hit reports the smallest one. Assignments are compared label by label in query order: a bound label before an unbound one, then the earliest start, then the shortest span. `a:[]? []? b:[]` over two tokens therefore reports `a` on the first token, not `a` skipped.
@@ -989,7 +994,9 @@ A rework of sequence execution and name validation, checked by a differential te
 
 **Limits**
 
-- `montre_query::Limits` holds three ceilings, and `execute_with` / `execute_count_with` take one. `execute` and `execute_count` use `Limits::default()`, so the CLI, the FFI and Python bindings are covered without changes. The daemon uses its own `DEFAULT_LIMITS`, below.
+- `montre_query::Limits` holds three ceilings, and `execute_with` / `execute_count_with` take one. `execute` and `execute_count` use `Limits::default()`, so the FFI functions without limits and the Python bindings are covered without changes. The daemon uses its own `DEFAULT_LIMITS`, below.
+- The CLI's `query` and `count` take `--max-intermediate-matches`, `--max-expansions` and `--max-results`, each a whole number or `unlimited`; unset, a ceiling keeps the engine default. A query over a limit exits with status 1 and an error that names the resource, the limit and the flag that raises it. `--max-results` is separate from `query --limit`, which only shortens what is printed, and applies to `count` only with `--by-document`, the one count that builds hits. `count --by-component` runs each component's count separately, each under the full limits.
+- The FFI has `_with_limits` variants of `montre_query`, `montre_query_count` and their component-scoped forms, and `montre_default_limits`. `montre_last_error_kind` reports limit failures as kind 4, distinct from parse errors (2), queries the corpus cannot answer (3) and everything else (1).
 - `max_intermediate_matches` (default 10 million, roughly 1.2 GB at the limit) counts the intermediate matches a query holds at once, across every thread and nested group. A match counts once for up to three labels in the query and more beyond that.
 - `max_expansions` (default unlimited) counts the partial matches and group continuations a query creates in total: a ceiling on work rather than memory. On a laptop the engine does about 16 million a second on an ambiguous pattern.
 - `max_results` (default unlimited) counts the hits a query returns, as they are produced and after span, component and document filters, so a filter that discards most matches does not trip it. A count builds no hits and is not subject to it.
@@ -1010,25 +1017,25 @@ What is counted as intermediate:
 What is not counted as intermediate:
 
 - The hits of a result produced batch by batch. Those fall under `max_results`. Without one, a query with a very large result uses memory in proportion: `a:[]{1,100}` over one 200,000-token document is 20 million hits and about 5.7 GB, where its count takes 33 MB.
-- The list of start positions of one document, 8 bytes per candidate position.
+- The candidate start positions of a sequence. They are gathered a window at a time, not a document at a time: each step that supplies start positions contributes at most 2¹⁴ (16,384) of them to a window, 8 bytes each, and the window ends where the first such step reaches that number. So the buffer is bounded by the window, whatever the size of the document.
 - Allocator overhead, vector capacity and sort scratch space. The limits are counts, not byte figures.
 
 So `max_intermediate_matches` governs the engine's working storage, and `max_results` the size of what it hands back. Whether a process such as the daemon stays within its memory also depends on how many results it keeps and how many queries it runs at once; neither is limited here.
 
 **Daemon limits**
 
-- `montre_daemon::DEFAULT_LIMITS` applies to `query.execute`, `query.execute_count` and the replay of saved queries: 10 million intermediate matches, a billion expansions (about a minute of matching on a laptop), and 5 million hits (about 240 MB before captures). `ServeOptions::limits` sets other values; `montre serve` has no flags for them yet.
+- `montre_daemon::DEFAULT_LIMITS` applies to `query.execute`, `query.execute_count` and the replay of saved queries: 10 million intermediate matches, a billion expansions (about a minute of matching on a laptop), and 5 million hits (about 240 MB before captures). `ServeOptions::limits` sets other values, and `montre serve` takes the same three flags as `query` and `count`; unset, a ceiling keeps the daemon default.
 - A refused query returns error `1102` (execution error), with a message naming the resource and the limit.
 
 A label around a single quantified element, as in `a:([]{1,100})`, is planned as that element labeled and needs no group table.
 
 **Index metadata**
 
-- `corpus.json` records `forward_only_layers`. Corpora built before this field existed load unchanged; on those, a token query on a forward-only string layer returns an empty result as it used to, where a newly built corpus reports `UnindexedLayer`.
+- `corpus.json` records `forward_only_layers`. A corpus built before this field existed loads unchanged, with the field taken to be `head` and `deps`, the fixed set every builder has left out of the inverted index since 1 April 2026; so a token query on `deps` reports `UnindexedLayer` there as on a new build. The set is consulted only for a layer the inverted index has no entry for, so an older build that did index a layer is unaffected.
 
 **Tests**
 
-- `crates/montre-query/tests/differential.rs` generates small random corpora and random queries (quantifiers, nested groups, alternation, labels, `within s`, global constraints) and compares spans, counts, the exact reported capture assignment, and run-to-run stability against the reference matcher. Run more cases with `PROPTEST_CASES=4000 cargo test -p montre-query --test differential`.
+- `crates/montre-query/tests/differential.rs` generates small random corpora and random queries (quantifiers, nested groups, alternation, labels, `within s`, global constraints) and compares spans, counts, the exact reported capture assignment, and run-to-run stability against the reference matcher. A second property checks the restriction guarantees on the executor alone: each generated query without a top-level `within s` is run again with it, and must report exactly its earlier hits that lie inside one sentence, captures included; each query with constraints is run again without any, and must report a superset of its spans. Run more cases with `PROPTEST_CASES=4000 cargo test -p montre-query --test differential`.
 - Regression tests for each corrected behaviour are at the end of `executor_integration.rs`, including the ambiguous patterns that must either answer within a tight limit or fail with `LimitExceeded`. The differential test's corpora are at most 36 tokens, so resource behaviour is covered by those targeted tests and not by the random ones.
 
 **Still to regenerate**
@@ -1088,7 +1095,7 @@ Quantifier queries and `ScanAll`-in-first-position use document-parallel executi
 
 | Benchmark | Time | Notes |
 |---|---|---|
-| `corpus_open` (1.5M token Maupassant) | 20ms | forward + spans memory-mapped; inverted + lexicon bincode-deserialized |
+| `corpus_open` (1.5M token Maupassant) | 20ms | forward + spans memory-mapped; inverted index memory-mapped and bincode-deserialized from the mapping, bitmaps in parallel; lexicon not loaded |
 | `corpus_open` (1.5M + 10M token Maupassant + ELTeC-fra) | 116ms | same; remaining time is inverted index deserialization |
 | `corpus_open` (pre-mmap, v0.3, 1.5M token Maupassant) | 285ms | all four indexes bincode-deserialized with rayon |
 
@@ -1129,8 +1136,8 @@ montre build -i data/ -o idx/ --strict
 ### Query errors
 
 - Parse errors: report position and expected tokens
-- Plan errors: unsupported constructs flagged at planning time
-- Execution errors: layer not found, index corruption
+- Invalid queries: names the corpus does not have (layer, span layer, component, document, alignment, label), unindexed layers, constraints comparing a layer that does not hold strings, and quantifier bounds above 100, all reported before execution
+- Execution errors: exceeded limits and internal failures
 
 ## Adding new input formats
 
@@ -1155,7 +1162,11 @@ JSON and XML are source formats only. Montre's internal representation remains t
 cargo test --workspace        # all crates
 cargo test -p montre-query    # single crate
 cargo test -p montre-query --test executor_integration   # integration tests
+cargo fmt --all --check       # formatting, as CI checks it
+cargo clippy --workspace --all-targets
 ```
+
+CI runs the tests on Linux and macOS, and checks formatting with rustfmt (hard tabs, from `rustfmt.toml`). It runs clippy too but does not yet fail on its warnings.
 
 The test suite has 180+ tests across all crates. The integration test suite (`crates/montre-query/tests/executor_integration.rs`) covers end-to-end query execution including sequences, quantifiers, alternation edge cases, within constraints, multi-document queries, alignment projection, feats decomposition, labeled captures, global constraint evaluation, the Results API, head layer round-trip, UPOS/XPOS layer verification, `pos` alias resolution, sentence ID preservation with fallback generation, MWT surface text reconstruction, SpaceAfter handling, deps forward-only verification, and empty node preservation.
 

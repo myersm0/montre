@@ -22,12 +22,30 @@ struct DensityCase {
 
 fn density_cases() -> Vec<DensityCase> {
 	vec![
-		DensityCase { label: "100.0%", fraction: 1.0 },
-		DensityCase { label: "54.0%", fraction: 0.54 },
-		DensityCase { label: "35.0%", fraction: 0.35 },
-		DensityCase { label: "10.0%", fraction: 0.10 },
-		DensityCase { label: "1.0%", fraction: 0.01 },
-		DensityCase { label: "0.001%", fraction: 0.00001 },
+		DensityCase {
+			label: "100.0%",
+			fraction: 1.0,
+		},
+		DensityCase {
+			label: "54.0%",
+			fraction: 0.54,
+		},
+		DensityCase {
+			label: "35.0%",
+			fraction: 0.35,
+		},
+		DensityCase {
+			label: "10.0%",
+			fraction: 0.10,
+		},
+		DensityCase {
+			label: "1.0%",
+			fraction: 0.01,
+		},
+		DensityCase {
+			label: "0.001%",
+			fraction: 0.00001,
+		},
 	]
 }
 
@@ -62,21 +80,17 @@ fn bench_contains(c: &mut Criterion) {
 
 	for case in &cases {
 		let bitmap = build_bitmap(case.fraction);
-		group.bench_with_input(
-			BenchmarkId::new("contains", case.label),
-			&(),
-			|b, _| {
-				b.iter(|| {
-					let mut hits = 0u32;
-					for &pos in &probes {
-						if bitmap.contains(black_box(pos)) {
-							hits += 1;
-						}
+		group.bench_with_input(BenchmarkId::new("contains", case.label), &(), |b, _| {
+			b.iter(|| {
+				let mut hits = 0u32;
+				for &pos in &probes {
+					if bitmap.contains(black_box(pos)) {
+						hits += 1;
 					}
-					hits
-				})
-			},
-		);
+				}
+				hits
+			})
+		});
 	}
 	group.finish();
 }
@@ -89,19 +103,15 @@ fn bench_rank(c: &mut Criterion) {
 
 	for case in &cases {
 		let bitmap = build_bitmap(case.fraction);
-		group.bench_with_input(
-			BenchmarkId::new("rank", case.label),
-			&(),
-			|b, _| {
-				b.iter(|| {
-					let mut total = 0u64;
-					for &pos in &probes {
-						total += bitmap.rank(black_box(pos)) as u64;
-					}
-					total
-				})
-			},
-		);
+		group.bench_with_input(BenchmarkId::new("rank", case.label), &(), |b, _| {
+			b.iter(|| {
+				let mut total = 0u64;
+				for &pos in &probes {
+					total += bitmap.rank(black_box(pos)) as u64;
+				}
+				total
+			})
+		});
 	}
 	group.finish();
 }
@@ -147,9 +157,7 @@ fn bench_bitmap_stats(c: &mut Criterion) {
 		group.bench_with_input(
 			BenchmarkId::new("cardinality_check", case.label),
 			&(),
-			|b, _| {
-				b.iter(|| bitmap.len() == black_box(TOKEN_COUNT as u64))
-			},
+			|b, _| b.iter(|| bitmap.len() == black_box(TOKEN_COUNT as u64)),
 		);
 
 		eprintln!(

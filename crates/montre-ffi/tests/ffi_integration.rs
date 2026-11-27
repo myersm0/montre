@@ -3,21 +3,26 @@ use std::os::raw::c_char;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use montre_ffi::error::*;
-use montre_ffi::strings::*;
-use montre_ffi::corpus::*;
-use montre_ffi::tokens::*;
-use montre_ffi::query::*;
-use montre_ffi::spans::*;
 use montre_ffi::alignment::*;
 use montre_ffi::build::*;
+use montre_ffi::corpus::*;
+use montre_ffi::error::*;
+use montre_ffi::query::*;
+use montre_ffi::spans::*;
+use montre_ffi::strings::*;
+use montre_ffi::tokens::*;
 use montre_ffi::HitList;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 fn temp_path(prefix: &str) -> PathBuf {
 	let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-	std::env::temp_dir().join(format!("montre_ffi_test_{}_{}_{}", std::process::id(), prefix, id))
+	std::env::temp_dir().join(format!(
+		"montre_ffi_test_{}_{}_{}",
+		std::process::id(),
+		prefix,
+		id
+	))
 }
 
 fn cstr(s: &str) -> CString {
@@ -139,9 +144,7 @@ fn single_component_lifecycle() {
 		let output = cstr(output_dir.to_str().unwrap());
 
 		// build
-		let rc = montre_build_directory(
-			name.as_ptr(), input.as_ptr(), output.as_ptr(), 1, 0,
-		);
+		let rc = montre_build_directory(name.as_ptr(), input.as_ptr(), output.as_ptr(), 1, 0);
 		assert_eq!(rc, 1, "build failed: {:?}", read_last_error());
 
 		// open
@@ -207,7 +210,11 @@ fn single_component_lifecycle() {
 
 		// span_containing with null out-params (just need the index)
 		let idx = montre_corpus_span_containing(
-			corpus, sent.as_ptr(), 0, std::ptr::null_mut(), std::ptr::null_mut(),
+			corpus,
+			sent.as_ptr(),
+			0,
+			std::ptr::null_mut(),
+			std::ptr::null_mut(),
 		);
 		assert_eq!(idx, 0);
 
@@ -277,8 +284,14 @@ fn single_component_lifecycle() {
 		let mut offsets: *mut u64 = std::ptr::null_mut();
 		let mut ctx_len: u64 = 0;
 		montre_context_tokens(
-			single_hits, corpus, 1, word.as_ptr(),
-			&mut positions, &mut tokens, &mut offsets, &mut ctx_len,
+			single_hits,
+			corpus,
+			1,
+			word.as_ptr(),
+			&mut positions,
+			&mut tokens,
+			&mut offsets,
+			&mut ctx_len,
 		);
 		// window=1 around "chat" (pos 1): positions 0,1,2 = "Le","chat","dort"
 		assert_eq!(ctx_len, 3);
@@ -446,8 +459,8 @@ fn multi_component_lifecycle() {
 		let mut edge_count: u64 = 0;
 		let edges = montre_corpus_alignment_edges(corpus, align.as_ptr(), &mut edge_count);
 		assert!(!edges.is_null());
-		assert_eq!(edge_count, 2); // 2 sentence pairs
-		// each edge is [src_doc, src_sent, tgt_doc, tgt_sent]
+		// 2 sentence pairs, each edge [src_doc, src_sent, tgt_doc, tgt_sent]
+		assert_eq!(edge_count, 2);
 		let e0_src_doc = *edges.add(0);
 		let e0_src_sent = *edges.add(1);
 		let e0_tgt_doc = *edges.add(2);
@@ -471,10 +484,18 @@ fn multi_component_lifecycle() {
 		let mut no_align: u64 = 0;
 		let mut projected: u64 = 0;
 		let target_hits = montre_project(
-			corpus, fr_hits, align.as_ptr(),
-			&mut unmapped, &mut no_align, &mut projected,
+			corpus,
+			fr_hits,
+			align.as_ptr(),
+			&mut unmapped,
+			&mut no_align,
+			&mut projected,
 		);
-		assert!(!target_hits.is_null(), "projection failed: {:?}", read_last_error());
+		assert!(
+			!target_hits.is_null(),
+			"projection failed: {:?}",
+			read_last_error()
+		);
 		assert_eq!(projected, 1);
 		assert_eq!(unmapped, 0);
 		assert_eq!(montre_hitlist_len(target_hits), 1);
@@ -490,8 +511,16 @@ fn multi_component_lifecycle() {
 		// projected hits should have UNPOPULATED context before populate_context
 		let doc_idx = montre_hit_document_index(target_hits, 0);
 		let sent_idx = montre_hit_sentence_index(target_hits, 0);
-		assert_eq!(doc_idx, u32::MAX, "projected hit should have UNPOPULATED document_index");
-		assert_eq!(sent_idx, u32::MAX, "projected hit should have UNPOPULATED sentence_index");
+		assert_eq!(
+			doc_idx,
+			u32::MAX,
+			"projected hit should have UNPOPULATED document_index"
+		);
+		assert_eq!(
+			sent_idx,
+			u32::MAX,
+			"projected hit should have UNPOPULATED sentence_index"
+		);
 
 		// populate_context fills in real indices
 		montre_hitlist_populate_context(target_hits, corpus);
@@ -504,24 +533,31 @@ fn multi_component_lifecycle() {
 		// components are sorted: en=0, fr=1
 		let mut span_start: u64 = 0;
 		let mut span_end: u64 = 0;
-		let global_sent = montre_corpus_sentence_span(
-			corpus, 1, 0, 0, &mut span_start, &mut span_end,
-		);
+		let global_sent =
+			montre_corpus_sentence_span(corpus, 1, 0, 0, &mut span_start, &mut span_end);
 		assert!(global_sent >= 0, "sentence_span failed");
 		assert_eq!(span_end - span_start, 4); // "Le chat dort ." = 4 tokens
 
 		// sentence_span: fr doc 0, sentence 1
-		let global_sent_1 = montre_corpus_sentence_span(
-			corpus, 1, 0, 1, &mut span_start, &mut span_end,
-		);
+		let global_sent_1 =
+			montre_corpus_sentence_span(corpus, 1, 0, 1, &mut span_start, &mut span_end);
 		assert!(global_sent_1 >= 0);
 		assert_eq!(span_end - span_start, 5); // "La vieille maison dort ." = 5 tokens
 		assert_ne!(global_sent, global_sent_1);
 
 		// sentence_span: out of bounds
-		assert_eq!(montre_corpus_sentence_span(corpus, 1, 0, 99, &mut span_start, &mut span_end), -1);
-		assert_eq!(montre_corpus_sentence_span(corpus, 99, 0, 0, &mut span_start, &mut span_end), -1);
-		assert_eq!(montre_corpus_sentence_span(corpus, 1, 99, 0, &mut span_start, &mut span_end), -1);
+		assert_eq!(
+			montre_corpus_sentence_span(corpus, 1, 0, 99, &mut span_start, &mut span_end),
+			-1
+		);
+		assert_eq!(
+			montre_corpus_sentence_span(corpus, 99, 0, 0, &mut span_start, &mut span_end),
+			-1
+		);
+		assert_eq!(
+			montre_corpus_sentence_span(corpus, 1, 99, 0, &mut span_start, &mut span_end),
+			-1
+		);
 
 		// alignment_coverage: fr side of "sentence" alignment
 		let mut cov_doc_indices: *mut u32 = std::ptr::null_mut();
@@ -529,8 +565,12 @@ fn multi_component_lifecycle() {
 		let mut cov_total: *mut u32 = std::ptr::null_mut();
 		let mut cov_len: u64 = 0;
 		let rc = montre_corpus_alignment_coverage(
-			corpus, align.as_ptr(),
-			&mut cov_doc_indices, &mut cov_aligned, &mut cov_total, &mut cov_len,
+			corpus,
+			align.as_ptr(),
+			&mut cov_doc_indices,
+			&mut cov_aligned,
+			&mut cov_total,
+			&mut cov_len,
 		);
 		assert_eq!(rc, 1, "alignment_coverage failed: {:?}", read_last_error());
 		assert_eq!(cov_len, 1); // 1 document in fr component
@@ -573,9 +613,274 @@ fn error_handling() {
 		assert_eq!(montre_query_count(std::ptr::null(), std::ptr::null()), -1);
 
 		// build with null args
-		assert_eq!(montre_build_directory(
-			std::ptr::null(), std::ptr::null(), std::ptr::null(), 0, 0,
-		), 0);
+		assert_eq!(
+			montre_build_directory(std::ptr::null(), std::ptr::null(), std::ptr::null(), 0, 0,),
+			0
+		);
+	}
+}
+
+// ===========================================================================
+// Limits and error kinds
+// ===========================================================================
+
+const KIND_NONE: i32 = 0;
+const KIND_OTHER: i32 = 1;
+const KIND_QUERY_PARSE: i32 = 2;
+const KIND_QUERY_INVALID: i32 = 3;
+const KIND_LIMIT_EXCEEDED: i32 = 4;
+
+unsafe fn open_single_component() -> *mut montre_index::Corpus {
+	let input_dir = write_single_component_dir();
+	let output_dir = temp_path("corpus_limits");
+	let name = cstr("test_single");
+	let input = cstr(input_dir.to_str().unwrap());
+	let output = cstr(output_dir.to_str().unwrap());
+	let rc = montre_build_directory(name.as_ptr(), input.as_ptr(), output.as_ptr(), 1, 0);
+	assert_eq!(rc, 1, "build failed: {:?}", read_last_error());
+	let corpus = montre_corpus_open(output.as_ptr());
+	assert!(!corpus.is_null(), "open failed: {:?}", read_last_error());
+	corpus
+}
+
+unsafe fn open_two_components() -> *mut montre_index::Corpus {
+	let (_, manifest_path) = write_multi_component_dirs();
+	let output_dir = temp_path("corpus_limits_multi");
+	let manifest = cstr(manifest_path.to_str().unwrap());
+	let output = cstr(output_dir.to_str().unwrap());
+	let rc = montre_build_manifest(manifest.as_ptr(), output.as_ptr(), 0, 0);
+	assert_eq!(rc, 1, "build failed: {:?}", read_last_error());
+	let corpus = montre_corpus_open(output.as_ptr());
+	assert!(!corpus.is_null(), "open failed: {:?}", read_last_error());
+	corpus
+}
+
+unsafe fn spans(hits: *mut HitList) -> Vec<(u64, u64)> {
+	assert!(!hits.is_null(), "query failed: {:?}", read_last_error());
+	let spans = (0..montre_hitlist_len(hits))
+		.map(|i| (montre_hit_start(hits, i), montre_hit_end(hits, i)))
+		.collect();
+	montre_hitlist_free(hits);
+	spans
+}
+
+fn within_component_by_hand(query: &str, component: &str) -> String {
+	let restriction = format!("within component:{component}");
+	match query.split_once(" :: ") {
+		Some((pattern, constraints)) => format!("{pattern} {restriction} :: {constraints}"),
+		None => format!("{query} {restriction}"),
+	}
+}
+
+const AMBIGUOUS: &str = "[]{1,3}";
+const CONSTRAINED: &str = "a:[] []* b:[] :: a.upos = b.upos";
+
+#[test]
+fn default_limits_are_the_engine_defaults() {
+	unsafe {
+		let (mut intermediate, mut expansions, mut results) = (0, 0, 0);
+		montre_default_limits(&mut intermediate, &mut expansions, &mut results);
+		assert_eq!(intermediate, 10_000_000);
+		assert_eq!(expansions, u64::MAX);
+		assert_eq!(results, u64::MAX);
+		montre_default_limits(
+			std::ptr::null_mut(),
+			std::ptr::null_mut(),
+			std::ptr::null_mut(),
+		);
+	}
+}
+
+#[test]
+fn query_over_a_limit_sets_the_limit_kind() {
+	unsafe {
+		let corpus = open_two_components();
+		let ambiguous = cstr(AMBIGUOUS);
+		let component = cstr("fr");
+		let unlimited = u64::MAX;
+
+		let total = montre_query_count(corpus, ambiguous.as_ptr());
+		assert_eq!(montre_last_error_kind(), KIND_NONE);
+		assert!(read_last_error().is_none());
+		assert!(total > 5);
+
+		assert_eq!(
+			montre_query_count_with_limits(corpus, ambiguous.as_ptr(), 5, unlimited, unlimited),
+			-1
+		);
+		assert_eq!(montre_last_error_kind(), KIND_LIMIT_EXCEEDED);
+		assert!(read_last_error()
+			.unwrap()
+			.contains("limit of 5 intermediate matches"));
+
+		let refused = montre_query_with_limits(corpus, ambiguous.as_ptr(), unlimited, unlimited, 2);
+		assert!(refused.is_null());
+		assert_eq!(montre_last_error_kind(), KIND_LIMIT_EXCEEDED);
+		assert!(read_last_error().unwrap().contains("limit of 2 results"));
+
+		let refused = montre_query_in_component_with_limits(
+			corpus,
+			ambiguous.as_ptr(),
+			component.as_ptr(),
+			unlimited,
+			3,
+			unlimited,
+		);
+		assert!(refused.is_null());
+		assert_eq!(montre_last_error_kind(), KIND_LIMIT_EXCEEDED);
+		assert_eq!(
+			montre_query_count_in_component_with_limits(
+				corpus,
+				ambiguous.as_ptr(),
+				component.as_ptr(),
+				5,
+				unlimited,
+				unlimited,
+			),
+			-1
+		);
+		assert_eq!(montre_last_error_kind(), KIND_LIMIT_EXCEEDED);
+
+		montre_corpus_close(corpus);
+	}
+}
+
+#[test]
+fn raised_limits_give_what_the_functions_without_limits_give() {
+	unsafe {
+		let corpus = open_two_components();
+		let unlimited = u64::MAX;
+		let (fr, en) = (cstr("fr"), cstr("en"));
+
+		for query in [AMBIGUOUS, CONSTRAINED] {
+			let cql = cstr(query);
+			let everywhere = spans(montre_query(corpus, cql.as_ptr()));
+			assert_eq!(
+				spans(montre_query_with_limits(
+					corpus,
+					cql.as_ptr(),
+					unlimited,
+					unlimited,
+					unlimited
+				)),
+				everywhere,
+				"{query}"
+			);
+			assert_eq!(montre_last_error_kind(), KIND_NONE);
+			assert_eq!(
+				montre_query_count_with_limits(corpus, cql.as_ptr(), 1000, 1000, 0),
+				everywhere.len() as i64,
+				"{query}"
+			);
+
+			let in_fr = spans(montre_query_in_component(corpus, cql.as_ptr(), fr.as_ptr()));
+			let by_hand = cstr(&within_component_by_hand(query, "fr"));
+			assert_eq!(
+				in_fr,
+				spans(montre_query(corpus, by_hand.as_ptr())),
+				"{query}"
+			);
+			assert_eq!(
+				spans(montre_query_in_component_with_limits(
+					corpus,
+					cql.as_ptr(),
+					fr.as_ptr(),
+					unlimited,
+					unlimited,
+					unlimited,
+				)),
+				in_fr,
+				"{query}"
+			);
+			assert_eq!(
+				montre_query_count_in_component_with_limits(
+					corpus,
+					cql.as_ptr(),
+					fr.as_ptr(),
+					unlimited,
+					unlimited,
+					unlimited,
+				),
+				in_fr.len() as i64,
+				"{query}"
+			);
+			assert_eq!(
+				montre_query_count_in_component(corpus, cql.as_ptr(), fr.as_ptr()),
+				in_fr.len() as i64,
+				"{query}"
+			);
+
+			let in_en = spans(montre_query_in_component(corpus, cql.as_ptr(), en.as_ptr()));
+			assert!(!in_fr.is_empty() && !in_en.is_empty(), "{query}");
+			assert!(in_fr.iter().all(|span| !in_en.contains(span)), "{query}");
+			let mut either = [in_fr, in_en].concat();
+			either.sort_unstable();
+			let mut everywhere = everywhere;
+			everywhere.sort_unstable();
+			assert_eq!(either, everywhere, "{query}");
+		}
+
+		montre_corpus_close(corpus);
+	}
+}
+
+#[test]
+fn other_errors_have_their_own_kinds() {
+	unsafe {
+		let corpus = open_single_component();
+
+		let modifier = cstr("(?by n) []");
+		assert_eq!(montre_query_count(corpus, modifier.as_ptr()), -1);
+		assert_eq!(montre_last_error_kind(), KIND_QUERY_PARSE);
+		assert_eq!(
+			read_last_error().unwrap(),
+			"Parse error at position 0: Unsupported query modifier '(?by n)'"
+		);
+
+		let regex = cstr("[word=/(/]");
+		assert!(montre_query(corpus, regex.as_ptr()).is_null());
+		assert_eq!(montre_last_error_kind(), KIND_QUERY_PARSE);
+
+		let unknown = cstr(r#"[nosuchlayer="x"]"#);
+		assert!(montre_query(corpus, unknown.as_ptr()).is_null());
+		assert_eq!(montre_last_error_kind(), KIND_QUERY_INVALID);
+		assert_eq!(read_last_error().unwrap(), "Unknown layer: nosuchlayer");
+
+		let unknown_alignment = cstr("[] =nonexistent=>");
+		assert!(montre_query(corpus, unknown_alignment.as_ptr()).is_null());
+		assert_eq!(montre_last_error_kind(), KIND_QUERY_INVALID);
+		assert_eq!(read_last_error().unwrap(), "Unknown alignment: nonexistent");
+
+		let uncomparable = cstr("a:[] b:[] :: a.head = b.head");
+		assert_eq!(montre_query_count(corpus, uncomparable.as_ptr()), -1);
+		assert_eq!(montre_last_error_kind(), KIND_QUERY_INVALID);
+		assert_eq!(
+			read_last_error().unwrap(),
+			"Layer 'head' does not hold strings and cannot be compared in a constraint"
+		);
+
+		let any = cstr("[]");
+		let nowhere = cstr("nowhere");
+		assert_eq!(
+			montre_query_count_in_component(corpus, any.as_ptr(), nowhere.as_ptr()),
+			-1
+		);
+		assert_eq!(montre_last_error_kind(), KIND_QUERY_INVALID);
+
+		assert_eq!(montre_query_count(std::ptr::null(), any.as_ptr()), -1);
+		assert_eq!(montre_last_error_kind(), KIND_OTHER);
+		assert_eq!(read_last_error().unwrap(), "null corpus");
+		assert!(montre_query_in_component(corpus, any.as_ptr(), std::ptr::null()).is_null());
+		assert_eq!(read_last_error().unwrap(), "null component name");
+
+		let bad_path = cstr("/nonexistent/corpus");
+		assert!(montre_corpus_open(bad_path.as_ptr()).is_null());
+		assert_eq!(montre_last_error_kind(), KIND_OTHER);
+
+		assert_eq!(montre_query_count(corpus, any.as_ptr()), 9);
+		assert_eq!(montre_last_error_kind(), KIND_NONE);
+
+		montre_corpus_close(corpus);
 	}
 }
 

@@ -3,8 +3,8 @@ use std::ptr;
 
 use montre_index::{Corpus, ForwardIndex};
 
+use crate::strings::{borrow_cstr, export_array, to_cstring};
 use crate::HitList;
-use crate::strings::{to_cstring, borrow_cstr, export_array};
 
 pub(crate) fn forward_value_string(corpus: &Corpus, position: u64, layer: &str) -> Option<String> {
 	if let Some(s) = corpus.forward().get_str(position, layer) {
@@ -98,7 +98,11 @@ pub unsafe extern "C" fn montre_corpus_token_annotations(
 	let ptrs: Vec<*mut c_char> = (start..end)
 		.map(|pos| {
 			let p = forward_value_cstr(c, pos, layer_str);
-			if p.is_null() { to_cstring("") } else { p }
+			if p.is_null() {
+				to_cstring("")
+			} else {
+				p
+			}
 		})
 		.collect();
 	export_array(&ptrs, out_len)
@@ -133,16 +137,20 @@ pub unsafe extern "C" fn montre_hitlist_texts(
 		return ptr::null_mut();
 	}
 
-	let ptrs: Vec<*mut c_char> = hitlist.hits.iter().map(|hit| {
-		if layer_str == "word" {
-			to_cstring(&c.surface_text(hit.span.start, hit.span.end))
-		} else {
-			let words: Vec<String> = (hit.span.start..hit.span.end)
-				.filter_map(|p| forward_value_string(c, p, layer_str))
-				.collect();
-			to_cstring(&words.join(" "))
-		}
-	}).collect();
+	let ptrs: Vec<*mut c_char> = hitlist
+		.hits
+		.iter()
+		.map(|hit| {
+			if layer_str == "word" {
+				to_cstring(&c.surface_text(hit.span.start, hit.span.end))
+			} else {
+				let words: Vec<String> = (hit.span.start..hit.span.end)
+					.filter_map(|p| forward_value_string(c, p, layer_str))
+					.collect();
+				to_cstring(&words.join(" "))
+			}
+		})
+		.collect();
 	export_array(&ptrs, out_len)
 }
 
@@ -165,8 +173,12 @@ pub unsafe extern "C" fn montre_context_tokens(
 	out_offsets: *mut *mut u64,
 	out_len: *mut u64,
 ) {
-	if hits.is_null() || corpus.is_null() || out_positions.is_null()
-		|| out_tokens.is_null() || out_offsets.is_null() || out_len.is_null()
+	if hits.is_null()
+		|| corpus.is_null()
+		|| out_positions.is_null()
+		|| out_tokens.is_null()
+		|| out_offsets.is_null()
+		|| out_len.is_null()
 	{
 		if !out_len.is_null() {
 			*out_len = 0;

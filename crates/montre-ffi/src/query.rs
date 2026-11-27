@@ -2,115 +2,83 @@ use std::os::raw::c_char;
 use std::ptr;
 
 use montre_index::{Corpus, SpanIndex};
-use montre_query::{Query, executor};
-use montre_query::executor::Hit;
+use montre_query::executor::{self, Hit, Results};
+use montre_query::planner::QueryPlan;
+use montre_query::{Limits, QueryError};
 
-use crate::HitList;
-use crate::error::{set_error, clear_error};
+use crate::error::{clear_error, contain_panics, set_error, set_query_error};
 use crate::strings::{borrow_cstr, export_array, to_cstring};
+use crate::HitList;
 
-fn wrap_in_component(parsed: Query, component: &str) -> Query {
-	let components = vec![component.to_string()];
-	match parsed {
-		Query::Constrained { inner, constraints } => {
-			Query::Constrained {
-				inner: Box::new(Query::WithinComponent {
-					inner,
-					components,
-				}),
-				constraints,
+// parse, scope to `component` if given, plan and run; failures and panics go to montre_last_error
+unsafe fn run<T>(
+	corpus: *const Corpus,
+	cql: *const c_char,
+	component: Option<*const c_char>,
+	execute: impl FnOnce(&QueryPlan, &Corpus) -> Result<T, QueryError>,
+) -> Option<T> {
+	clear_error();
+	contain_panics(|| {
+		if corpus.is_null() {
+			set_error("null corpus".into());
+			return None;
+		}
+		let Some(cql_str) = borrow_cstr(cql) else {
+			set_error("null query string".into());
+			return None;
+		};
+		let Ok(component) = component
+			.map(|name| borrow_cstr(name).ok_or(()))
+			.transpose()
+		else {
+			set_error("null component name".into());
+			return None;
+		};
+		let planned = montre_query::parse(cql_str)
+			.map(|parsed| match component {
+				Some(name) => montre_query::wrap_in_components(parsed, vec![name.to_string()]),
+				None => parsed,
+			})
+			.and_then(|query| montre_query::planner::plan(&query));
+		match planned.and_then(|plan| execute(&plan, &*corpus)) {
+			Ok(value) => Some(value),
+			Err(error) => {
+				set_query_error(error);
+				None
 			}
 		}
-		other => Query::WithinComponent {
-			inner: Box::new(other),
-			components,
-		},
+	})
+}
+
+fn limits(max_intermediate_matches: u64, max_expansions: u64, max_results: u64) -> Limits {
+	Limits {
+		max_intermediate_matches,
+		max_expansions,
+		max_results,
 	}
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn montre_query(
-	corpus: *const Corpus,
-	cql: *const c_char,
-) -> *mut HitList {
-	clear_error();
-	if corpus.is_null() {
-		set_error("null corpus".into());
-		return ptr::null_mut();
+fn hit_list(results: Option<Results>) -> *mut HitList {
+	match results {
+		Some(results) => Box::into_raw(Box::new(HitList {
+			hits: results.into_hits(),
+		})),
+		None => ptr::null_mut(),
 	}
-	let Some(cql_str) = borrow_cstr(cql) else {
-		set_error("null query string".into());
-		return ptr::null_mut();
-	};
+}
 
-	let parsed = match montre_query::parse(cql_str) {
-		Ok(q) => q,
-		Err(e) => {
-			set_error(e.to_string());
-			return ptr::null_mut();
-		}
-	};
-
-	let plan = match montre_query::planner::plan(&parsed) {
-		Ok(p) => p,
-		Err(e) => {
-			set_error(e.to_string());
-			return ptr::null_mut();
-		}
-	};
-
-	let results = match executor::execute(&plan, &*corpus) {
-		Ok(r) => r,
-		Err(e) => {
-			set_error(e.to_string());
-			return ptr::null_mut();
-		}
-	};
-
-	Box::into_raw(Box::new(HitList {
-		hits: results.into_hits(),
-	}))
+fn count(counted: Option<usize>) -> i64 {
+	counted.map_or(-1, |count| count as i64)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn montre_query_count(
-	corpus: *const Corpus,
-	cql: *const c_char,
-) -> i64 {
-	clear_error();
-	if corpus.is_null() {
-		set_error("null corpus".into());
-		return -1;
-	}
-	let Some(cql_str) = borrow_cstr(cql) else {
-		set_error("null query string".into());
-		return -1;
-	};
+pub unsafe extern "C" fn montre_query(corpus: *const Corpus, cql: *const c_char) -> *mut HitList {
+	hit_list(run(corpus, cql, None, executor::execute))
+}
 
-	let parsed = match montre_query::parse(cql_str) {
-		Ok(q) => q,
-		Err(e) => {
-			set_error(e.to_string());
-			return -1;
-		}
-	};
-
-	let plan = match montre_query::planner::plan(&parsed) {
-		Ok(p) => p,
-		Err(e) => {
-			set_error(e.to_string());
-			return -1;
-		}
-	};
-
-	let c = &*corpus;
-	match executor::execute_count(&plan, c) {
-		Ok(n) => n as i64,
-		Err(e) => {
-			set_error(e.to_string());
-			-1
-		}
-	}
+#[no_mangle]
+pub unsafe extern "C" fn montre_query_count(corpus: *const Corpus, cql: *const c_char) -> i64 {
+	count(run(corpus, cql, None, executor::execute_count))
 }
 
 #[no_mangle]
@@ -119,50 +87,7 @@ pub unsafe extern "C" fn montre_query_in_component(
 	cql: *const c_char,
 	component: *const c_char,
 ) -> *mut HitList {
-	clear_error();
-	if corpus.is_null() {
-		set_error("null corpus".into());
-		return ptr::null_mut();
-	}
-	let Some(cql_str) = borrow_cstr(cql) else {
-		set_error("null query string".into());
-		return ptr::null_mut();
-	};
-	let Some(comp_str) = borrow_cstr(component) else {
-		set_error("null component name".into());
-		return ptr::null_mut();
-	};
-
-	let parsed = match montre_query::parse(cql_str) {
-		Ok(q) => q,
-		Err(e) => {
-			set_error(e.to_string());
-			return ptr::null_mut();
-		}
-	};
-
-	let wrapped = wrap_in_component(parsed, comp_str);
-
-	let plan = match montre_query::planner::plan(&wrapped) {
-		Ok(p) => p,
-		Err(e) => {
-			set_error(e.to_string());
-			return ptr::null_mut();
-		}
-	};
-
-	let c = &*corpus;
-	let results = match executor::execute(&plan, c) {
-		Ok(r) => r,
-		Err(e) => {
-			set_error(e.to_string());
-			return ptr::null_mut();
-		}
-	};
-
-	Box::into_raw(Box::new(HitList {
-		hits: results.into_hits(),
-	}))
+	hit_list(run(corpus, cql, Some(component), executor::execute))
 }
 
 #[no_mangle]
@@ -171,46 +96,87 @@ pub unsafe extern "C" fn montre_query_count_in_component(
 	cql: *const c_char,
 	component: *const c_char,
 ) -> i64 {
-	clear_error();
-	if corpus.is_null() {
-		set_error("null corpus".into());
-		return -1;
-	}
-	let Some(cql_str) = borrow_cstr(cql) else {
-		set_error("null query string".into());
-		return -1;
-	};
-	let Some(comp_str) = borrow_cstr(component) else {
-		set_error("null component name".into());
-		return -1;
-	};
+	count(run(corpus, cql, Some(component), executor::execute_count))
+}
 
-	let parsed = match montre_query::parse(cql_str) {
-		Ok(q) => q,
-		Err(e) => {
-			set_error(e.to_string());
-			return -1;
-		}
-	};
-
-	let wrapped = wrap_in_component(parsed, comp_str);
-
-	let plan = match montre_query::planner::plan(&wrapped) {
-		Ok(p) => p,
-		Err(e) => {
-			set_error(e.to_string());
-			return -1;
-		}
-	};
-
-	let c = &*corpus;
-	match executor::execute_count(&plan, c) {
-		Ok(n) => n as i64,
-		Err(e) => {
-			set_error(e.to_string());
-			-1
+/// Writes the limits the functions without them use. Each pointer is nullable.
+#[no_mangle]
+pub unsafe extern "C" fn montre_default_limits(
+	out_max_intermediate_matches: *mut u64,
+	out_max_expansions: *mut u64,
+	out_max_results: *mut u64,
+) {
+	let defaults = Limits::default();
+	for (out, value) in [
+		(
+			out_max_intermediate_matches,
+			defaults.max_intermediate_matches,
+		),
+		(out_max_expansions, defaults.max_expansions),
+		(out_max_results, defaults.max_results),
+	] {
+		if !out.is_null() {
+			*out = value;
 		}
 	}
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn montre_query_with_limits(
+	corpus: *const Corpus,
+	cql: *const c_char,
+	max_intermediate_matches: u64,
+	max_expansions: u64,
+	max_results: u64,
+) -> *mut HitList {
+	let limits = limits(max_intermediate_matches, max_expansions, max_results);
+	hit_list(run(corpus, cql, None, |plan, corpus| {
+		executor::execute_with(plan, corpus, &limits)
+	}))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn montre_query_count_with_limits(
+	corpus: *const Corpus,
+	cql: *const c_char,
+	max_intermediate_matches: u64,
+	max_expansions: u64,
+	max_results: u64,
+) -> i64 {
+	let limits = limits(max_intermediate_matches, max_expansions, max_results);
+	count(run(corpus, cql, None, |plan, corpus| {
+		executor::execute_count_with(plan, corpus, &limits)
+	}))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn montre_query_in_component_with_limits(
+	corpus: *const Corpus,
+	cql: *const c_char,
+	component: *const c_char,
+	max_intermediate_matches: u64,
+	max_expansions: u64,
+	max_results: u64,
+) -> *mut HitList {
+	let limits = limits(max_intermediate_matches, max_expansions, max_results);
+	hit_list(run(corpus, cql, Some(component), |plan, corpus| {
+		executor::execute_with(plan, corpus, &limits)
+	}))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn montre_query_count_in_component_with_limits(
+	corpus: *const Corpus,
+	cql: *const c_char,
+	component: *const c_char,
+	max_intermediate_matches: u64,
+	max_expansions: u64,
+	max_results: u64,
+) -> i64 {
+	let limits = limits(max_intermediate_matches, max_expansions, max_results);
+	count(run(corpus, cql, Some(component), |plan, corpus| {
+		executor::execute_count_with(plan, corpus, &limits)
+	}))
 }
 
 #[no_mangle]
@@ -285,7 +251,9 @@ pub unsafe extern "C" fn montre_hitlist_starts(
 	out_len: *mut u64,
 ) -> *mut u64 {
 	if hits.is_null() {
-		if !out_len.is_null() { *out_len = 0; }
+		if !out_len.is_null() {
+			*out_len = 0;
+		}
 		return ptr::null_mut();
 	}
 	let data: Vec<u64> = (*hits).hits.iter().map(|h| h.span.start).collect();
@@ -295,12 +263,11 @@ pub unsafe extern "C" fn montre_hitlist_starts(
 /// Bulk-extract all hit end positions as a flat u64 array.
 /// Free with `montre_u64_array_free(array, len)`.
 #[no_mangle]
-pub unsafe extern "C" fn montre_hitlist_ends(
-	hits: *const HitList,
-	out_len: *mut u64,
-) -> *mut u64 {
+pub unsafe extern "C" fn montre_hitlist_ends(hits: *const HitList, out_len: *mut u64) -> *mut u64 {
 	if hits.is_null() {
-		if !out_len.is_null() { *out_len = 0; }
+		if !out_len.is_null() {
+			*out_len = 0;
+		}
 		return ptr::null_mut();
 	}
 	let data: Vec<u64> = (*hits).hits.iter().map(|h| h.span.end).collect();
@@ -316,10 +283,16 @@ pub unsafe extern "C" fn montre_hitlist_document_indices(
 	out_len: *mut u64,
 ) -> *mut u64 {
 	if hits.is_null() {
-		if !out_len.is_null() { *out_len = 0; }
+		if !out_len.is_null() {
+			*out_len = 0;
+		}
 		return ptr::null_mut();
 	}
-	let data: Vec<u64> = (*hits).hits.iter().map(|h| h.document_index as u64).collect();
+	let data: Vec<u64> = (*hits)
+		.hits
+		.iter()
+		.map(|h| h.document_index as u64)
+		.collect();
 	export_array(&data, out_len)
 }
 
@@ -332,10 +305,16 @@ pub unsafe extern "C" fn montre_hitlist_sentence_indices(
 	out_len: *mut u64,
 ) -> *mut u64 {
 	if hits.is_null() {
-		if !out_len.is_null() { *out_len = 0; }
+		if !out_len.is_null() {
+			*out_len = 0;
+		}
 		return ptr::null_mut();
 	}
-	let data: Vec<u64> = (*hits).hits.iter().map(|h| h.sentence_index as u64).collect();
+	let data: Vec<u64> = (*hits)
+		.hits
+		.iter()
+		.map(|h| h.sentence_index as u64)
+		.collect();
 	export_array(&data, out_len)
 }
 

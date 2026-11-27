@@ -1,7 +1,7 @@
 pub mod client;
-pub mod protocol;
 mod dispatch;
 mod handlers;
+pub mod protocol;
 mod shutdown;
 mod signals;
 mod state;
@@ -132,12 +132,8 @@ pub fn serve(options: ServeOptions) -> Result<(), DaemonError> {
 
 	let (signal_handle, signal_thread) = signals::install_signal_thread(state_tx.clone())?;
 
-	let listener_result = dispatch::run_listener(
-		&socket_path,
-		state_tx,
-		handle,
-		Arc::clone(&coordinator),
-	);
+	let listener_result =
+		dispatch::run_listener(&socket_path, state_tx, handle, Arc::clone(&coordinator));
 
 	signal_handle.close();
 	let _ = signal_thread.join();
@@ -366,7 +362,10 @@ mod tests {
 		assert_eq!(message["method"], "notification.shutdown");
 		assert_eq!(message["params"]["reason"], "fatal_error");
 		assert_eq!(message["params"]["in_seconds"], 0);
-		assert!(dispatch::read_frame(&mut client_end).is_err(), "stream should be closed after broadcast");
+		assert!(
+			dispatch::read_frame(&mut client_end).is_err(),
+			"stream should be closed after broadcast"
+		);
 	}
 
 	#[test]
@@ -380,8 +379,12 @@ mod tests {
 		let (state_tx, state_rx) = channel();
 		let monitor = spawn_monitored_state_thread(st, state_rx, Arc::clone(&coordinator));
 
-		state_tx.send(state::Command::TestPanic).expect("send test panic");
-		let outcome = monitor.join().expect("monitor thread itself must not panic");
+		state_tx
+			.send(state::Command::TestPanic)
+			.expect("send test panic");
+		let outcome = monitor
+			.join()
+			.expect("monitor thread itself must not panic");
 
 		assert_eq!(outcome, StateThreadOutcome::Panicked);
 		assert!(coordinator.is_shutting_down());

@@ -11,7 +11,10 @@ use tempfile::TempDir;
 fn wait_for_reader_exit(client: &DaemonClient, timeout: Duration) {
 	let deadline = Instant::now() + timeout;
 	loop {
-		match client.notifications().recv_timeout(Duration::from_millis(20)) {
+		match client
+			.notifications()
+			.recv_timeout(Duration::from_millis(20))
+		{
 			Err(RecvTimeoutError::Disconnected) => return,
 			Err(RecvTimeoutError::Timeout) => {
 				if Instant::now() >= deadline {

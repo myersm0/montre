@@ -48,7 +48,9 @@ impl EmptyNodeStore {
 	}
 
 	pub fn in_sentence(&self, sentence_index: u32) -> &[EmptyNode] {
-		let start = self.nodes.partition_point(|n| n.sentence_index < sentence_index);
+		let start = self
+			.nodes
+			.partition_point(|n| n.sentence_index < sentence_index);
 		let end = self.nodes[start..].partition_point(|n| n.sentence_index == sentence_index);
 		&self.nodes[start..start + end]
 	}
@@ -112,22 +114,34 @@ mod tests {
 				sentence_index: 2,
 				node_id: "4.1".into(),
 				form: "a".into(),
-				lemma: None, upos: None, xpos: None,
-				feats: None, deps: None, misc: None,
+				lemma: None,
+				upos: None,
+				xpos: None,
+				feats: None,
+				deps: None,
+				misc: None,
 			},
 			EmptyNode {
 				sentence_index: 2,
 				node_id: "4.2".into(),
 				form: "b".into(),
-				lemma: None, upos: None, xpos: None,
-				feats: None, deps: None, misc: None,
+				lemma: None,
+				upos: None,
+				xpos: None,
+				feats: None,
+				deps: None,
+				misc: None,
 			},
 			EmptyNode {
 				sentence_index: 7,
 				node_id: "1.1".into(),
 				form: "c".into(),
-				lemma: None, upos: None, xpos: None,
-				feats: None, deps: None, misc: None,
+				lemma: None,
+				upos: None,
+				xpos: None,
+				feats: None,
+				deps: None,
+				misc: None,
 			},
 		];
 
@@ -155,8 +169,12 @@ mod tests {
 			sentence_index: 0,
 			node_id: "1.1".into(),
 			form: "x".into(),
-			lemma: None, upos: None, xpos: None,
-			feats: None, deps: None, misc: None,
+			lemma: None,
+			upos: None,
+			xpos: None,
+			feats: None,
+			deps: None,
+			misc: None,
 		}];
 
 		write_empty_nodes(&nodes, &path).unwrap();

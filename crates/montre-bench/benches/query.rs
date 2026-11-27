@@ -39,8 +39,14 @@ fn component_positions(corpus: &Corpus, component: &str) -> RoaringBitmap {
 		.component(component)
 		.unwrap_or_else(|| panic!("no component named {component}"))
 		.document_range;
-	let start = corpus.document_span(first).expect("component has no documents").start;
-	let stop = corpus.document_span(end - 1).expect("component has no documents").end;
+	let start = corpus
+		.document_span(first)
+		.expect("component has no documents")
+		.start;
+	let stop = corpus
+		.document_span(end - 1)
+		.expect("component has no documents")
+		.end;
 	let mut positions = RoaringBitmap::new();
 	positions.insert_range(start as u32..stop as u32);
 	positions
@@ -69,7 +75,10 @@ fn compute_slots(corpus: &Corpus) -> Slots {
 	let component = source_component(corpus);
 	let positions = component_positions(corpus, &component);
 	let inverted = corpus.inverted();
-	let nouns = inverted.get("upos", "NOUN").expect("corpus has no upos=NOUN") & &positions;
+	let nouns = inverted
+		.get("upos", "NOUN")
+		.expect("corpus has no upos=NOUN")
+		& &positions;
 	let scale = 1e6 / positions.len() as f64;
 	let candidates: Vec<(&str, f64)> = inverted
 		.values("lemma")
@@ -93,7 +102,10 @@ fn compute_slots(corpus: &Corpus) -> Slots {
 					.then_with(|| left.0.cmp(right.0))
 			})
 			.expect("corpus has no alphabetic noun lemmas");
-		Slot { lemma: lemma.to_string(), per_million: *per_million }
+		Slot {
+			lemma: lemma.to_string(),
+			per_million: *per_million,
+		}
 	};
 	let slots = Slots {
 		rare: nearest(2.0),
@@ -128,18 +140,54 @@ struct BenchQuery {
 fn standard_queries() -> Vec<BenchQuery> {
 	let slots = slots();
 	vec![
-		BenchQuery { label: "pos_noun", cql: r#"[pos="NOUN"]"#.into() },
-		BenchQuery { label: "adj_noun", cql: r#"[pos="ADJ"] [pos="NOUN"]"#.into() },
-		BenchQuery { label: "optional_adj_noun", cql: r#"[pos="ADJ"]? [pos="NOUN"]"#.into() },
-		BenchQuery { label: "alt_plus_noun", cql: r#"([pos="ADJ"] | [pos="ADV"])+ [pos="NOUN"]"#.into() },
-		BenchQuery { label: "alt_det_plus_noun", cql: r#"([pos="ADJ"] | [pos="DET"])+ [pos="NOUN"]"#.into() },
-		BenchQuery { label: "lemma_rare", cql: format!(r#"[lemma="{}"]"#, slots.rare.lemma) },
-		BenchQuery { label: "lemma_mid", cql: format!(r#"[lemma="{}"]"#, slots.mid.lemma) },
-		BenchQuery { label: "lemma_frequent", cql: format!(r#"[lemma="{}"]"#, slots.frequent.lemma) },
-		BenchQuery { label: "lemma_prefix", cql: format!(r#"[lemma=/^{}/]"#, slots.prefix()) },
-		BenchQuery { label: "negation", cql: r#"[pos!="PUNCT"]"#.into() },
-		BenchQuery { label: "scanall_then_mid", cql: format!(r#"[] [lemma="{}"]"#, slots.mid.lemma) },
-		BenchQuery { label: "within_sentence", cql: r#"[pos="DET"] [pos="ADJ"]* [pos="NOUN"] within s"#.into() },
+		BenchQuery {
+			label: "pos_noun",
+			cql: r#"[pos="NOUN"]"#.into(),
+		},
+		BenchQuery {
+			label: "adj_noun",
+			cql: r#"[pos="ADJ"] [pos="NOUN"]"#.into(),
+		},
+		BenchQuery {
+			label: "optional_adj_noun",
+			cql: r#"[pos="ADJ"]? [pos="NOUN"]"#.into(),
+		},
+		BenchQuery {
+			label: "alt_plus_noun",
+			cql: r#"([pos="ADJ"] | [pos="ADV"])+ [pos="NOUN"]"#.into(),
+		},
+		BenchQuery {
+			label: "alt_det_plus_noun",
+			cql: r#"([pos="ADJ"] | [pos="DET"])+ [pos="NOUN"]"#.into(),
+		},
+		BenchQuery {
+			label: "lemma_rare",
+			cql: format!(r#"[lemma="{}"]"#, slots.rare.lemma),
+		},
+		BenchQuery {
+			label: "lemma_mid",
+			cql: format!(r#"[lemma="{}"]"#, slots.mid.lemma),
+		},
+		BenchQuery {
+			label: "lemma_frequent",
+			cql: format!(r#"[lemma="{}"]"#, slots.frequent.lemma),
+		},
+		BenchQuery {
+			label: "lemma_prefix",
+			cql: format!(r#"[lemma=/^{}/]"#, slots.prefix()),
+		},
+		BenchQuery {
+			label: "negation",
+			cql: r#"[pos!="PUNCT"]"#.into(),
+		},
+		BenchQuery {
+			label: "scanall_then_mid",
+			cql: format!(r#"[] [lemma="{}"]"#, slots.mid.lemma),
+		},
+		BenchQuery {
+			label: "within_sentence",
+			cql: r#"[pos="DET"] [pos="ADJ"]* [pos="NOUN"] within s"#.into(),
+		},
 	]
 }
 
@@ -161,7 +209,9 @@ fn projection_queries(corpus: &Corpus) -> Vec<BenchQuery> {
 		},
 		BenchQuery {
 			label: "project_adj_noun",
-			cql: format!(r#"[pos="ADJ"] [pos="NOUN"] within component:"{component}" ={alignment}=>"#),
+			cql: format!(
+				r#"[pos="ADJ"] [pos="NOUN"] within component:"{component}" ={alignment}=>"#
+			),
 		},
 	]
 }
@@ -290,8 +340,7 @@ fn bench_count_by_document(c: &mut Criterion) {
 		let plan = parse_and_plan(cql);
 		group.bench_with_input(BenchmarkId::new("group", label), &plan, |b, plan| {
 			b.iter(|| {
-				let mut results =
-					executor::execute(black_box(plan), black_box(&corpus)).unwrap();
+				let mut results = executor::execute(black_box(plan), black_box(&corpus)).unwrap();
 				results.populate_context(&corpus);
 				let mut counts: Vec<usize> = vec![0; doc_count];
 				for hit in results.hits() {

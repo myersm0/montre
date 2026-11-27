@@ -17,3 +17,4 @@ thiserror = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 montre-build = { workspace = true }
+serde_json = { workspace = true }

@@ -1,11 +1,11 @@
-pub mod error;
-pub mod strings;
-pub mod corpus;
-pub mod tokens;
-pub mod query;
-pub mod spans;
 pub mod alignment;
 pub mod build;
+pub mod corpus;
+pub mod error;
+pub mod query;
+pub mod spans;
+pub mod strings;
+pub mod tokens;
 
 use montre_query::executor::Hit;
 

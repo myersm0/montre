@@ -4,7 +4,7 @@ use std::path::Path;
 
 use memmap2::Mmap;
 
-use crate::{IndexError, Result, align_to_8};
+use crate::{align_to_8, IndexError, Result};
 
 const MAGIC: &[u8; 4] = b"MSID";
 const FORMAT_VERSION: u32 = 1;
@@ -32,13 +32,16 @@ impl MappedSentenceIds {
 		}
 		let version = u32::from_ne_bytes(buf[4..8].try_into().unwrap());
 		if version != FORMAT_VERSION {
-			return Err(IndexError::Format(
-				format!("sentence_ids format version {}, expected {}", version, FORMAT_VERSION),
-			));
+			return Err(IndexError::Format(format!(
+				"sentence_ids format version {}, expected {}",
+				version, FORMAT_VERSION
+			)));
 		}
 		let bom = u32::from_ne_bytes(buf[8..12].try_into().unwrap());
 		if bom != BYTE_ORDER_MARK {
-			return Err(IndexError::Format("sentence_ids endianness mismatch".into()));
+			return Err(IndexError::Format(
+				"sentence_ids endianness mismatch".into(),
+			));
 		}
 		let count = u32::from_ne_bytes(buf[12..16].try_into().unwrap());
 
@@ -47,10 +50,17 @@ impl MappedSentenceIds {
 		let pool_start = align_to_8(offsets_end);
 
 		if pool_start > buf.len() {
-			return Err(IndexError::Format("sentence_ids truncated offset table".into()));
+			return Err(IndexError::Format(
+				"sentence_ids truncated offset table".into(),
+			));
 		}
 
-		Ok(Self { mmap, count, offsets_start, pool_start })
+		Ok(Self {
+			mmap,
+			count,
+			offsets_start,
+			pool_start,
+		})
 	}
 
 	pub fn len(&self) -> usize {
@@ -150,10 +160,7 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("sentence_ids.bin");
 
-		let ids: Vec<String> = vec![
-			"données:0".into(),
-			"日本語:1".into(),
-		];
+		let ids: Vec<String> = vec!["données:0".into(), "日本語:1".into()];
 
 		write_sentence_ids(&ids, &path).unwrap();
 		let mapped = MappedSentenceIds::open(&path).unwrap();
@@ -166,8 +173,8 @@ mod tests {
 #[cfg(test)]
 mod proptests {
 	use super::*;
-	use proptest::prelude::*;
 	use proptest::collection::vec as pvec;
+	use proptest::prelude::*;
 
 	proptest! {
 		#[test]

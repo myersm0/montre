@@ -13,7 +13,7 @@ members = [
 exclude = ["crates/montre-py",]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.8.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/myersm0/montre"
@@ -28,7 +28,6 @@ montre-daemon = { path = "crates/montre-daemon" }
 
 # Core dependencies
 roaring = { version = "0.10", features = ["serde"] }
-fst = "0.4"
 memmap2 = "0.9"
 compact_str = { version = "0.8", features = ["serde"] }
 smallvec = { version = "1.13", features = ["union", "serde"] }
@@ -50,7 +49,6 @@ clap = { version = "4.5", features = ["derive"] }
 walkdir = "2"
 
 # Parsing
-winnow = "0.6"
 regex = "1.11"
 
 # Parallelism
@@ -72,7 +70,6 @@ pyo3 = { version = "0.23", features = ["extension-module"] }
 [profile.release]
 lto = true
 codegen-units = 1
-panic = "abort"
 
 [profile.bench]
 debug = true

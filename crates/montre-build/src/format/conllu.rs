@@ -61,7 +61,8 @@ impl<R: Read> ConllUReader<R> {
 
 		for (offset, line) in lines.iter().enumerate() {
 			if line.starts_with('#') {
-				if let Some(rest) = line.strip_prefix("# sent_id = ")
+				if let Some(rest) = line
+					.strip_prefix("# sent_id = ")
 					.or_else(|| line.strip_prefix("# sent_id="))
 				{
 					sent_id = Some(rest.trim().to_string());
@@ -174,7 +175,8 @@ impl<R: Read> ConllUReader<R> {
 
 			if bytes_read == 0 {
 				if !current_lines.is_empty() {
-					let sentence = self.parse_sentence_strict(&current_lines, sentence_start_line)?;
+					let sentence =
+						self.parse_sentence_strict(&current_lines, sentence_start_line)?;
 					if !sentence.tokens.is_empty() {
 						self.stats.tokens_parsed += sentence.tokens.len();
 						self.stats.sentences_parsed += 1;
@@ -187,7 +189,8 @@ impl<R: Read> ConllUReader<R> {
 			let trimmed = line.trim();
 			if trimmed.is_empty() {
 				if !current_lines.is_empty() {
-					let sentence = self.parse_sentence_strict(&current_lines, sentence_start_line)?;
+					let sentence =
+						self.parse_sentence_strict(&current_lines, sentence_start_line)?;
 					if !sentence.tokens.is_empty() {
 						self.stats.tokens_parsed += sentence.tokens.len();
 						self.stats.sentences_parsed += 1;
@@ -217,7 +220,8 @@ impl<R: Read> ConllUReader<R> {
 
 		for (offset, line) in lines.iter().enumerate() {
 			if line.starts_with('#') {
-				if let Some(rest) = line.strip_prefix("# sent_id = ")
+				if let Some(rest) = line
+					.strip_prefix("# sent_id = ")
 					.or_else(|| line.strip_prefix("# sent_id="))
 				{
 					sent_id = Some(rest.trim().to_string());

@@ -25,9 +25,10 @@ impl SpacingIndex {
 		}
 		let version = u32::from_ne_bytes(header[4..8].try_into().unwrap());
 		if version != FORMAT_VERSION {
-			return Err(IndexError::Format(
-				format!("spacing format version {}, expected {}", version, FORMAT_VERSION),
-			));
+			return Err(IndexError::Format(format!(
+				"spacing format version {}, expected {}",
+				version, FORMAT_VERSION
+			)));
 		}
 
 		let bitmap = RoaringBitmap::deserialize_from(&mut file)

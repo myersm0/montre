@@ -3,7 +3,7 @@ use std::ptr;
 
 use montre_index::{Corpus, SpanIndex};
 
-use crate::strings::{to_cstring, borrow_cstr, export_string_array};
+use crate::strings::{borrow_cstr, export_string_array, to_cstring};
 
 #[no_mangle]
 pub unsafe extern "C" fn montre_corpus_span_layer_count(corpus: *const Corpus) -> u32 {
@@ -98,8 +98,12 @@ pub unsafe extern "C" fn montre_corpus_span_containing(
 
 	match c.spans().containing_with_index(layer_str, position) {
 		Some((idx, span)) => {
-			if !out_start.is_null() { *out_start = span.start; }
-			if !out_end.is_null() { *out_end = span.end; }
+			if !out_start.is_null() {
+				*out_start = span.start;
+			}
+			if !out_end.is_null() {
+				*out_end = span.end;
+			}
 			idx as i64
 		}
 		None => -1,
@@ -167,7 +171,9 @@ pub unsafe extern "C" fn montre_corpus_sentence_ids(
 	out_len: *mut u64,
 ) -> *mut *mut c_char {
 	if corpus.is_null() || out_len.is_null() {
-		if !out_len.is_null() { *out_len = 0; }
+		if !out_len.is_null() {
+			*out_len = 0;
+		}
 		return ptr::null_mut();
 	}
 	let c = &*corpus;

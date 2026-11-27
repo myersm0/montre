@@ -36,7 +36,9 @@ pub enum DaemonClientError {
 	Protocol(ProtocolError),
 	#[error("could not locate the `montre` daemon binary: {0}")]
 	DaemonBinaryNotFound(String),
-	#[error("daemon failed to start within the spawn deadline\n--- daemon stderr ---\n{stderr}\n---")]
+	#[error(
+		"daemon failed to start within the spawn deadline\n--- daemon stderr ---\n{stderr}\n---"
+	)]
 	SpawnFailed { stderr: String },
 	#[error("timed out waiting for daemon response")]
 	RequestTimeout,
@@ -104,10 +106,23 @@ receive_side_enum!(ShutdownReason {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum NotificationEnvelope {
-	CouplerUpdate { coupler_id: CouplerId, interest: Interest },
-	RosterChanged { event: RosterEvent, process: ProcessInfo },
-	NamedResultsChanged { event: NamedResultsEvent, name: String, metadata: Option<ResultMetadata> },
-	Shutdown { reason: ShutdownReason, in_seconds: u32 },
+	CouplerUpdate {
+		coupler_id: CouplerId,
+		interest: Interest,
+	},
+	RosterChanged {
+		event: RosterEvent,
+		process: ProcessInfo,
+	},
+	NamedResultsChanged {
+		event: NamedResultsEvent,
+		name: String,
+		metadata: Option<ResultMetadata>,
+	},
+	Shutdown {
+		reason: ShutdownReason,
+		in_seconds: u32,
+	},
 }
 
 pub struct DaemonClient {
@@ -140,7 +155,11 @@ impl DaemonClient {
 		let socket = crate::socket_path_for(corpus_path)?;
 		match UnixStream::connect(&socket) {
 			Ok(stream) => return Self::connect_inner(stream),
-			Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => {}
+			Err(e)
+				if matches!(
+					e.kind(),
+					io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+				) => {}
 			Err(e) => return Err(e.into()),
 		}
 
@@ -171,7 +190,12 @@ impl DaemonClient {
 		let reader_closed = Arc::new(AtomicBool::new(false));
 		let reader_closed_thread = Arc::clone(&reader_closed);
 		let reader = thread::spawn(move || {
-			run_reader(read_stream, reader_pending, notifications_tx, reader_closed_thread);
+			run_reader(
+				read_stream,
+				reader_pending,
+				notifications_tx,
+				reader_closed_thread,
+			);
 		});
 
 		Ok(Self {
@@ -201,7 +225,10 @@ impl DaemonClient {
 		self.request("session.update_label", Some(params))
 	}
 
-	pub fn publish_interest(&mut self, params: PublishInterestParams) -> std::result::Result<(), io::Error> {
+	pub fn publish_interest(
+		&mut self,
+		params: PublishInterestParams,
+	) -> std::result::Result<(), io::Error> {
 		self.notification("session.publish_interest", params)
 	}
 
@@ -209,7 +236,10 @@ impl DaemonClient {
 		self.request::<(), CorpusInfo>("corpus.info", None)
 	}
 
-	pub fn corpus_documents(&mut self, params: CorpusDocumentsParams) -> Result<CorpusDocumentsReply> {
+	pub fn corpus_documents(
+		&mut self,
+		params: CorpusDocumentsParams,
+	) -> Result<CorpusDocumentsReply> {
 		self.request("corpus.documents", Some(params))
 	}
 
@@ -221,7 +251,10 @@ impl DaemonClient {
 		self.request("query.execute", Some(params))
 	}
 
-	pub fn query_execute_count(&mut self, params: QueryExecuteParams) -> Result<QueryExecuteCountReply> {
+	pub fn query_execute_count(
+		&mut self,
+		params: QueryExecuteParams,
+	) -> Result<QueryExecuteCountReply> {
 		self.request("query.execute_count", Some(params))
 	}
 
@@ -280,11 +313,17 @@ impl DaemonClient {
 		self.request("text.document", Some(params))
 	}
 
-	pub fn text_annotations(&mut self, params: TextAnnotationsParams) -> Result<TextAnnotationsReply> {
+	pub fn text_annotations(
+		&mut self,
+		params: TextAnnotationsParams,
+	) -> Result<TextAnnotationsReply> {
 		self.request("text.annotations", Some(params))
 	}
 
-	pub fn text_annotations_range(&mut self, params: TextAnnotationsRangeParams) -> Result<TextAnnotationsRangeReply> {
+	pub fn text_annotations_range(
+		&mut self,
+		params: TextAnnotationsRangeParams,
+	) -> Result<TextAnnotationsRangeReply> {
 		self.request("text.annotations_range", Some(params))
 	}
 
@@ -292,7 +331,10 @@ impl DaemonClient {
 		self.request::<(), AlignmentListReply>("alignment.list", None)
 	}
 
-	pub fn alignment_project(&mut self, params: AlignmentProjectParams) -> Result<AlignmentProjectReply> {
+	pub fn alignment_project(
+		&mut self,
+		params: AlignmentProjectParams,
+	) -> Result<AlignmentProjectReply> {
 		self.request("alignment.project", Some(params))
 	}
 
@@ -387,11 +429,14 @@ impl DaemonClient {
 					return Err(DaemonClientError::ReaderClosed);
 				}
 			},
-			None => reply_rx.recv().map_err(|_| DaemonClientError::ReaderClosed)?,
+			None => reply_rx
+				.recv()
+				.map_err(|_| DaemonClientError::ReaderClosed)?,
 		};
 		match response {
-			ResponseMessage::Result(value) => serde_json::from_value(value)
-				.map_err(|e| DaemonClientError::Envelope(format!("invalid result for {}: {}", method, e))),
+			ResponseMessage::Result(value) => serde_json::from_value(value).map_err(|e| {
+				DaemonClientError::Envelope(format!("invalid result for {}: {}", method, e))
+			}),
 			ResponseMessage::Error(error) => Err(error.into()),
 		}
 	}
@@ -414,8 +459,9 @@ impl DaemonClient {
 			"method": method,
 		});
 		if let Some(params) = params {
-			value["params"] = serde_json::to_value(params)
-				.map_err(|e| DaemonClientError::Envelope(format!("invalid params for {}: {}", method, e)))?;
+			value["params"] = serde_json::to_value(params).map_err(|e| {
+				DaemonClientError::Envelope(format!("invalid params for {}: {}", method, e))
+			})?;
 		}
 		self.write_value(&value)
 	}
@@ -436,8 +482,9 @@ impl DaemonClient {
 	}
 
 	fn write_value(&self, value: &serde_json::Value) -> Result<()> {
-		let payload = serde_json::to_vec(value)
-			.map_err(|e| DaemonClientError::Envelope(format!("request serialization failed: {}", e)))?;
+		let payload = serde_json::to_vec(value).map_err(|e| {
+			DaemonClientError::Envelope(format!("request serialization failed: {}", e))
+		})?;
 		let mut writer = self.writer.lock().expect("writer lock poisoned");
 		write_frame(&mut *writer, &payload).map_err(|e| {
 			if e.kind() == io::ErrorKind::InvalidInput {
@@ -497,7 +544,9 @@ fn run_reader(
 		let frame = match read_frame(&mut stream) {
 			Ok(frame) => frame,
 			Err(e) => {
-				if e.kind() != io::ErrorKind::UnexpectedEof && e.kind() != io::ErrorKind::ConnectionReset {
+				if e.kind() != io::ErrorKind::UnexpectedEof
+					&& e.kind() != io::ErrorKind::ConnectionReset
+				{
 					tracing::warn!(error = %e, "client reader failed");
 				}
 				break;
@@ -518,7 +567,6 @@ fn run_reader(
 			dispatch_notification(value, &notifications_tx);
 		}
 	}
-
 }
 
 struct ReaderGuard {
@@ -568,12 +616,18 @@ fn dispatch_response(value: serde_json::Value, pending: &PendingMap) {
 	let message = if let Some(error) = value.get("error") {
 		match serde_json::from_value::<ProtocolError>(error.clone()) {
 			Ok(error) => ResponseMessage::Error(error),
-			Err(e) => ResponseMessage::Error(ProtocolError::new(-32603, format!("invalid protocol error: {}", e))),
+			Err(e) => ResponseMessage::Error(ProtocolError::new(
+				-32603,
+				format!("invalid protocol error: {}", e),
+			)),
 		}
 	} else if let Some(result) = value.get("result") {
 		ResponseMessage::Result(result.clone())
 	} else {
-		ResponseMessage::Error(ProtocolError::new(-32603, "response missing result and error"))
+		ResponseMessage::Error(ProtocolError::new(
+			-32603,
+			"response missing result and error",
+		))
 	};
 	let _ = tx.send(message);
 }
@@ -583,7 +637,10 @@ fn dispatch_notification(value: serde_json::Value, tx: &SyncSender<NotificationE
 		tracing::warn!(message = %value, "client received notification without method");
 		return;
 	};
-	let params = value.get("params").cloned().unwrap_or(serde_json::Value::Null);
+	let params = value
+		.get("params")
+		.cloned()
+		.unwrap_or(serde_json::Value::Null);
 	let envelope = match method {
 		"notification.coupler_update" => parse_coupler_update(params),
 		"notification.roster_changed" => parse_roster_changed(params),
@@ -604,27 +661,39 @@ fn dispatch_notification(value: serde_json::Value, tx: &SyncSender<NotificationE
 	}
 }
 
-fn parse_coupler_update(params: serde_json::Value) -> std::result::Result<NotificationEnvelope, serde_json::Error> {
+fn parse_coupler_update(
+	params: serde_json::Value,
+) -> std::result::Result<NotificationEnvelope, serde_json::Error> {
 	#[derive(serde::Deserialize)]
 	struct Params {
 		coupler_id: CouplerId,
 		interest: Interest,
 	}
 	let p: Params = serde_json::from_value(params)?;
-	Ok(NotificationEnvelope::CouplerUpdate { coupler_id: p.coupler_id, interest: p.interest })
+	Ok(NotificationEnvelope::CouplerUpdate {
+		coupler_id: p.coupler_id,
+		interest: p.interest,
+	})
 }
 
-fn parse_roster_changed(params: serde_json::Value) -> std::result::Result<NotificationEnvelope, serde_json::Error> {
+fn parse_roster_changed(
+	params: serde_json::Value,
+) -> std::result::Result<NotificationEnvelope, serde_json::Error> {
 	#[derive(serde::Deserialize)]
 	struct Params {
 		event: RosterEvent,
 		process: ProcessInfo,
 	}
 	let p: Params = serde_json::from_value(params)?;
-	Ok(NotificationEnvelope::RosterChanged { event: p.event, process: p.process })
+	Ok(NotificationEnvelope::RosterChanged {
+		event: p.event,
+		process: p.process,
+	})
 }
 
-fn parse_named_results_changed(params: serde_json::Value) -> std::result::Result<NotificationEnvelope, serde_json::Error> {
+fn parse_named_results_changed(
+	params: serde_json::Value,
+) -> std::result::Result<NotificationEnvelope, serde_json::Error> {
 	#[derive(serde::Deserialize)]
 	struct Params {
 		event: NamedResultsEvent,
@@ -633,17 +702,26 @@ fn parse_named_results_changed(params: serde_json::Value) -> std::result::Result
 		metadata: Option<ResultMetadata>,
 	}
 	let p: Params = serde_json::from_value(params)?;
-	Ok(NotificationEnvelope::NamedResultsChanged { event: p.event, name: p.name, metadata: p.metadata })
+	Ok(NotificationEnvelope::NamedResultsChanged {
+		event: p.event,
+		name: p.name,
+		metadata: p.metadata,
+	})
 }
 
-fn parse_shutdown(params: serde_json::Value) -> std::result::Result<NotificationEnvelope, serde_json::Error> {
+fn parse_shutdown(
+	params: serde_json::Value,
+) -> std::result::Result<NotificationEnvelope, serde_json::Error> {
 	#[derive(serde::Deserialize)]
 	struct Params {
 		reason: ShutdownReason,
 		in_seconds: u32,
 	}
 	let p: Params = serde_json::from_value(params)?;
-	Ok(NotificationEnvelope::Shutdown { reason: p.reason, in_seconds: p.in_seconds })
+	Ok(NotificationEnvelope::Shutdown {
+		reason: p.reason,
+		in_seconds: p.in_seconds,
+	})
 }
 
 fn spawn_daemon_with_stderr_capture(
@@ -678,7 +756,11 @@ fn poll_connect_with_backoff(
 				drop(stderr_capture);
 				return DaemonClient::connect_inner(stream);
 			}
-			Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => {}
+			Err(e)
+				if matches!(
+					e.kind(),
+					io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+				) => {}
 			Err(e) => {
 				drop(stderr_capture);
 				return Err(e.into());
@@ -748,10 +830,7 @@ fn resolve_daemon_binary_inner(
 	)))
 }
 
-fn find_on_path(
-	env_lookup: &impl Fn(&str) -> Option<String>,
-	name: &str,
-) -> Option<PathBuf> {
+fn find_on_path(env_lookup: &impl Fn(&str) -> Option<String>, name: &str) -> Option<PathBuf> {
 	let path = env_lookup("PATH")?;
 	for directory in path.split(':').filter(|d| !d.is_empty()) {
 		let candidate = Path::new(directory).join(name);
@@ -814,11 +893,16 @@ mod tests {
 			.open(&second_path)
 			.expect("open second");
 		let acquired = second_file.try_lock_exclusive().expect("try lock");
-		assert!(!acquired, "second lock should not be acquired while first held");
+		assert!(
+			!acquired,
+			"second lock should not be acquired while first held"
+		);
 
 		drop(first);
 
-		let acquired = second_file.try_lock_exclusive().expect("try lock after release");
+		let acquired = second_file
+			.try_lock_exclusive()
+			.expect("try lock after release");
 		assert!(acquired, "second lock should succeed after first released");
 	}
 
@@ -827,7 +911,10 @@ mod tests {
 	}
 
 	fn no_exe() -> io::Result<PathBuf> {
-		Err(io::Error::new(io::ErrorKind::NotFound, "test: no current_exe"))
+		Err(io::Error::new(
+			io::ErrorKind::NotFound,
+			"test: no current_exe",
+		))
 	}
 
 	fn create_executable_stub(path: &Path, body: &str) {
@@ -854,7 +941,10 @@ mod tests {
 		let missing = temp.path().join("missing-montre");
 
 		let result = resolve_daemon_binary_inner(Some(&missing), no_env, no_exe);
-		assert!(matches!(result, Err(DaemonClientError::DaemonBinaryNotFound(_))));
+		assert!(matches!(
+			result,
+			Err(DaemonClientError::DaemonBinaryNotFound(_))
+		));
 	}
 
 	#[test]
@@ -866,7 +956,13 @@ mod tests {
 
 		let result = resolve_daemon_binary_inner(
 			None,
-			|key| if key == MONTRE_BINARY_ENV { Some(binary_string.clone()) } else { None },
+			|key| {
+				if key == MONTRE_BINARY_ENV {
+					Some(binary_string.clone())
+				} else {
+					None
+				}
+			},
 			no_exe,
 		)
 		.unwrap();
@@ -881,10 +977,19 @@ mod tests {
 
 		let result = resolve_daemon_binary_inner(
 			None,
-			|key| if key == MONTRE_BINARY_ENV { Some(missing_string.clone()) } else { None },
+			|key| {
+				if key == MONTRE_BINARY_ENV {
+					Some(missing_string.clone())
+				} else {
+					None
+				}
+			},
 			no_exe,
 		);
-		assert!(matches!(result, Err(DaemonClientError::DaemonBinaryNotFound(_))));
+		assert!(matches!(
+			result,
+			Err(DaemonClientError::DaemonBinaryNotFound(_))
+		));
 	}
 
 	#[test]
@@ -896,7 +1001,13 @@ mod tests {
 
 		let result = resolve_daemon_binary_inner(
 			None,
-			|key| if key == "PATH" { Some(path_string.clone()) } else { None },
+			|key| {
+				if key == "PATH" {
+					Some(path_string.clone())
+				} else {
+					None
+				}
+			},
 			no_exe,
 		)
 		.unwrap();
@@ -911,19 +1022,17 @@ mod tests {
 		let exe_path = temp.path().join("some-other-binary");
 		std::fs::write(&exe_path, "").unwrap();
 
-		let result = resolve_daemon_binary_inner(
-			None,
-			no_env,
-			|| Ok(exe_path.clone()),
-		)
-		.unwrap();
+		let result = resolve_daemon_binary_inner(None, no_env, || Ok(exe_path.clone())).unwrap();
 		assert_eq!(result, sibling_binary);
 	}
 
 	#[test]
 	fn resolve_errors_when_nothing_found() {
 		let result = resolve_daemon_binary_inner(None, no_env, no_exe);
-		assert!(matches!(result, Err(DaemonClientError::DaemonBinaryNotFound(_))));
+		assert!(matches!(
+			result,
+			Err(DaemonClientError::DaemonBinaryNotFound(_))
+		));
 	}
 
 	#[test]
@@ -935,8 +1044,8 @@ mod tests {
 			"#!/bin/sh\necho 'synthetic spawn failure' >&2\nexit 1\n",
 		);
 
-		let stderr_capture = spawn_daemon_with_stderr_capture(&binary, temp.path())
-			.expect("spawn fake daemon");
+		let stderr_capture =
+			spawn_daemon_with_stderr_capture(&binary, temp.path()).expect("spawn fake daemon");
 
 		let unreachable_socket = temp.path().join("never-bound.sock");
 		let result = poll_connect_with_backoff(

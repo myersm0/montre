@@ -272,11 +272,7 @@ impl From<montre_index::LayerKind> for LayerKind {
 					?kind,
 					"unknown montre_index::LayerKind variant; mapping to wire Unknown",
 				);
-				debug_assert!(
-					false,
-					"unknown montre_index::LayerKind variant: {:?}",
-					kind,
-				);
+				debug_assert!(false, "unknown montre_index::LayerKind variant: {:?}", kind,);
 				Self::Unknown
 			}
 		}
@@ -580,12 +576,18 @@ impl RosterFilter {
 			return false;
 		}
 		if !self.provides_any_of.is_empty()
-			&& !self.provides_any_of.iter().any(|k| info.provides.contains(k))
+			&& !self
+				.provides_any_of
+				.iter()
+				.any(|k| info.provides.contains(k))
 		{
 			return false;
 		}
 		if !self.consumes_any_of.is_empty()
-			&& !self.consumes_any_of.iter().any(|k| info.consumes.contains(k))
+			&& !self
+				.consumes_any_of
+				.iter()
+				.any(|k| info.consumes.contains(k))
 		{
 			return false;
 		}

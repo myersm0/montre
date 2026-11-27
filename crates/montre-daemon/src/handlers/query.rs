@@ -2,16 +2,13 @@ use std::sync::Arc;
 
 use montre_query::QueryError;
 
-use crate::dispatch::{
-	parse_params, serialize_reply, state_roundtrip, RpcContext,
-};
+use crate::dispatch::{parse_params, serialize_reply, state_roundtrip, RpcContext};
 use crate::protocol::error_codes;
 use crate::protocol::{
 	Hit, NamedResultEntry, OkReply, ProtocolError, QueryDeleteNamedParams, QueryDiscardParams,
-	QueryExecuteCountReply, QueryExecuteParams, QueryHitsParams,
-	QueryHitsReply, QueryListNamedReply, QueryLoadParams,
-	QueryMaterializeParams, QueryMetadataParams, QuerySaveParams,
-	ResultForm, ResultMetadata,
+	QueryExecuteCountReply, QueryExecuteParams, QueryHitsParams, QueryHitsReply,
+	QueryListNamedReply, QueryLoadParams, QueryMaterializeParams, QueryMetadataParams,
+	QuerySaveParams, ResultForm, ResultMetadata,
 };
 use crate::state::{Command, LoadOutcome, ResultEntry};
 
@@ -23,22 +20,21 @@ fn map_query_error(err: QueryError) -> ProtocolError {
 			ProtocolError::new(error_codes::CQL_PARSE_ERROR, message)
 				.with_data(serde_json::json!({ "position": position }))
 		}
-		QueryError::Regex(e) => ProtocolError::new(
-			error_codes::CQL_PARSE_ERROR,
-			format!("regex error: {}", e),
-		),
-		QueryError::UnknownLayer(name) => ProtocolError::new(
-			error_codes::PLAN_ERROR,
-			format!("unknown layer: {}", name),
-		),
-		QueryError::UnknownLabel(name) => ProtocolError::new(
-			error_codes::PLAN_ERROR,
-			format!("unknown label: {}", name),
-		),
+		QueryError::Regex(e) => {
+			ProtocolError::new(error_codes::CQL_PARSE_ERROR, format!("regex error: {}", e))
+		}
+		QueryError::UnknownLayer(name) => {
+			ProtocolError::new(error_codes::PLAN_ERROR, format!("unknown layer: {}", name))
+		}
+		QueryError::UnknownLabel(name) => {
+			ProtocolError::new(error_codes::PLAN_ERROR, format!("unknown label: {}", name))
+		}
 		err @ (QueryError::UnindexedLayer(_)
 		| QueryError::UnknownSpanLayer(_)
 		| QueryError::UnknownComponent(_)
 		| QueryError::UnknownDocument(_)
+		| QueryError::UnknownAlignment(_)
+		| QueryError::UncomparableLayer(_)
 		| QueryError::QuantifierTooLarge { .. }) => {
 			ProtocolError::new(error_codes::PLAN_ERROR, err.to_string())
 		}
@@ -98,7 +94,10 @@ pub(crate) fn handle_query_hits(
 	if parsed.limit > MAX_HITS_PER_PAGE {
 		return Err(ProtocolError::new(
 			error_codes::PAGE_LIMIT_EXCEEDED,
-			format!("limit {} exceeds maximum {}", parsed.limit, MAX_HITS_PER_PAGE),
+			format!(
+				"limit {} exceeds maximum {}",
+				parsed.limit, MAX_HITS_PER_PAGE
+			),
 		));
 	}
 
@@ -187,15 +186,16 @@ pub(crate) fn handle_query_load(
 
 	match outcome {
 		LoadOutcome::Realized(metadata) => serialize_reply(metadata),
-		LoadOutcome::Pending { handle, cql, created_at } => {
+		LoadOutcome::Pending {
+			handle,
+			cql,
+			created_at,
+		} => {
 			let ast = montre_query::parse(&cql).map_err(stored_query_invalid)?;
 			let plan = montre_query::planner::plan(&ast).map_err(stored_query_invalid)?;
-			let mut results = montre_query::executor::execute_with(
-				&plan,
-				&ctx.handle.corpus,
-				&ctx.handle.limits,
-			)
-			.map_err(stored_query_invalid)?;
+			let mut results =
+				montre_query::executor::execute_with(&plan, &ctx.handle.corpus, &ctx.handle.limits)
+					.map_err(stored_query_invalid)?;
 			results.populate_context(&ctx.handle.corpus);
 			let hits = results.into_hits();
 			let hit_count = hits.len() as u64;
@@ -217,10 +217,7 @@ pub(crate) fn handle_query_load(
 				metadata,
 			});
 
-			state_roundtrip(ctx, |reply| Command::InstallReplayedResult {
-				entry,
-				reply,
-			})?;
+			state_roundtrip(ctx, |reply| Command::InstallReplayedResult { entry, reply })?;
 
 			serialize_reply(reply_metadata)
 		}
@@ -322,7 +319,13 @@ mod tests {
 	#[test]
 	fn query_execute_refuses_a_result_over_the_limit() {
 		with_registered_context(|ctx| {
-			with_limits(ctx, montre_query::Limits { max_results: 1, ..crate::DEFAULT_LIMITS });
+			with_limits(
+				ctx,
+				montre_query::Limits {
+					max_results: 1,
+					..crate::DEFAULT_LIMITS
+				},
+			);
 			let params = serde_json::json!({ "cql": "[pos=\"NOUN\"]" });
 			let err = dispatch_request("query.execute", Some(params.clone()), ctx).unwrap_err();
 			assert_eq!(err.code, error_codes::EXECUTION_ERROR);
@@ -337,7 +340,13 @@ mod tests {
 	#[test]
 	fn query_execute_count_refuses_work_over_the_limit() {
 		with_registered_context(|ctx| {
-			with_limits(ctx, montre_query::Limits { max_expansions: 10, ..crate::DEFAULT_LIMITS });
+			with_limits(
+				ctx,
+				montre_query::Limits {
+					max_expansions: 10,
+					..crate::DEFAULT_LIMITS
+				},
+			);
 			let params = serde_json::json!({ "cql": "[]{1,3} [pos=\"NOUN\"]" });
 			let err = dispatch_request("query.execute_count", Some(params), ctx).unwrap_err();
 			assert_eq!(err.code, error_codes::EXECUTION_ERROR);
@@ -390,8 +399,7 @@ mod tests {
 			let execute_params = serde_json::json!({ "cql": "[pos=\"NOUN\"]" });
 			let execute_result =
 				dispatch_request("query.execute", Some(execute_params), ctx).unwrap();
-			let execute_reply: ResultMetadata =
-				serde_json::from_value(execute_result).unwrap();
+			let execute_reply: ResultMetadata = serde_json::from_value(execute_result).unwrap();
 
 			let hits_params = serde_json::json!({
 				"handle": execute_reply.handle,
@@ -419,8 +427,7 @@ mod tests {
 			let execute_params = serde_json::json!({ "cql": "[pos=\"NOUN\"]" });
 			let execute_result =
 				dispatch_request("query.execute", Some(execute_params), ctx).unwrap();
-			let execute_reply: ResultMetadata =
-				serde_json::from_value(execute_result).unwrap();
+			let execute_reply: ResultMetadata = serde_json::from_value(execute_result).unwrap();
 			assert!(execute_reply.hit_count >= 2);
 
 			let hits_params = serde_json::json!({
@@ -471,8 +478,7 @@ mod tests {
 			let execute_params = serde_json::json!({ "cql": "[pos=\"NOUN\"]" });
 			let execute_result =
 				dispatch_request("query.execute", Some(execute_params), ctx).unwrap();
-			let execute_reply: ResultMetadata =
-				serde_json::from_value(execute_result).unwrap();
+			let execute_reply: ResultMetadata = serde_json::from_value(execute_result).unwrap();
 
 			let params = serde_json::json!({ "handle": execute_reply.handle });
 			let result = dispatch_request("query.metadata", Some(params), ctx).unwrap();
@@ -523,8 +529,7 @@ mod tests {
 	#[test]
 	fn query_save_invalid_handle_returns_1200() {
 		with_registered_context(|ctx| {
-			let params =
-				serde_json::json!({ "handle": "r-nonexistent", "name": "whatever" });
+			let params = serde_json::json!({ "handle": "r-nonexistent", "name": "whatever" });
 			let err = dispatch_request("query.save", Some(params), ctx).unwrap_err();
 			assert_eq!(err.code, error_codes::RESULT_HANDLE_INVALID);
 		});
@@ -661,8 +666,7 @@ mod tests {
 	fn query_discard_named_handle_is_no_op() {
 		with_registered_context(|ctx| {
 			let handle = execute_and_get_handle(ctx);
-			let save_params =
-				serde_json::json!({ "handle": handle.clone(), "name": "persistent" });
+			let save_params = serde_json::json!({ "handle": handle.clone(), "name": "persistent" });
 			dispatch_request("query.save", Some(save_params), ctx).unwrap();
 
 			let params = serde_json::json!({ "handle": handle.clone() });
