@@ -6,7 +6,7 @@ use montre_query::executor::{self, Hit, Results};
 use montre_query::planner::QueryPlan;
 use montre_query::{Limits, Query, QueryError};
 
-use crate::error::{clear_error, set_error, set_query_error};
+use crate::error::{clear_error, contain_panics, set_error, set_query_error};
 use crate::strings::{borrow_cstr, export_array, to_cstring};
 use crate::HitList;
 
@@ -24,7 +24,7 @@ fn wrap_in_component(parsed: Query, component: &str) -> Query {
 	}
 }
 
-// parse, scope to `component` if given, plan and run; failures go to montre_last_error
+// parse, scope to `component` if given, plan and run; failures and panics go to montre_last_error
 unsafe fn run<T>(
 	corpus: *const Corpus,
 	cql: *const c_char,
@@ -32,34 +32,36 @@ unsafe fn run<T>(
 	execute: impl FnOnce(&QueryPlan, &Corpus) -> Result<T, QueryError>,
 ) -> Option<T> {
 	clear_error();
-	if corpus.is_null() {
-		set_error("null corpus".into());
-		return None;
-	}
-	let Some(cql_str) = borrow_cstr(cql) else {
-		set_error("null query string".into());
-		return None;
-	};
-	let Ok(component) = component
-		.map(|name| borrow_cstr(name).ok_or(()))
-		.transpose()
-	else {
-		set_error("null component name".into());
-		return None;
-	};
-	let planned = montre_query::parse(cql_str)
-		.map(|parsed| match component {
-			Some(name) => wrap_in_component(parsed, name),
-			None => parsed,
-		})
-		.and_then(|query| montre_query::planner::plan(&query));
-	match planned.and_then(|plan| execute(&plan, &*corpus)) {
-		Ok(value) => Some(value),
-		Err(error) => {
-			set_query_error(error);
-			None
+	contain_panics(|| {
+		if corpus.is_null() {
+			set_error("null corpus".into());
+			return None;
 		}
-	}
+		let Some(cql_str) = borrow_cstr(cql) else {
+			set_error("null query string".into());
+			return None;
+		};
+		let Ok(component) = component
+			.map(|name| borrow_cstr(name).ok_or(()))
+			.transpose()
+		else {
+			set_error("null component name".into());
+			return None;
+		};
+		let planned = montre_query::parse(cql_str)
+			.map(|parsed| match component {
+				Some(name) => wrap_in_component(parsed, name),
+				None => parsed,
+			})
+			.and_then(|query| montre_query::planner::plan(&query));
+		match planned.and_then(|plan| execute(&plan, &*corpus)) {
+			Ok(value) => Some(value),
+			Err(error) => {
+				set_query_error(error);
+				None
+			}
+		}
+	})
 }
 
 fn limits(max_intermediate_matches: u64, max_expansions: u64, max_results: u64) -> Limits {
