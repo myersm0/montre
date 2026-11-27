@@ -233,6 +233,142 @@ fn count_by_document_with_component_filter() {
 	assert!(stdout.contains("en\tthe_house.conllu\t4"));
 }
 
+// ── restrictions on constrained queries ──
+
+const CONSTRAINED: &str = "a:[] []{0,4} b:[] :: a.upos = b.upos";
+
+fn stdout_of(arguments: &[&str]) -> String {
+	let output = montre().args(arguments).assert().success();
+	String::from_utf8(output.get_output().stdout.clone()).unwrap()
+}
+
+fn hand_restricted_count(restriction: &str) -> String {
+	let c = corpora();
+	let query = CONSTRAINED.replace(" ::", &format!(" {restriction} ::"));
+	stdout_of(&["count", c.multi_path.to_str().unwrap(), &query])
+		.trim()
+		.to_string()
+}
+
+#[test]
+fn component_flag_restricts_a_constrained_query() {
+	let c = corpora();
+	let expected = hand_restricted_count(r#"within component:"fr""#);
+	assert_eq!(expected, "8");
+	let corpus = c.multi_path.to_str().unwrap();
+	let counted = stdout_of(&["count", corpus, CONSTRAINED, "--component", "fr"]);
+	assert_eq!(counted, format!("{expected}\n"));
+	let queried = stdout_of(&[
+		"query",
+		corpus,
+		CONSTRAINED,
+		"--component",
+		"fr",
+		"--count-only",
+	]);
+	assert_eq!(queried, format!("{expected}\n"));
+}
+
+#[test]
+fn document_flag_restricts_a_constrained_query() {
+	let c = corpora();
+	let expected = hand_restricted_count(r#"within doc:"le_chat.conllu""#);
+	assert_eq!(expected, "2");
+	let counted = stdout_of(&[
+		"count",
+		c.multi_path.to_str().unwrap(),
+		CONSTRAINED,
+		"--document",
+		"le_chat.conllu",
+	]);
+	assert_eq!(counted, format!("{expected}\n"));
+}
+
+#[test]
+fn by_component_counts_a_constrained_query() {
+	let c = corpora();
+	let counted = stdout_of(&[
+		"count",
+		c.multi_path.to_str().unwrap(),
+		CONSTRAINED,
+		"--by-component",
+	]);
+	let expected: String = ["en", "fr"]
+		.iter()
+		.map(|name| {
+			let count = hand_restricted_count(&format!(r#"within component:"{name}""#));
+			format!("{name}\t{count}\n")
+		})
+		.collect();
+	assert_eq!(counted, expected);
+}
+
+#[test]
+fn by_document_counts_a_constrained_query() {
+	let c = corpora();
+	let counted = stdout_of(&[
+		"count",
+		c.multi_path.to_str().unwrap(),
+		CONSTRAINED,
+		"--by-document",
+	]);
+	let documents = [
+		("en", "the_cat.conllu"),
+		("en", "the_house.conllu"),
+		("fr", "la_maison.conllu"),
+		("fr", "le_chat.conllu"),
+	];
+	let expected: String = documents
+		.iter()
+		.map(|(component, document)| {
+			let count = hand_restricted_count(&format!(r#"within doc:"{document}""#));
+			format!("{component}\t{document}\t{count}\n")
+		})
+		.collect();
+	assert_eq!(counted, expected);
+}
+
+#[test]
+fn by_component_fails_on_an_unknown_component() {
+	let c = corpora();
+	for components in ["nonexistent", "fr,nonexistent"] {
+		montre()
+			.args([
+				"count",
+				c.multi_path.to_str().unwrap(),
+				r#"[pos="NOUN"]"#,
+				"--by-component",
+				"--component",
+				components,
+			])
+			.assert()
+			.code(1)
+			.stdout("")
+			.stderr(predicate::str::contains("Unknown component: nonexistent"));
+	}
+}
+
+#[test]
+fn an_unknown_document_fails_in_every_mode() {
+	let c = corpora();
+	let corpus = c.multi_path.to_str().unwrap();
+	let modes: [&[&str]; 4] = [
+		&["count"],
+		&["count", "--by-component"],
+		&["count", "--by-document"],
+		&["query"],
+	];
+	for mode in modes {
+		montre()
+			.args(mode)
+			.args([corpus, r#"[pos="NOUN"]"#, "--document", "nonexistent"])
+			.assert()
+			.code(1)
+			.stdout("")
+			.stderr(predicate::str::contains("Document 'nonexistent' not found"));
+	}
+}
+
 // ── components ──
 
 #[test]

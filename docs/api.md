@@ -83,6 +83,8 @@ let results = executor::execute_with(&plan, &corpus, &limits)?;
 let count = executor::execute_count_with(&plan, &corpus, &limits)?;
 ```
 
+To restrict a parsed query to components or documents without editing its text, `montre_query::wrap_in_components(query, names)` and `montre_query::wrap_in_documents(query, names)` add the same restriction as `within component:…` and `within doc:…`, inside any `::` constraint clause. Names are taken as given, so they need no quoting or escaping.
+
 `Limits` has three ceilings: `max_intermediate_matches` (default 10 million), `max_expansions` and `max_results` (both unlimited by default; `u64::MAX` means no limit, and `Limits::unlimited()` sets all three so). A count builds no hits and is not subject to `max_results`. A query that exceeds a ceiling fails with `QueryError::LimitExceeded`, never with a partial result.
 
 ### Working with results

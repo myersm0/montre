@@ -7,7 +7,7 @@ use tracing_subscriber::EnvFilter;
 use montre_build::builder::CorpusBuilder;
 use montre_build::MultiCorpusBuilder;
 use montre_index::{Corpus, InvertedIndex, SpanIndex};
-use montre_query::{Limits, QueryError};
+use montre_query::{wrap_in_components, wrap_in_documents, Limits, Query, QueryError};
 
 #[derive(Parser)]
 #[command(name = "montre")]
@@ -84,7 +84,10 @@ enum Commands {
 		#[arg(long, help = "Group counts by document")]
 		by_document: bool,
 
-		#[arg(long, help = "Group counts by component")]
+		#[arg(
+			long,
+			help = "Group counts by component; the limits apply to each component's count separately"
+		)]
 		by_component: bool,
 
 		#[command(flatten)]
@@ -196,19 +199,77 @@ fn parse_limit(text: &str) -> std::result::Result<u64, String> {
 	}
 }
 
-// a limit failure names the flag that raises it
 fn executed<T>(result: montre_query::Result<T>) -> Result<T> {
-	result.map_err(|error| {
-		let context =
-			match &error {
-				QueryError::LimitExceeded { resource, .. } => {
-					let flag = format!("--max-{}", resource.replace(' ', "-"));
-					format!("Failed to execute query; raise the limit with {flag} <N> or {flag} unlimited")
-				}
-				_ => "Failed to execute query".to_string(),
-			};
-		anyhow::Error::new(error).context(context)
-	})
+	result.map_err(query_failure)
+}
+
+// a limit failure names the flag that raises it
+fn query_failure(error: QueryError) -> anyhow::Error {
+	let context = match &error {
+		QueryError::LimitExceeded { resource, .. } => {
+			let flag = format!("--max-{}", resource.replace(' ', "-"));
+			format!("Failed to execute query; raise the limit with {flag} <N> or {flag} unlimited")
+		}
+		_ => "Failed to execute query".to_string(),
+	};
+	anyhow::Error::new(error).context(context)
+}
+
+fn parsed_query(query: &str) -> Result<Query> {
+	montre_query::parse(query).with_context(|| format!("Failed to parse query: {query}"))
+}
+
+fn planned(query: &Query) -> Result<montre_query::planner::QueryPlan> {
+	montre_query::planner::plan(query).with_context(|| "Failed to plan query")
+}
+
+// --component and --document, checked against the corpus before anything runs
+struct Restriction {
+	components: Vec<String>,
+	documents: Vec<String>,
+}
+
+impl Restriction {
+	fn checked(components: &[String], documents: &[String], corpus: &Corpus) -> Result<Self> {
+		if !corpus.components().is_empty() {
+			let unknown = components
+				.iter()
+				.find(|name| corpus.component(name).is_none());
+			if let Some(name) = unknown {
+				return Err(query_failure(QueryError::UnknownComponent(name.clone())));
+			}
+		}
+		let documents = documents
+			.iter()
+			.map(|name| resolve_document_name(name, corpus.document_names()))
+			.collect::<Result<_>>()?;
+		Ok(Self {
+			components: components.to_vec(),
+			documents,
+		})
+	}
+
+	// a corpus without components has no names to restrict to, so the flag is ignored
+	fn applied_to(&self, query: Query, corpus: &Corpus) -> Query {
+		let in_components = if self.components.is_empty() || corpus.components().is_empty() {
+			query
+		} else {
+			wrap_in_components(query, self.components.clone())
+		};
+		if self.documents.is_empty() {
+			in_components
+		} else {
+			wrap_in_documents(in_components, self.documents.clone())
+		}
+	}
+
+	fn includes_component(&self, name: &str) -> bool {
+		self.components.is_empty() || self.components.iter().any(|component| component == name)
+	}
+
+	fn warn_of_ambiguous_documents(&self, corpus: &Corpus) {
+		warn_document_collision(&self.documents, corpus, self.components.is_empty());
+	}
 }
 
 fn main() -> Result<()> {
@@ -382,29 +443,6 @@ fn component_name_for_document(corpus: &Corpus, doc_index: usize) -> &str {
 		.unwrap_or_else(|| corpus.name())
 }
 
-fn build_full_query(
-	query: &str,
-	components: &[String],
-	documents: &[String],
-	corpus: &Corpus,
-) -> Result<String> {
-	let mut full_query = query.to_string();
-	if !components.is_empty() && !corpus.components().is_empty() {
-		let names: Vec<String> = components.iter().map(|c| format!("\"{}\"", c)).collect();
-		full_query = format!("{} within component:{}", full_query, names.join(","));
-	}
-	if !documents.is_empty() {
-		let resolved: Vec<String> = documents
-			.iter()
-			.map(|d| resolve_document_name(d, corpus.document_names()))
-			.collect::<Result<_>>()?;
-		warn_document_collision(&resolved, corpus, components.is_empty());
-		let names: Vec<String> = resolved.iter().map(|d| format!("\"{}\"", d)).collect();
-		full_query = format!("{} within doc:{}", full_query, names.join(","));
-	}
-	Ok(full_query)
-}
-
 fn warn_document_collision(resolved_names: &[String], corpus: &Corpus, no_component_filter: bool) {
 	if !no_component_filter || !corpus.is_multi_component() {
 		return;
@@ -440,15 +478,15 @@ fn cmd_query(
 	let corpus = montre_index::open(&corpus_path)
 		.with_context(|| format!("Failed to open corpus: {}", corpus_path.display()))?;
 
-	let full_query = build_full_query(&query, &components, &documents, &corpus)?;
-
 	let parse_start = Instant::now();
-	let parsed = montre_query::parse(&full_query)
-		.with_context(|| format!("Failed to parse query: {}", full_query))?;
+	let parsed = parsed_query(&query)?;
 	let parse_time = parse_start.elapsed();
 
+	let restriction = Restriction::checked(&components, &documents, &corpus)?;
+	restriction.warn_of_ambiguous_documents(&corpus);
+
 	let plan_start = Instant::now();
-	let plan = montre_query::planner::plan(&parsed).with_context(|| "Failed to plan query")?;
+	let plan = planned(&restriction.applied_to(parsed, &corpus))?;
 	let plan_time = plan_start.elapsed();
 
 	if count_only {
@@ -515,17 +553,20 @@ fn cmd_count(
 	let corpus = montre_index::open(&corpus_path)
 		.with_context(|| format!("Failed to open corpus: {}", corpus_path.display()))?;
 
+	let parsed = parsed_query(&query)?;
+	let restriction = Restriction::checked(&components, &documents, &corpus)?;
+
 	if by_document {
-		return cmd_count_by_document(&corpus, &query, &components, &documents, &limits);
+		restriction.warn_of_ambiguous_documents(&corpus);
+		let plan = planned(&restriction.applied_to(parsed, &corpus))?;
+		return cmd_count_by_document(&corpus, &plan, &restriction, &limits);
 	}
 	if by_component {
-		return cmd_count_by_component(&corpus, &query, &components, &documents, &limits);
+		return cmd_count_by_component(&corpus, &parsed, &restriction, &limits);
 	}
 
-	let full_query = build_full_query(&query, &components, &documents, &corpus)?;
-	let parsed = montre_query::parse(&full_query)
-		.with_context(|| format!("Failed to parse query: {}", full_query))?;
-	let plan = montre_query::planner::plan(&parsed).with_context(|| "Failed to plan query")?;
+	restriction.warn_of_ambiguous_documents(&corpus);
+	let plan = planned(&restriction.applied_to(parsed, &corpus))?;
 	let total = executed(montre_query::executor::execute_count_with(
 		&plan, &corpus, &limits,
 	))?;
@@ -535,16 +576,11 @@ fn cmd_count(
 
 fn cmd_count_by_document(
 	corpus: &Corpus,
-	query: &str,
-	components: &[String],
-	documents: &[String],
+	plan: &montre_query::planner::QueryPlan,
+	restriction: &Restriction,
 	limits: &Limits,
 ) -> Result<()> {
-	let full_query = build_full_query(query, components, documents, corpus)?;
-	let parsed = montre_query::parse(&full_query)
-		.with_context(|| format!("Failed to parse query: {}", full_query))?;
-	let plan = montre_query::planner::plan(&parsed).with_context(|| "Failed to plan query")?;
-	let mut results = executed(montre_query::executor::execute_with(&plan, corpus, limits))?;
+	let mut results = executed(montre_query::executor::execute_with(plan, corpus, limits))?;
 
 	results.populate_context(corpus);
 
@@ -557,70 +593,51 @@ fn cmd_count_by_document(
 		}
 	}
 
-	let doc_indices: Vec<usize> = if documents.is_empty() {
+	let doc_indices: Vec<usize> = if restriction.documents.is_empty() {
 		(0..doc_names.len()).collect()
 	} else {
-		let resolved: Vec<String> = documents
-			.iter()
-			.map(|d| resolve_document_name(d, doc_names))
-			.collect::<Result<_>>()?;
-		corpus.document_indices_by_name(&resolved)
+		corpus.document_indices_by_name(&restriction.documents)
 	};
 
 	for idx in doc_indices {
 		let comp_name = component_name_for_document(corpus, idx);
-		if !components.is_empty() && !components.iter().any(|c| c == comp_name) {
-			continue;
+		if restriction.includes_component(comp_name) {
+			println!("{}\t{}\t{}", comp_name, &doc_names[idx], counts[idx]);
 		}
-		println!("{}\t{}\t{}", comp_name, &doc_names[idx], counts[idx]);
 	}
 
 	Ok(())
 }
 
+// each component's count runs on its own, with its own limits
 fn cmd_count_by_component(
 	corpus: &Corpus,
-	query: &str,
-	components: &[String],
-	documents: &[String],
+	query: &Query,
+	restriction: &Restriction,
 	limits: &Limits,
 ) -> Result<()> {
-	let comp_list: Vec<(&str, (usize, usize))> = if corpus.components().is_empty() {
-		vec![(corpus.name(), (0, corpus.document_names().len()))]
+	let comp_names: Vec<&str> = if corpus.components().is_empty() {
+		vec![corpus.name()]
 	} else {
 		corpus
 			.components()
 			.iter()
-			.map(|c| (c.name.as_str(), c.document_range))
+			.map(|c| c.name.as_str())
 			.collect()
 	};
 
-	for (comp_name, _range) in &comp_list {
-		if !components.is_empty() && !components.iter().any(|c| c == comp_name) {
+	for comp_name in comp_names {
+		if !restriction.includes_component(comp_name) {
 			continue;
 		}
-
-		let mut full = if corpus.components().is_empty() {
-			query.to_string()
-		} else {
-			format!("{} within component:\"{}\"", query, comp_name)
+		let in_component = Restriction {
+			components: vec![comp_name.to_string()],
+			documents: restriction.documents.clone(),
 		};
-		if !documents.is_empty() {
-			let resolved: Vec<String> = documents
-				.iter()
-				.map(|d| resolve_document_name(d, corpus.document_names()))
-				.collect::<Result<_>>()?;
-			let names: Vec<String> = resolved.iter().map(|d| format!("\"{}\"", d)).collect();
-			full = format!("{} within doc:{}", full, names.join(","));
-		}
-
-		let parsed = montre_query::parse(&full)
-			.with_context(|| format!("Failed to parse query: {}", full))?;
-		let plan = montre_query::planner::plan(&parsed).with_context(|| "Failed to plan query")?;
+		let plan = planned(&in_component.applied_to(query.clone(), corpus))?;
 		let count = executed(montre_query::executor::execute_count_with(
 			&plan, corpus, limits,
 		))?;
-
 		println!("{}\t{}", comp_name, count);
 	}
 

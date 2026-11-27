@@ -8,7 +8,7 @@ mod validate;
 
 use thiserror::Error;
 
-pub use ast::Query;
+pub use ast::{wrap_in_components, wrap_in_documents, Query};
 pub use budget::Limits;
 pub use executor::Results;
 

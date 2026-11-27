@@ -4,25 +4,11 @@ use std::ptr;
 use montre_index::{Corpus, SpanIndex};
 use montre_query::executor::{self, Hit, Results};
 use montre_query::planner::QueryPlan;
-use montre_query::{Limits, Query, QueryError};
+use montre_query::{Limits, QueryError};
 
 use crate::error::{clear_error, contain_panics, set_error, set_query_error};
 use crate::strings::{borrow_cstr, export_array, to_cstring};
 use crate::HitList;
-
-fn wrap_in_component(parsed: Query, component: &str) -> Query {
-	let components = vec![component.to_string()];
-	match parsed {
-		Query::Constrained { inner, constraints } => Query::Constrained {
-			inner: Box::new(Query::WithinComponent { inner, components }),
-			constraints,
-		},
-		other => Query::WithinComponent {
-			inner: Box::new(other),
-			components,
-		},
-	}
-}
 
 // parse, scope to `component` if given, plan and run; failures and panics go to montre_last_error
 unsafe fn run<T>(
@@ -50,7 +36,7 @@ unsafe fn run<T>(
 		};
 		let planned = montre_query::parse(cql_str)
 			.map(|parsed| match component {
-				Some(name) => wrap_in_component(parsed, name),
+				Some(name) => montre_query::wrap_in_components(parsed, vec![name.to_string()]),
 				None => parsed,
 			})
 			.and_then(|query| montre_query::planner::plan(&query));
