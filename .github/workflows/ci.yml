@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --workspace
+      - run: cargo test --workspace --locked
 
   lint:
     runs-on: ubuntu-latest
