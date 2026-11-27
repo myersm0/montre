@@ -643,14 +643,37 @@ unsafe fn open_single_component() -> *mut montre_index::Corpus {
 	corpus
 }
 
-unsafe fn starts(hits: *mut HitList) -> Vec<u64> {
+unsafe fn open_two_components() -> *mut montre_index::Corpus {
+	let (_, manifest_path) = write_multi_component_dirs();
+	let output_dir = temp_path("corpus_limits_multi");
+	let manifest = cstr(manifest_path.to_str().unwrap());
+	let output = cstr(output_dir.to_str().unwrap());
+	let rc = montre_build_manifest(manifest.as_ptr(), output.as_ptr(), 0, 0);
+	assert_eq!(rc, 1, "build failed: {:?}", read_last_error());
+	let corpus = montre_corpus_open(output.as_ptr());
+	assert!(!corpus.is_null(), "open failed: {:?}", read_last_error());
+	corpus
+}
+
+unsafe fn spans(hits: *mut HitList) -> Vec<(u64, u64)> {
 	assert!(!hits.is_null(), "query failed: {:?}", read_last_error());
-	let starts = (0..montre_hitlist_len(hits))
-		.map(|i| montre_hit_start(hits, i))
+	let spans = (0..montre_hitlist_len(hits))
+		.map(|i| (montre_hit_start(hits, i), montre_hit_end(hits, i)))
 		.collect();
 	montre_hitlist_free(hits);
-	starts
+	spans
 }
+
+fn within_component_by_hand(query: &str, component: &str) -> String {
+	let restriction = format!("within component:{component}");
+	match query.split_once(" :: ") {
+		Some((pattern, constraints)) => format!("{pattern} {restriction} :: {constraints}"),
+		None => format!("{query} {restriction}"),
+	}
+}
+
+const AMBIGUOUS: &str = "[]{1,3}";
+const CONSTRAINED: &str = "a:[] []* b:[] :: a.upos = b.upos";
 
 #[test]
 fn default_limits_are_the_engine_defaults() {
@@ -671,9 +694,9 @@ fn default_limits_are_the_engine_defaults() {
 #[test]
 fn query_over_a_limit_sets_the_limit_kind() {
 	unsafe {
-		let corpus = open_single_component();
-		let ambiguous = cstr("[]{1,3}");
-		let component = cstr("test_single");
+		let corpus = open_two_components();
+		let ambiguous = cstr(AMBIGUOUS);
+		let component = cstr("fr");
 		let unlimited = u64::MAX;
 
 		let total = montre_query_count(corpus, ambiguous.as_ptr());
@@ -718,50 +741,84 @@ fn query_over_a_limit_sets_the_limit_kind() {
 		);
 		assert_eq!(montre_last_error_kind(), KIND_LIMIT_EXCEEDED);
 
-		// raised, the same query gives what the functions without limits give
-		let expected = starts(montre_query(corpus, ambiguous.as_ptr()));
-		assert_eq!(expected.len() as i64, total);
-		assert_eq!(
-			starts(montre_query_with_limits(
-				corpus,
-				ambiguous.as_ptr(),
-				unlimited,
-				unlimited,
-				unlimited
-			)),
-			expected
-		);
-		assert_eq!(montre_last_error_kind(), KIND_NONE);
-		assert_eq!(
-			starts(montre_query_in_component_with_limits(
-				corpus,
-				ambiguous.as_ptr(),
-				component.as_ptr(),
-				unlimited,
-				unlimited,
-				unlimited,
-			)),
-			expected
-		);
-		assert_eq!(
-			montre_query_count_with_limits(corpus, ambiguous.as_ptr(), 1000, 1000, 0),
-			total
-		);
-		assert_eq!(
-			montre_query_count_in_component_with_limits(
-				corpus,
-				ambiguous.as_ptr(),
-				component.as_ptr(),
-				unlimited,
-				unlimited,
-				unlimited,
-			),
-			total
-		);
-		assert_eq!(
-			montre_query_count_in_component(corpus, ambiguous.as_ptr(), component.as_ptr()),
-			total
-		);
+		montre_corpus_close(corpus);
+	}
+}
+
+#[test]
+fn raised_limits_give_what_the_functions_without_limits_give() {
+	unsafe {
+		let corpus = open_two_components();
+		let unlimited = u64::MAX;
+		let (fr, en) = (cstr("fr"), cstr("en"));
+
+		for query in [AMBIGUOUS, CONSTRAINED] {
+			let cql = cstr(query);
+			let everywhere = spans(montre_query(corpus, cql.as_ptr()));
+			assert_eq!(
+				spans(montre_query_with_limits(
+					corpus,
+					cql.as_ptr(),
+					unlimited,
+					unlimited,
+					unlimited
+				)),
+				everywhere,
+				"{query}"
+			);
+			assert_eq!(montre_last_error_kind(), KIND_NONE);
+			assert_eq!(
+				montre_query_count_with_limits(corpus, cql.as_ptr(), 1000, 1000, 0),
+				everywhere.len() as i64,
+				"{query}"
+			);
+
+			let in_fr = spans(montre_query_in_component(corpus, cql.as_ptr(), fr.as_ptr()));
+			let by_hand = cstr(&within_component_by_hand(query, "fr"));
+			assert_eq!(
+				in_fr,
+				spans(montre_query(corpus, by_hand.as_ptr())),
+				"{query}"
+			);
+			assert_eq!(
+				spans(montre_query_in_component_with_limits(
+					corpus,
+					cql.as_ptr(),
+					fr.as_ptr(),
+					unlimited,
+					unlimited,
+					unlimited,
+				)),
+				in_fr,
+				"{query}"
+			);
+			assert_eq!(
+				montre_query_count_in_component_with_limits(
+					corpus,
+					cql.as_ptr(),
+					fr.as_ptr(),
+					unlimited,
+					unlimited,
+					unlimited,
+				),
+				in_fr.len() as i64,
+				"{query}"
+			);
+			assert_eq!(
+				montre_query_count_in_component(corpus, cql.as_ptr(), fr.as_ptr()),
+				in_fr.len() as i64,
+				"{query}"
+			);
+
+			let in_en = spans(montre_query_in_component(corpus, cql.as_ptr(), en.as_ptr()));
+			assert!(!in_fr.is_empty() && !in_en.is_empty(), "{query}");
+			assert!(in_fr.iter().all(|span| !in_en.contains(span)), "{query}");
+			let mut either = [in_fr, in_en].concat();
+			either.sort_unstable();
+			let mut everywhere = everywhere;
+			everywhere.sort_unstable();
+			assert_eq!(either, everywhere, "{query}");
+		}
 
 		montre_corpus_close(corpus);
 	}
