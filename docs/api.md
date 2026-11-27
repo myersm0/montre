@@ -370,6 +370,8 @@ QueryError::UnknownSpanLayer(String)
 QueryError::UnknownComponent(String)
 QueryError::UnknownDocument(String)
 QueryError::UnknownLabel(String)
+QueryError::UnknownAlignment(String)
+QueryError::UncomparableLayer(String)   // a constraint compares a layer that does not hold strings
 QueryError::QuantifierTooLarge { bound, limit }
 QueryError::LimitExceeded { resource, limit }
 QueryError::Execution(String)
@@ -425,7 +427,7 @@ void montre_u64_array_free(uint64_t *arr, uint64_t len);
 | none | 0 | no error recorded |
 | other | 1 | null arguments, I/O and index errors, build errors, internal execution errors, panics in the query and count functions |
 | query parse | 2 | CQL syntax errors and invalid regular expressions (`QueryError::Parse`, `QueryError::Regex`) |
-| query invalid | 3 | a well-formed query the corpus cannot answer: an unknown or unindexed layer, span layer, component, document or label, or a quantifier bound above 100 |
+| query invalid | 3 | a well-formed query the corpus cannot answer: an unknown or unindexed layer, an unknown span layer, component, document, alignment or label, a constraint comparing a layer that does not hold strings, or a quantifier bound above 100 |
 | limit exceeded | 4 | `QueryError::LimitExceeded`: the query needs more than one of its limits allows |
 
 A panic inside one of the query or count functions (`montre_query`, `montre_query_count` and their `_in_component` and `_with_limits` variants) is caught before it reaches the caller: the function returns NULL or -1 and records kind 1, with a message that starts `internal error: ` and carries the panic message. Montre's default panic hook also prints the panic to standard error. The other functions do not catch panics yet, and a panic in one of them aborts the host process.

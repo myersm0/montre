@@ -192,6 +192,38 @@ fn client_protocol_errors_are_typed() {
 }
 
 #[test]
+fn queries_the_corpus_cannot_answer_are_plan_errors() {
+	let (_fx, mut client) = client();
+	register(&mut client);
+
+	let invalid = [
+		("[] =nonexistent=>", "Unknown alignment: nonexistent"),
+		(
+			"a:[] b:[] :: a.head = b.head",
+			"Layer 'head' does not hold strings and cannot be compared in a constraint",
+		),
+	];
+	for (cql, message) in invalid {
+		let params = || QueryExecuteParams {
+			cql: cql.to_string(),
+		};
+		let errors = [
+			client.query_execute(params()).unwrap_err(),
+			client.query_execute_count(params()).unwrap_err(),
+		];
+		for err in errors {
+			match err {
+				DaemonClientError::Protocol(protocol) => {
+					assert_eq!(protocol.code, error_codes::PLAN_ERROR, "{cql}");
+					assert_eq!(protocol.message, message);
+				}
+				other => panic!("expected protocol error, got {other:?}"),
+			}
+		}
+	}
+}
+
+#[test]
 fn client_receives_roster_notifications() {
 	let fx = boot_daemon();
 	let mut watcher = DaemonClient::connect(&fx.socket).expect("watcher connect");

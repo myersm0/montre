@@ -529,7 +529,7 @@ Run a query, returning the `ResultMetadata` of the new (unnamed, session-form) r
 
 **Result**: `ResultMetadata`
 
-**Errors**: `1100` (parse error), `1101` (plan error), `1102` (execution error). A query that exceeds one of the daemon's limits (hits returned, expansions performed, or intermediate matches held) fails with `1102`, and its message names the limit; no partial result is stored. `query.execute_count` is not subject to the limit on hits. The limits are fixed when the daemon starts: `montre serve` takes `--max-intermediate-matches`, `--max-expansions` and `--max-results` (each a number or `unlimited`), and a daemon spawned automatically by a client uses the defaults (10 million, 1 billion and 5 million).
+**Errors**: `1100` (parse error), `1101` (plan error), `1102` (execution error). `1101` covers every well-formed query the corpus cannot answer: an unknown or unindexed layer, an unknown span layer, component, document, alignment or label, a constraint comparing a layer that does not hold strings, or a quantifier bound above 100. A query that exceeds one of the daemon's limits (hits returned, expansions performed, or intermediate matches held) fails with `1102`, and its message names the limit; no partial result is stored. `query.execute_count` is not subject to the limit on hits. The limits are fixed when the daemon starts: `montre serve` takes `--max-intermediate-matches`, `--max-expansions` and `--max-results` (each a number or `unlimited`), and a daemon spawned automatically by a client uses the defaults (10 million, 1 billion and 5 million).
 
 #### `query.execute_count`
 

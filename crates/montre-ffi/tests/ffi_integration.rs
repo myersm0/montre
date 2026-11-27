@@ -789,6 +789,19 @@ fn other_errors_have_their_own_kinds() {
 		assert_eq!(montre_last_error_kind(), KIND_QUERY_INVALID);
 		assert_eq!(read_last_error().unwrap(), "Unknown layer: nosuchlayer");
 
+		let unknown_alignment = cstr("[] =nonexistent=>");
+		assert!(montre_query(corpus, unknown_alignment.as_ptr()).is_null());
+		assert_eq!(montre_last_error_kind(), KIND_QUERY_INVALID);
+		assert_eq!(read_last_error().unwrap(), "Unknown alignment: nonexistent");
+
+		let uncomparable = cstr("a:[] b:[] :: a.head = b.head");
+		assert_eq!(montre_query_count(corpus, uncomparable.as_ptr()), -1);
+		assert_eq!(montre_last_error_kind(), KIND_QUERY_INVALID);
+		assert_eq!(
+			read_last_error().unwrap(),
+			"Layer 'head' does not hold strings and cannot be compared in a constraint"
+		);
+
 		let any = cstr("[]");
 		let nowhere = cstr("nowhere");
 		assert_eq!(

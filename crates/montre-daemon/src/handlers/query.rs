@@ -33,6 +33,8 @@ fn map_query_error(err: QueryError) -> ProtocolError {
 		| QueryError::UnknownSpanLayer(_)
 		| QueryError::UnknownComponent(_)
 		| QueryError::UnknownDocument(_)
+		| QueryError::UnknownAlignment(_)
+		| QueryError::UncomparableLayer(_)
 		| QueryError::QuantifierTooLarge { .. }) => {
 			ProtocolError::new(error_codes::PLAN_ERROR, err.to_string())
 		}

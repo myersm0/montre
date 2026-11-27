@@ -1136,8 +1136,8 @@ montre build -i data/ -o idx/ --strict
 ### Query errors
 
 - Parse errors: report position and expected tokens
-- Plan errors: unsupported constructs flagged at planning time
-- Execution errors: layer not found, index corruption
+- Invalid queries: names the corpus does not have (layer, span layer, component, document, alignment, label), unindexed layers, constraints comparing a layer that does not hold strings, and quantifier bounds above 100, all reported before execution
+- Execution errors: exceeded limits and internal failures
 
 ## Adding new input formats
 

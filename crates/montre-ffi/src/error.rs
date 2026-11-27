@@ -29,6 +29,8 @@ impl From<&QueryError> for ErrorKind {
 			| QueryError::UnknownComponent(_)
 			| QueryError::UnknownDocument(_)
 			| QueryError::UnknownLabel(_)
+			| QueryError::UnknownAlignment(_)
+			| QueryError::UncomparableLayer(_)
 			| QueryError::QuantifierTooLarge { .. } => ErrorKind::QueryInvalid,
 			QueryError::LimitExceeded { .. } => ErrorKind::LimitExceeded,
 			QueryError::Execution(_) => ErrorKind::Other,
